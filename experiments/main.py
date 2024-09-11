@@ -6,11 +6,11 @@ import vectopic as vp
 
 def main():
 
-    docs_df = pd.read_parquet('./data/canada_comments_filtered_2022-07.parquet.gzip')
-    docs = docs_df['body'].tolist()
+    docs_df = pd.read_csv('./data/sample_comments.csv')
+    docs = docs_df['text'].tolist()
 
     vector = vp.Vector('favor', 'against')
-    model = vp.VectorTopic(vector)
+    model = vp.VectorTopic(vector, method='llm')
 
     topics, proj = model.fit_transform(docs)
 

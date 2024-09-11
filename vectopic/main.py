@@ -1,10 +1,7 @@
 from bertopic import BERTopic
-from bertopic.representation import TextGeneration
-from bertopic.representation._utils import truncate_document
-from ctransformers import AutoModelForCausalLM
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, pipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from tqdm import tqdm
 import torch
 
@@ -21,16 +18,16 @@ Based on the information about the topic above, please create a short label of t
 <|assistant|>"""
 
 
-def get_generator(num_gpu_layers=10):
-    # Set gpu_layers to the number of layers to offload to GPU. Set to 0 if no GPU acceleration is available on your system.
+def get_generator():
+    quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct", trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        "TheBloke/zephyr-7B-alpha-GGUF",
-        model_file="zephyr-7b-alpha.Q4_K_M.gguf",
-        model_type="mistral",
-        gpu_layers=num_gpu_layers,
-        hf=True
+        "microsoft/Phi-3-mini-4k-instruct",
+        device_map="auto",
+        quantization_config=quantization_config,
+        trust_remote_code=True
     )
-    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceH4/zephyr-7b-alpha")
 
     # Pipeline
     return model, tokenizer
@@ -97,28 +94,48 @@ class VectorTopic:
         self.vector = vector
         self.method = method
 
+        self.model, self.tokenizer = get_generator()
+
+    def _ask_llm_differences(self, docs):
+        prompt = f"""What is the main difference by which these documents {self.vector.sent_a} or {self.vector.sent_b}?
+        {docs}"""
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
+        num_samples = 3
+        outputs = self.model.generate(input_ids, max_new_tokens=20, do_sample=True, num_return_sequences=num_samples, pad_token_id=self.tokenizer.eos_token_id)
+        ngrams = [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+        return ngrams
+    
+    def _ask_llm_score(self, ngram, docs):
+        prompt = f"""Targeted towards {ngram}, is the preceeding text more likely to be {self.vector.sent_a} or {self.vector.sent_b}?"""
+        return get_prompt_response_probs(prompt, docs, self.model, self.tokenizer, self.vector.sent_a, self.vector.sent_b)
+
     def fit_transform(self, docs, embeddings=None):
-        if self.method == 1:
+        # could also compute generalized stance (i.e. sentiment), then find vector
+        # then use steering vector to find the difference along the vector
+        # https://www.lesswrong.com/posts/ndyngghzFY388Dnew/implementing-activation-steering
+
+        # the same idea more fleshed out for evaluation 
+        # https://arjunbansal.substack.com/p/llms-know-more-than-what-they-say
+        if self.method == 'llm':
             if embeddings is None:
                 embeddings = get_embeddings(docs)
 
-            model, tokenizer = get_generator()
-
-            representation_model = {"ngrams": NGramGeneration(model, tokenizer)}
-            topic_model = BERTopic(representation_model=representation_model)
+            topic_model = BERTopic()
             topics, probs = topic_model.fit_transform(docs, embeddings=embeddings)
             topic_info = topic_model.get_topic_info()
 
             for idx, topic in topic_info.iterrows():
-                ngrams = topic['ngrams']
+                # prompt LLM with sample of docs, and ask for suggestions of disagreement
+                ngrams = self._ask_llm_differences(topic['Representative_Docs'])
                 topic_id = topic['id']
                 topic_docs = [docs[i] for i in range(len(docs)) if topics[i] == topic_id]
                 ngram_probs = []
                 means = []
                 vars = []
                 for ngram in ngrams:
-                    
-
+                    # calculate probability of doc along vector
+                    # prompt LLM with target and docs, use token probs as scalar along vector
+                    probs = self._ask_llm_score(ngram, topic_docs)
                     ngram_probs.append(probs)
                     means.append(np.mean(probs))
                     vars.append(np.var(probs))
@@ -128,6 +145,45 @@ class VectorTopic:
                 topic_info.at[idx, 'ngram_vars'] = vars
 
             return topic_info
+        
+        if self.method == 'steeringvectors':
+            if embeddings is None:
+                embeddings = get_embeddings(docs)
+
+            model, tokenizer = get_generator()
+
+            # TODO potentially use other topic modelling allowing doc to have multiple topics
+            # or use probs to allow docs to fit into multiple topics
+            topic_model = BERTopic()
+            topics, probs = topic_model.fit_transform(docs, embeddings=embeddings)
+            topic_info = topic_model.get_topic_info()
+
+            for idx, topic in topic_info.iterrows():
+                # get generic vector, check projections of docs along that vector
+                # then for multiple points in the space, take the mean difference vector, and use that as a steering vector
+                # to produce generations of suggestions for ngrams
+                ngrams = ask_llm(topic['representative_docs'])
+                topic_id = topic['id']
+                topic_docs = [docs[i] for i in range(len(docs)) if topics[i] == topic_id]
+                ngram_probs = []
+                means = []
+                vars = []
+                for ngram in ngrams:
+                    # calculate probability of doc along vector
+                    # https://arjunbansal.substack.com/p/llms-know-more-than-what-they-say
+                    # get ngram specific target vector, and check projection of doc activations along that vector
+                    probs = ask_llm(ngram, topic_docs)
+                    ngram_probs.append(probs)
+                    means.append(np.mean(probs))
+                    vars.append(np.var(probs))
+
+                topic_info.at[idx, 'ngram_probs'] = ngram_probs
+                topic_info.at[idx, 'ngram_means'] = means
+                topic_info.at[idx, 'ngram_vars'] = vars
+
+            return topic_info
+        else:
+            raise ValueError(f"Method '{self.method}' not implemented")
                 
 
 
