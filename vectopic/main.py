@@ -1,10 +1,10 @@
 from bertopic import BERTopic
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from tqdm import tqdm
 import torch
 
+from vectopic import llms
 from vectopic.ngram_gen import NGramGeneration
 
 keyword_prompt = """<|system|>You are a helpful, respectful and honest assistant for labeling topics..</s>
@@ -18,19 +18,7 @@ Based on the information about the topic above, please create a short label of t
 <|assistant|>"""
 
 
-def get_generator():
-    quantization_config = BitsAndBytesConfig(load_in_4bit=True)
 
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct", trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        "microsoft/Phi-3-mini-4k-instruct",
-        device_map="auto",
-        quantization_config=quantization_config,
-        trust_remote_code=True
-    )
-
-    # Pipeline
-    return model, tokenizer
 
 def get_embeddings(docs):
     model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -90,19 +78,19 @@ class Vector:
         self.sent_b = sent_b
 
 class VectorTopic:
-    def __init__(self, vector, method=None):
+    def __init__(self, vector, method=None, llm_lib='ctransformers', llm_config={}):
         self.vector = vector
         self.method = method
 
-        self.model, self.tokenizer = get_generator()
+        self.llm_lib = llm_lib
+        self.llm_config = llm_config
+
+        self.generator = self.get_generator()
 
     def _ask_llm_differences(self, docs):
         prompt = f"""What is the main difference by which these documents {self.vector.sent_a} or {self.vector.sent_b}?
         {docs}"""
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
-        num_samples = 3
-        outputs = self.model.generate(input_ids, max_new_tokens=20, do_sample=True, num_return_sequences=num_samples, pad_token_id=self.tokenizer.eos_token_id)
-        ngrams = [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+        self.generator.generate(prompt, max_new_tokens=100, num_samples=3)
         return ngrams
     
     def _ask_llm_score(self, ngram, docs):
@@ -185,6 +173,12 @@ class VectorTopic:
         else:
             raise ValueError(f"Method '{self.method}' not implemented")
                 
-
+    def get_generator(self):
+        if self.llm_lib == 'transformers':
+            return llms.Transformers(self.llm_config)
+        elif self.llm_lib == 'llamacpp':
+            return llms.LlamaCppPython(self.llm_config)
+        else:
+            raise ValueError(f"LLM library '{self.llm_lib}' not implemented")
 
                 
