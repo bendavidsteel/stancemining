@@ -6,8 +6,8 @@ import vectopic as vp
 
 def main():
 
-    docs_df = pd.read_csv('./data/sample_comments.csv')
-    docs = docs_df['text'].tolist()
+    docs_df = pd.read_csv('./data/semeval_sample.csv')
+    docs = docs_df['Tweet'].tolist()
 
     llm_config = {
         'num_gpu_layers': 10
