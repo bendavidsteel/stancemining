@@ -9,16 +9,18 @@ def main():
     docs_df = pd.read_csv('./data/sample_comments.csv')
     docs = docs_df['text'].tolist()
 
-    llm_config = {
-        'num_gpu_layers': 10
-    }
-
     vector = vp.Vector('favor', 'against')
-    model = vp.VectorTopic(vector, method='llm', llm_lib='ctransformers', llm_config=llm_config)
+    model = vp.VectorTopic(
+        vector, 
+        method='llm', 
+        model_lib='transformers', 
+        model_name='microsoft/Phi-3.5-mini-instruct',
+        model_kwargs={'device_map': 'auto'}
+    )
 
-    topics, proj = model.fit_transform(docs)
+    topic_info = model.fit_transform(docs, bertopic_kwargs={'min_topic_size': 4})
 
-    topic_info_df = model.topic_info()
+    print(topic_info)
 
 if __name__ == '__main__':
     main()

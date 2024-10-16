@@ -1,4 +1,6 @@
-
+import torch
+import tqdm
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 class BaseLLM:
     def __init__(self, model_name):
@@ -7,39 +9,69 @@ class BaseLLM:
     def generate(self, prompt, max_new_tokens=100, num_samples=3):
         raise NotImplementedError
     
-class LlamaCppPython(BaseLLM):
-    def __init__(self):
-        from llama_cpp import Llama
-        self.llm = Llama.from_pretrained(
-            repo_id="Qwen/Qwen2-0.5B-Instruct-GGUF",
-            filename="*q8_0.gguf",
-            verbose=False
-        )
-
-    def generate(self, prompt, max_new_tokens=100, num_samples=3):
-        output = self.llm(
-            prompt, # Prompt
-            max_tokens=max_new_tokens, # Generate up to 32 tokens, set to None to generate up to the end of the context window
-            stop=["Q:", "\n"], # Stop generating just before the model would generate a new question
-            echo=False # Echo the prompt back in the output
-        ) # Generate a completion, can also call create_completion)
-        return output
     
 class Transformers(BaseLLM):
-    def __init__(self, model_name):
+    def __init__(self, model_name, model_kwargs={}, tokenizer_kwargs={}):
         super().__init__(model_name)
-        from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-        quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-
-        self.tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct", trust_remote_code=True)
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(
-            "microsoft/Phi-3-mini-4k-instruct",
-            device_map="auto",
-            quantization_config=quantization_config,
-            trust_remote_code=True
+            model_name,
+            **model_kwargs
         )
     
     def generate(self, prompt, max_new_tokens=100, num_samples=3):
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
-        outputs = self.model.generate(input_ids, max_new_tokens=max_new_tokens, num_return_sequences=num_samples, do_sample=True)
-        return [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+        conversation = [
+            {'role': 'user', 'content': prompt}
+        ]
+        inputs = self.tokenizer.apply_chat_template(conversation, return_dict=True, return_tensors='pt', add_generation_prompt=True)
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+        generate_kwargs = {}
+        if num_samples > 1:
+            generate_kwargs['num_return_sequences'] = num_samples
+            generate_kwargs['num_beams'] = 2 * num_samples
+            generate_kwargs['do_sample'] = True
+
+        outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **generate_kwargs)
+        return [self.tokenizer.decode(output[inputs['input_ids'].shape[1]:], skip_special_tokens=True) for output in outputs]
+
+    def calculate_sequence_prob(self, inputs, seq_id):
+        # TODO should be a faster way of doing this?
+        prob = 1.0
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            next_token_logits = outputs.logits[0, -1, :]
+            next_token_probs = torch.softmax(next_token_logits, dim=-1)
+            token_prob = next_token_probs[seq_id].item()
+            prob *= token_prob
+        
+        return prob
+
+    def get_prompt_response_probs(self, prompt, docs, sent_a, sent_b, neutral):
+        sent_a_ids = self.tokenizer.encode(sent_a, add_special_tokens=False)
+        sent_b_ids = self.tokenizer.encode(sent_b, add_special_tokens=False)
+        neutral_ids = self.tokenizer.encode(neutral, add_special_tokens=False)
+        probs = []
+        
+        for doc in tqdm.tqdm(docs):
+            formatted_prompt = prompt.format(doc=doc)
+            messages = [
+                {'role': 'user', 'content': formatted_prompt}
+            ]
+            inputs = self.tokenizer.apply_chat_template(messages, return_dict=True, return_tensors='pt', add_generation_prompt=True)
+            
+            # Calculate probabilities
+            prob_a = self.calculate_sequence_prob(inputs, sent_a_ids)
+            prob_b = self.calculate_sequence_prob(inputs, sent_b_ids)
+            prob_neutral = self.calculate_sequence_prob(inputs, neutral_ids)
+            
+            # Normalize probabilities
+            total_prob = prob_a + prob_b + prob_neutral
+            prob_a /= total_prob
+            prob_b /= total_prob
+            prob_neutral /= total_prob
+            # get final prob across the spectrum
+
+        
+        return probs

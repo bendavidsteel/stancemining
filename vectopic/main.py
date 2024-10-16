@@ -25,79 +25,59 @@ def get_embeddings(docs):
     embeddings = model.encode(docs)
     return embeddings
 
-def calculate_sequence_prob(model, tokenizer, input_ids, seq_ids):
-    # TODO should be a faster way of doing this?
-    prob = 1.0
-    current_input = input_ids.clone()
-    
-    for token_id in seq_ids:
-        with torch.no_grad():
-            outputs = model(current_input)
-            next_token_logits = outputs[0][:, -1, :]
-            next_token_probs = torch.softmax(next_token_logits, dim=-1)
-            token_prob = next_token_probs[0, token_id].item()
-            prob *= token_prob
-            
-            # Append the token to the input for the next iteration
-            current_input = torch.cat([current_input, torch.tensor([[token_id]])], dim=1)
-    
-    return prob
 
-def get_prompt_response_probs(prompt, docs, model, tokenizer, sent_a, sent_b):
-    sent_a_ids = tokenizer.encode(sent_a, add_special_tokens=False)
-    sent_b_ids = tokenizer.encode(sent_b, add_special_tokens=False)
-    probs = []
-    
-    for doc in tqdm(docs):
-        formatted_prompt = prompt.format(text=doc)
-        input_ids = tokenizer.encode(formatted_prompt, return_tensors="pt")
-        
-        # Calculate probability for sent_a
-        prob_a = calculate_sequence_prob(model, tokenizer, input_ids, sent_a_ids)
-        
-        # Calculate probability for sent_b
-        prob_b = calculate_sequence_prob(model, tokenizer, input_ids, sent_b_ids)
-        
-        # Calculate relative probability
-        relative_prob = prob_a / (prob_a + prob_b)
-        probs.append(relative_prob)
-    
-    return probs
-
-def get_vector_probs(ngram, vector, topic_docs, model, tokenizer):
-    # for each ngram, get probability of doc along vector
-    prompt = "{text}. Targeted towards {ngram}, is the preceeding text more likely to be {sent_a} or {sent_b}?".format(text="{text}", ngram=ngram, sent_a=vector.sent_a, sent_b=vector.sent_b)
-    # get probability of doc along vector
-    probs = get_prompt_response_probs(prompt, topic_docs, model, tokenizer, vector.sent_a, vector.sent_b)
-    return probs
 
 
 class Vector:
     def __init__(self, sent_a, sent_b):
         self.sent_a = sent_a
         self.sent_b = sent_b
+        self.neutral = 'neutral'
 
 class VectorTopic:
-    def __init__(self, vector, method=None, llm_lib='ctransformers', llm_config={}):
+    def __init__(self, vector, method=None, model_lib='transformers', model_name='microsoft/Phi-3.5-mini-instruct', model_kwargs={}, tokenizer_kwargs={}):
         self.vector = vector
         self.method = method
 
-        self.llm_lib = llm_lib
-        self.llm_config = llm_config
+        self.model_lib = model_lib
+        self.model_name = model_name
+        self.model_kwargs = model_kwargs
+        self.tokenizer_kwargs = tokenizer_kwargs
 
         self.generator = self.get_generator()
 
     def _ask_llm_differences(self, docs):
-        prompt = f"""What is the main difference by which these documents {self.vector.sent_a} or {self.vector.sent_b}?
-        {docs}"""
-        self.generator.generate(prompt, max_new_tokens=100, num_samples=3)
-        return ngrams
+        prompt = f"""Describe a specific thing that some of these documents would {self.vector.sent_a}, and some would {self.vector.sent_b}.
+        {docs}. Output max 3 words describing it."""
+        ngrams = self.generator.generate(prompt, max_new_tokens=3, num_samples=3)
+        ngrams = [i for g in ngrams for i in g.split(',')]
+        ngrams = [i for g in ngrams for i in g.split('\n')]
+        ngrams = [g for g in ngrams if g != '']
+        ngrams = [g.lower() for g in ngrams]
+        return list(set(ngrams))
     
     def _ask_llm_score(self, ngram, docs):
-        prompt = f"""Targeted towards {ngram}, is the preceeding text more likely to be {self.vector.sent_a} or {self.vector.sent_b}?"""
-        return get_prompt_response_probs(prompt, docs, self.model, self.tokenizer, self.vector.sent_a, self.vector.sent_b)
+        text_name = "comment"
+        prompt = f"""Targeted towards {ngram}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
+        return self.generator.get_prompt_response_probs(prompt, docs, self.vector.sent_a, self.vector.sent_b, self.vector.neutral)
 
-    def fit_transform(self, docs, embeddings=None):
+    def _ask_llm_class(self, ngram, docs):
+        text_name = "comment"
+        prompt = f"""Targeted towards {ngram}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
+        classifications = []
+        for doc in docs:
+            prompt = prompt.format(doc=doc)
+            output = self.generator.generate(prompt, max_new_tokens=10, num_samples=1)[0]
+            if self.vector.sent_a in output.lower():
+                classification = self.vector.sent_a
+            elif self.vector.sent_b in output.lower():
+                classification = self.vector.sent_b
+            else:
+                classification = self.vector.neutral
+            classifications.append(classification)
+        return classifications
+
+    def fit_transform(self, docs, embeddings=None, bertopic_kwargs={}):
         # could also compute generalized stance (i.e. sentiment), then find vector
         # then use steering vector to find the difference along the vector
         # https://www.lesswrong.com/posts/ndyngghzFY388Dnew/implementing-activation-steering
@@ -108,29 +88,25 @@ class VectorTopic:
             if embeddings is None:
                 embeddings = get_embeddings(docs)
 
-            topic_model = BERTopic()
+            topic_model = BERTopic(**bertopic_kwargs)
             topics, probs = topic_model.fit_transform(docs, embeddings=embeddings)
             topic_info = topic_model.get_topic_info()
 
+            topic_info = topic_info.assign(ngrams=[[]] * len(topic_info))
             for idx, topic in topic_info.iterrows():
                 # prompt LLM with sample of docs, and ask for suggestions of disagreement
                 ngrams = self._ask_llm_differences(topic['Representative_Docs'])
-                topic_id = topic['id']
+                topic_id = topic['Topic']
                 topic_docs = [docs[i] for i in range(len(docs)) if topics[i] == topic_id]
-                ngram_probs = []
-                means = []
-                vars = []
+                ngram_data = []
                 for ngram in ngrams:
                     # calculate probability of doc along vector
                     # prompt LLM with target and docs, use token probs as scalar along vector
-                    probs = self._ask_llm_score(ngram, topic_docs)
-                    ngram_probs.append(probs)
-                    means.append(np.mean(probs))
-                    vars.append(np.var(probs))
-
-                topic_info.at[idx, 'ngram_probs'] = ngram_probs
-                topic_info.at[idx, 'ngram_means'] = means
-                topic_info.at[idx, 'ngram_vars'] = vars
+                    classifications = self._ask_llm_class(ngram, topic_docs)
+                    polarities = [1 if c == self.vector.sent_a else -1 if c == self.vector.sent_b else 0 for c in classifications]
+                    # topic_info.at[idx, f"{ngram}_polarities"] = polarities
+                    ngram_data.append({'ngram': ngram, 'mean': np.mean(polarities), 'var': np.var(polarities)})
+                topic_info.at[idx, f"ngrams"] = ngram_data
 
             return topic_info
         
@@ -174,11 +150,16 @@ class VectorTopic:
             raise ValueError(f"Method '{self.method}' not implemented")
                 
     def get_generator(self):
-        if self.llm_lib == 'transformers':
-            return llms.Transformers(self.llm_config)
-        elif self.llm_lib == 'llamacpp':
-            return llms.LlamaCppPython(self.llm_config)
+        if self.model_lib == 'transformers':
+            return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs)
         else:
-            raise ValueError(f"LLM library '{self.llm_lib}' not implemented")
+            raise ValueError(f"LLM library '{self.model_lib}' not implemented")
+        
+    def get_vector_probs(self, ngram, vector, topic_docs, model, tokenizer):
+        # for each ngram, get probability of doc along vector
+        prompt = "{text}. Targeted towards {ngram}, is the preceeding text more likely to be {sent_a} or {sent_b}?".format(text="{text}", ngram=ngram, sent_a=vector.sent_a, sent_b=vector.sent_b)
+        # get probability of doc along vector
+        probs = self.generator.get_prompt_response_probs(prompt, topic_docs, model, tokenizer, vector.sent_a, vector.sent_b)
+        return probs
 
                 
