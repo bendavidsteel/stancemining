@@ -1,0 +1,8 @@
+numpy
+octis
+pandas
+polars
+bertopic
+transformers
+accelerate
+tqdm

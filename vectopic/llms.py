@@ -29,7 +29,7 @@ class Transformers(BaseLLM):
         generate_kwargs = {}
         if num_samples > 1:
             generate_kwargs['num_return_sequences'] = num_samples
-            generate_kwargs['num_beams'] = 2 * num_samples
+            generate_kwargs['num_beams'] = 10 * num_samples
             generate_kwargs['do_sample'] = True
 
         outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **generate_kwargs)
