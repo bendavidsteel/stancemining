@@ -1,20 +1,19 @@
-import configparser
 import os
 
+import hydra
+import numpy as np
 import polars as pl
 import wandb
 
 from experiments import metrics
 
-def main():
-    config = configparser.ConfigParser()
-    config.read('./config/config.ini')
-
-    dataset_name = config['data']['DatasetName']
-    model_name = config['model']['LLMModelName']
-    method = config['model']['Method']
-    vectopic_method = config['model']['VectopicMethod']
-    min_topic_size = int(config['model']['MinTopicSize'])
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(config):
+    dataset_name = config['data']['datasetname']
+    model_name = config['model']['lllmmodelname']
+    method = config['model']['method']
+    vectopic_method = config['model']['vectopicmethod']
+    min_topic_size = config['model']['mintopicsize']
 
     wandb.init(
         # set the wandb project where this run will be logged
@@ -29,6 +28,7 @@ def main():
         }
     )
 
+    dataset_base_name = os.path.splitext(dataset_name)[0]
     docs_df = pl.read_csv(f'./data/{dataset_name}')
     docs = docs_df['Tweet'].to_list()
 
@@ -46,19 +46,30 @@ def main():
         doc_targets, probs, polarity = model.fit_transform(docs, bertopic_kwargs={'min_topic_size': min_topic_size})
         topic_info = model.get_topic_info()
         target_info = model.get_target_info()
-        all_targets = target_info['ngram'].tolist()
     elif method == 'polar':
         from experiments.methods import polar
-        results = polar.polar(docs)
+        model = polar.Polar()
+        doc_targets, probs, polarity = model.fit_transform(docs)
+        target_info = model.get_target_info()
     elif method == 'wiba':
         from experiments.methods import wiba
-        results = wiba.wiba(docs)
+        wiba_model = wiba.Wiba()
+        doc_targets, probs, polarity = wiba_model.fit_transform(docs)
+        target_info = wiba_model.get_target_info()
     elif method == 'pacte':
         from experiments.methods import pacte
         results = pacte.pacte(docs)
+    elif method == 'annotator':
+        from experiments.methods import annotator
+        annotator_name = config['model']['AnnotatorName']
+        annotation_path = f'./data/{dataset_base_name}_{annotator_name}.csv'
+        annotator_model = annotator.Annotator(annotation_path)
+        doc_targets, probs, polarity = annotator_model.fit_transform(docs)
+        target_info = annotator_model.get_target_info()
     else:
         raise ValueError(f'Unknown method: {method}')
 
+    all_targets = target_info['ngram'].tolist()
     output_docs_df = pl.DataFrame({
         'Tweet': docs,
         'Target': doc_targets,
@@ -68,14 +79,16 @@ def main():
 
     target_to_idx = {target: idx for idx, target in enumerate(all_targets)}
 
-    output_docs_df = output_docs_df.with_columns([
-        pl.col('Polarity').arr.get(
-            pl.col('Target').replace_strict(target_to_idx)
-        ).alias('TargetPolarity')
-    ])
-    output_docs_df = output_docs_df.with_columns(pl.col('TargetPolarity').replace_strict({-1: 'AGAINST', 0: 'NONE', 1: 'FAVOR'}))
+    if len(target_to_idx) > 0:
+        output_docs_df = output_docs_df.with_columns([
+            pl.col('Polarity').arr.get(
+                pl.col('Target').replace_strict(target_to_idx)
+            ).alias('TargetPolarity')
+        ])
+        output_docs_df = output_docs_df.with_columns(pl.col('TargetPolarity').replace_strict({-1: 'AGAINST', 0: 'NONE', 1: 'FAVOR'}))
+    else:
+        output_docs_df = output_docs_df.with_columns(pl.lit('NONE').alias('TargetPolarity'))
 
-    dataset_base_name = os.path.splitext(dataset_name)[0]
     output_docs_df.with_columns([pl.col('Probs').map_elements(lambda l: str(str(l)), pl.String), pl.col('Polarity').map_elements(lambda l: str(str(l)), pl.String)]).write_csv(f'./data/{dataset_base_name}_output.csv')
 
     # evaluate the stance targets
@@ -84,10 +97,7 @@ def main():
     label_map = {'FAVOR': 1, 'AGAINST': -1, 'NONE': 0}
     gold_stances = [label_map[stance] for stance in gold_stances]
     all_gold_targets = list(set(gold_targets))
-
-    target_info = model.get_target_info()
-    all_targets = target_info['ngram'].tolist()
-
+    
     dists, matches = metrics.targets_closest_distance(all_targets, all_gold_targets)
     targets_f1 = metrics.f1_targets(all_targets, all_gold_targets, doc_targets, gold_targets)
     polarity_f1 = metrics.f1_stances(all_targets, all_gold_targets, doc_targets, gold_targets, polarity, gold_stances)

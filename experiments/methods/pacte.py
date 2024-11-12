@@ -1,17 +1,19 @@
 from collections import Counter
-import numpy as np
-import scipy.sparse as sp
 import sys
 
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
+
 import numpy as np
 import os
-import torch
-import torch.nn as nn
 import pickle
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
+import scipy.sparse as sp
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+import transformers
+
 
 def sent_to_words(sentences, min_len=2, max_len=15):
     # tokenize words
@@ -169,7 +171,200 @@ def preprocessing_bert(data):
     
     return data_lematized
 
+def train_lda_model(data_path, corpus, id2word, texts, model_type='lda', start=10, limit=50, step=3):
+    import os
+    import gensim
+    import numpy as np
+    from gensim.models import CoherenceModel
+    
+    if model_type == 'mallet' and not os.path.exists('mallet-2.0.8.zip'):
+        os.system('wget http://mallet.cs.umass.edu/dist/mallet-2.0.8.zip')
+        os.system('unzip mallet-2.0.8.zip')
+    mallet_path = 'mallet-2.0.8/bin/mallet'
+    
+    import threading
+    class MyThread(threading.Thread):
+        def __init__(self, func, args=()):
+            super(MyThread, self).__init__()
+            self.func = func
+            self.args = args
 
+        def run(self):
+            self.result = self.func(*self.args)
+
+        def get_result(self):
+            try:
+                return self.result
+            except Exception:
+                return None
+    
+    def lda_model_func(corpus, id2word, num_topics):
+        print(f'Training model with {num_topics} topics')
+        model = gensim.models.ldamulticore.LdaMulticore(corpus=corpus,
+                                           id2word=id2word,
+                                           num_topics=num_topics, 
+                                           random_state=42,
+                                           chunksize=100,
+                                           passes=10,
+                                           per_word_topics=True)
+        coherence_model = CoherenceModel(model=model, texts=texts, dictionary=id2word, coherence='c_v')
+        coh_v = coherence_model.get_coherence()
+        print(f'num of topic: {num_topics}/{limit}, coherence value: {coh_v}')
+        return model, coh_v
+    
+    
+    def mallet_model_func(mallet_path, corpus, num_topics, id2word):
+        print(f'Training model with {num_topics} topics')
+        model = gensim.models.wrappers.LdaMallet(mallet_path, 
+                                                     corpus=corpus, 
+                                                     num_topics=num_topics, 
+                                                     id2word=id2word, 
+                                                     iterations=50,
+                                                     workers=1,
+                                                     random_seed=42)
+        coherence_model = CoherenceModel(model=model, texts=texts, dictionary=id2word, coherence='c_v')
+        coh_v = coherence_model.get_coherence()
+        print(f'num of topic: {num_topics}/{limit}, coherence value: {coh_v}')
+        return model, coh_v
+    
+    coherence_values_dict = {}
+    coherence_values = []
+    model_dict = {}
+    for num_topics in range(start, limit+1, step):
+        if model_type == 'lda':
+            model, coh_v = lda_model_func(corpus, id2word, num_topics)
+        else:
+            model, coh_v = mallet_model_func(mallet_path, corpus, num_topics, id2word)
+        model_dict[num_topics] = model
+        coherence_values_dict[num_topics] = coh_v
+        coherence_values.append(coh_v)
+    
+    import matplotlib.pyplot as plt
+    plt.plot(range(start, limit+1, step), coherence_values, marker='o')
+    plt.xlabel('n_topics')
+    plt.ylabel('coherence score')
+    plt.savefig(os.path.join(data_path, f'{model_type}_coherence_values_topics.png'))
+    plt.close()
+    
+    max_idx = np.argmax(coherence_values)
+    
+    return model_dict, coherence_values_dict, max_idx+start
+
+def search_in_list(list1, list2):
+    '''
+    search the indices of the topic keywords in the tokenized document -- a list of tokens
+    '''
+    idxes = []
+    for i in range(len(list2)):
+        if list1[0] == list2[i]:
+            if (i + len(list1) <= len(list2)) and list2[i:i+len(list1)] == list1:
+                idxes += list(range(i, i+len(list1)))
+    return idxes
+
+
+def get_topic_masks(data, topics):
+    
+    return topic_masks
+
+# rank topics by the mass of probabilities
+def rank_topics(lda_model, corpus):
+    idx_prob = [[i, 0] for i in range(lda_model.num_topics)]
+    for idx_doc, rows in enumerate(lda_model[corpus]):
+        for j, (idx_topic, prob) in enumerate(rows):
+            idx_prob[idx_topic][1] += prob
+    idx_prob.sort(key=lambda x:x[1], reverse=True)
+    return idx_prob
+
+# figure out the the probability that each document is associated with each topic
+# only keep those pairs with prob>=threshold (0.15 here)
+def get_doc2topics(ldamodel, corpus, threshold=0.15):
+    data = []
+    for idx_doc, rows in enumerate(ldamodel[corpus]):
+        for j, (idx_topic, prob) in enumerate(rows):
+            if prob < 0.15:
+                continue
+            data.append([idx_doc, idx_topic, prob])
+    df = pd.DataFrame(data, columns=['idx_doc', 'idx_topic', 'prob'])
+    return df
+
+def topic_modelling(data_path, df_news):
+    texts = pickle.load(open(os.path.join(data_path, 'texts_processed_lda.pkl'), 'rb'))
+    corpus, id2word = pickle.load(open(os.path.join(data_path, 'corpus_lda.pkl'), 'rb'))
+    # train LDA topic models with different K (n_topics)
+    # lda_models is a dictionary {K:model_K, K+1: model_K+1, .....}
+    if not os.path.exists(os.path.join(data_path, 'lda_models.pkl')):
+        lda_models, coh_values, max_idx = train_lda_model(data_path, corpus, id2word, texts, model_type='lda', start=10, limit=50, step=1)
+    else:
+        lda_models, coh_values, max_idx = pickle.load(open(os.path.join(data_path, 'lda_models.pkl'), 'rb'))
+
+    # print the coherecen values of different K (n_topics)
+    # K=15 gives the best coherence value but the topics are not good after manual inspection
+    df_ntopics_coh = pd.DataFrame(list(coh_values.items()), columns=['n_topics', 'coh_val'])
+    # choose LDA with highest coh_val
+    highest_coh_lda_n_topics = int(df_ntopics_coh.sort_values(by='coh_val', ascending=False).iloc[0]['n_topics'])
+
+    
+    lda_model = lda_models[highest_coh_lda_n_topics]
+
+    # index each topic
+    topics = {x:y for x,y in lda_model.show_topics(num_topics=-1, num_words=10, formatted=False)}
+    df_topic = []
+    for i in range(len(topics)):
+        df_topic.append([i, [each[0] for each in topics[i]]])
+
+    topic_ranks = rank_topics(lda_model, corpus)
+
+    for i in range(39):
+        df_topic[i].append(topic_ranks[i][1])
+    df_topic = pd.DataFrame(df_topic, columns=['topic_idx', 'topic_stems', 'probs'])
+
+    df_doc_topic = get_doc2topics(lda_model, corpus)
+
+    # create a validation set for finetuning the language model
+    # articles that is not assigned to any topic (prob < 0.15) are in this set
+    idxes_doc_val = set(df_news['idx'].unique().tolist()) - set(df_doc_topic['idx_doc'].unique().tolist())
+
+    # save the data
+    df_ntopics_coh.to_excel(os.path.join(data_path, 'coh_values.xlsx'), index=False)
+    df_doc_topic.to_csv(os.path.join(data_path, 'df_doc_topic.csv'), index=False)
+    df_topic.to_csv(os.path.join(data_path, 'df_topics.csv'), index=False)
+    pickle.dump(topic_ranks, open(os.path.join(data_path, 'topic_ranks.pkl'), 'wb'))
+    pickle.dump(lda_model, open(os.path.join(data_path, 'lda_model.pkl'), 'wb'))
+    pickle.dump((lda_models, coh_values, max_idx), open(os.path.join(data_path, 'lda_models.pkl'), 'wb'))
+    pickle.dump(idxes_doc_val, open(os.path.join(data_path, 'idxes_val.pkl'), 'wb'))
+    # pickle.dump(idxes_doc_val2, open('../data_processing/data/idxes_val2.pkl', 'wb'))
+    pickle.dump(lda_model.show_topics(num_topics=-1, num_words=10, formatted=False), 
+                open(os.path.join(data_path, 'topics.pkl'), 'wb'))
+    pickle.dump(topic_labels, open(os.path.join(data_path, 'topic_labels.pkl'), 'wb'))
+
+    tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
+    texts_bert = pickle.load(open(os.path.join(data_path, 'texts_processed_bert.pkl'), 'rb'))
+    text_encodings = tokenizer(pd.Series(texts_bert).apply(lambda x: ' '.join(x)).tolist(), padding=True, 
+                            truncation=True)['input_ids']
+    text_encodings = pd.Series(text_encodings)
+
+    topic_masks = np.zeros((text_encodings.shape[0], 512))  # (n_docs, 512)
+    for topic in lda_model.show_topics(num_topics=-1, num_words=50, formatted=False):
+        idx = topic[0]
+        topic_stems = [each[0] for each in topic[1]]
+        stem_probs = [each[1] for each in topic[1]]
+        stem_probs = np.array(stem_probs)
+        stem_probs /= stem_probs.sum()  # normalize the weights of the top-n keywords
+        stem_encodings = tokenizer(topic_stems, truncation=True)['input_ids'] # encode topic keywords using BERT
+        doc_idxes = df_doc_topic[df_doc_topic['idx_topic'] == idx]['idx_doc'].to_list() # find the documents associated with the topic
+        doc_encodings = text_encodings[doc_idxes]
+        for doc_idx in doc_idxes:
+            doc_encoding = doc_encodings[doc_idx]
+            topic_mask = topic_masks[doc_idx]
+            for stem_input_ids, stem_prob in zip(stem_encodings, stem_probs):
+                idxes = search_in_list(stem_input_ids[1:-1], doc_encoding) # search each keyword in the document
+                if idxes:
+                    # if found multiple occurrences of the keywords, 
+                    # then the weight of each occurrence will be devalued
+                    topic_mask[idxes] += stem_prob / len(idxes) 
+            if topic_mask.mean() > 0:
+                topic_mask /= topic_mask.sum()   # normalize the mask
+    pickle.dump(topic_masks.tolist(), open(os.path.join(data_path, 'topic_masks.pkl'), 'wb'))
 
 
 class NewsDataset(Dataset):
@@ -859,9 +1054,16 @@ def pacte(docs):
     # https://github.com/zihaohe123/pacte-polarized-topics-detection
     texts_processed_lda, corpus_lda, id2word_lda = preprocessing_lda(data)
     pickle.dump(texts_processed_lda, open(os.path.join(data_path, 'texts_processed_lda.pkl'), 'wb'))
+    pickle.dump((corpus_lda, id2word_lda), open(os.path.join(data_path, 'corpus_lda.pkl'), 'wb'))
+
 
     text_processed_bert = preprocessing_bert(data)
+    text_processed_bert = [[str(x) for x in y] for y in text_processed_bert]
     pickle.dump(text_processed_bert, open(os.path.join(data_path, 'texts_processed_bert.pkl'), 'wb'))
+
+    df_news = pd.DataFrame(data)
+    df_news.to_csv(os.path.join(data_path, 'df_news.csv'), index=False)
+    topic_modelling(data_path, df_news)
 
     import argparse
 

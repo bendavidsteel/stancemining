@@ -12,6 +12,9 @@ def sentence_embedding_similarity(targets, gold_targets):
     return similarity_matrix
 
 def targets_closest_distance(targets, gold_targets):
+    if len(targets) == 0:
+        return np.full(len(gold_targets), np.nan), []
+
     similarity_matrix = sentence_embedding_similarity(targets, gold_targets)
     closest_distances = np.max(similarity_matrix, axis=1)
     matches = [(targets[i], gold_targets[j]) for i, j in enumerate(np.argmax(similarity_matrix, axis=1))]
