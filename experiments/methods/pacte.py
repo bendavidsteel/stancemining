@@ -1,10 +1,10 @@
-from collections import Counter
-import sys
-
-
-import numpy as np
+import collections
+import hashlib
 import os
 import pickle
+import sys
+
+import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
 import scipy.sparse as sp
@@ -270,7 +270,8 @@ def get_topic_masks(data, topics):
 def rank_topics(lda_model, corpus):
     idx_prob = [[i, 0] for i in range(lda_model.num_topics)]
     for idx_doc, rows in enumerate(lda_model[corpus]):
-        for j, (idx_topic, prob) in enumerate(rows):
+        document_topics = rows[0]
+        for j, (idx_topic, prob) in enumerate(document_topics):
             idx_prob[idx_topic][1] += prob
     idx_prob.sort(key=lambda x:x[1], reverse=True)
     return idx_prob
@@ -279,21 +280,24 @@ def rank_topics(lda_model, corpus):
 # only keep those pairs with prob>=threshold (0.15 here)
 def get_doc2topics(ldamodel, corpus, threshold=0.15):
     data = []
-    for idx_doc, rows in enumerate(ldamodel[corpus]):
-        for j, (idx_topic, prob) in enumerate(rows):
-            if prob < 0.15:
+    for idx_doc in range(len(corpus)):
+        corpus_doc = corpus[idx_doc]
+        document_topics = ldamodel.get_document_topics(corpus_doc, minimum_probability=threshold, per_word_topics=False)
+        for j, (idx_topic, prob) in enumerate(document_topics):
+            if prob < threshold:
                 continue
             data.append([idx_doc, idx_topic, prob])
     df = pd.DataFrame(data, columns=['idx_doc', 'idx_topic', 'prob'])
     return df
 
-def topic_modelling(data_path, df_news):
+def topic_modelling(data_path, df_news, train=True):
     texts = pickle.load(open(os.path.join(data_path, 'texts_processed_lda.pkl'), 'rb'))
     corpus, id2word = pickle.load(open(os.path.join(data_path, 'corpus_lda.pkl'), 'rb'))
     # train LDA topic models with different K (n_topics)
     # lda_models is a dictionary {K:model_K, K+1: model_K+1, .....}
     if not os.path.exists(os.path.join(data_path, 'lda_models.pkl')):
         lda_models, coh_values, max_idx = train_lda_model(data_path, corpus, id2word, texts, model_type='lda', start=10, limit=50, step=1)
+        pickle.dump((lda_models, coh_values, max_idx), open(os.path.join(data_path, 'lda_models.pkl'), 'wb'))
     else:
         lda_models, coh_values, max_idx = pickle.load(open(os.path.join(data_path, 'lda_models.pkl'), 'rb'))
 
@@ -314,28 +318,40 @@ def topic_modelling(data_path, df_news):
 
     topic_ranks = rank_topics(lda_model, corpus)
 
-    for i in range(39):
+    for i in range(highest_coh_lda_n_topics):
         df_topic[i].append(topic_ranks[i][1])
     df_topic = pd.DataFrame(df_topic, columns=['topic_idx', 'topic_stems', 'probs'])
 
-    df_doc_topic = get_doc2topics(lda_model, corpus)
+    if train:
+        max_threshold = 0.5
+        threshold = 0.15
+        while threshold < max_threshold:
+            df_doc_topic = get_doc2topics(lda_model, corpus, threshold=threshold)
+            if len(df_doc_topic['idx_doc'].unique()) > 0.9 * len(df_news['idx'].unique()):
+                threshold += 0.05
+                continue
+            else:
+                break
+            
+        # create a validation set for finetuning the language model
+        # articles that is not assigned to any topic (prob < 0.15) are in this set
+        idxes_doc_val = set(df_news['idx'].unique().tolist()) - set(df_doc_topic['idx_doc'].unique().tolist())
 
-    # create a validation set for finetuning the language model
-    # articles that is not assigned to any topic (prob < 0.15) are in this set
-    idxes_doc_val = set(df_news['idx'].unique().tolist()) - set(df_doc_topic['idx_doc'].unique().tolist())
+        assert len(idxes_doc_val) > 0, 'No validation set is created. Please check the threshold of the topic probability.'
+        assert len(idxes_doc_val) > 0.1 * len(df_news), 'The validation set is too small. Please check the threshold of the topic probability.'
+        pickle.dump(idxes_doc_val, open(os.path.join(data_path, 'idxes_val.pkl'), 'wb'))
+    else:
+        threshold = 0.15
+        df_doc_topic = get_doc2topics(lda_model, corpus, threshold=threshold)
 
     # save the data
-    df_ntopics_coh.to_excel(os.path.join(data_path, 'coh_values.xlsx'), index=False)
     df_doc_topic.to_csv(os.path.join(data_path, 'df_doc_topic.csv'), index=False)
     df_topic.to_csv(os.path.join(data_path, 'df_topics.csv'), index=False)
     pickle.dump(topic_ranks, open(os.path.join(data_path, 'topic_ranks.pkl'), 'wb'))
     pickle.dump(lda_model, open(os.path.join(data_path, 'lda_model.pkl'), 'wb'))
     pickle.dump((lda_models, coh_values, max_idx), open(os.path.join(data_path, 'lda_models.pkl'), 'wb'))
-    pickle.dump(idxes_doc_val, open(os.path.join(data_path, 'idxes_val.pkl'), 'wb'))
-    # pickle.dump(idxes_doc_val2, open('../data_processing/data/idxes_val2.pkl', 'wb'))
     pickle.dump(lda_model.show_topics(num_topics=-1, num_words=10, formatted=False), 
                 open(os.path.join(data_path, 'topics.pkl'), 'wb'))
-    pickle.dump(topic_labels, open(os.path.join(data_path, 'topic_labels.pkl'), 'wb'))
 
     tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
     texts_bert = pickle.load(open(os.path.join(data_path, 'texts_processed_bert.pkl'), 'rb'))
@@ -368,22 +384,24 @@ def topic_modelling(data_path, df_news):
 
 
 class NewsDataset(Dataset):
-    def __init__(self, texts, labels, topic_masks):
+    def __init__(self, texts, topic_masks, labels=None):
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        encodings = tokenizer(texts, truncation=True, padding=True)
+        encodings = tokenizer(texts, truncation=True, padding='max_length', max_length=512)
         self.encodings = encodings
-        self.labels = labels
         self.topic_masks = topic_masks
+        if labels is not None:
+            self.labels = labels
 
     def __getitem__(self, idx):
         item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
-        item['labels'] = torch.tensor(self.labels[idx])
+        if hasattr(self, 'labels'):
+            item['labels'] = torch.tensor(self.labels[idx])
         item['topic_masks'] = torch.tensor(self.topic_masks[idx])
         return item
 
     def __len__(self):
-        return len(self.labels)
+        return len(self.encodings['input_ids'])
 
 
 class FC(nn.Module):
@@ -396,94 +414,103 @@ class FC(nn.Module):
 
 
 class Engine:
-    def __init__(self, args):
+    def __init__(self, data_path, model_path=None, init_train=True, lr=1e-5, batch_size=24, epochs=50, shuffle=False, unfinetuned=False):
         # gpu
-        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        # os.environ['CUDA_VISIBLE_DEVICES'] = gpu
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         os.makedirs('ckp', exist_ok=True)
 
         # dataset
         print('Loading data....')
-        texts_processed = pd.Series(pickle.load(open(os.path.join(args.data_path, 'texts_processed_bert.pkl'), 'rb')))
+        texts_processed = pd.Series(pickle.load(open(os.path.join(data_path, 'texts_processed_bert.pkl'), 'rb')))
         texts = texts_processed.apply(lambda x: ' '.join(x))
-        df_news = pd.read_csv(os.path.join(args.data_path, 'df_news.csv'))
-        # only making the model differentiate between left and right
-        labels = df_news['source'].map({'cnn': 0, 'fox': 1, 'huff': 0, 'breit': 1, 'nyt': 0, 'nyp': 1})
-        if args.shuffle: # shuffle the labels to serve as the baseline, where the languge model cannot learn partisanship
-            labels = labels.sample(frac=1)
+        df_news = pd.read_csv(os.path.join(data_path, 'df_news.csv'))
+        if init_train:
+            labels = df_news['label'].map(lambda l: {'FAVOR': 1, 'AGAINST': 0}[l])
+            if shuffle: # shuffle the labels to serve as the baseline, where the languge model cannot learn partisanship
+                labels = labels.sample(frac=1)
         del df_news
-        topic_masks = pd.Series(pickle.load(open(os.path.join(args.data_path, 'topic_masks.pkl'), 'rb')))
-        val_idexes = pickle.load(open(os.path.join(args.data_path, 'idxes_val.pkl'), 'rb'))
-        train_idexes = set(list(range(len(texts_processed)))) - val_idexes
-        # train_idexes = range(len(texts_processed))
-        # val_idexes = range(len(texts_processed))
+        
+        if init_train:
+            val_idexes = pickle.load(open(os.path.join(data_path, 'idxes_val.pkl'), 'rb'))
+            train_idexes = set(list(range(len(texts_processed)))) - val_idexes
+            # train_idexes = range(len(texts_processed))
+            # val_idexes = range(len(texts_processed))
 
-        train_idexes = np.array(list(train_idexes))
-        val_idexes = np.array(list(val_idexes))
-        train_mask = np.isin(np.arange(len(texts_processed)), train_idexes)
-        val_mask = np.isin(np.arange(len(texts_processed)), val_idexes)
-        print('Done.')
+            train_idexes = np.array(list(train_idexes))
+            val_idexes = np.array(list(val_idexes))
+            train_mask = np.isin(np.arange(len(texts_processed)), train_idexes)
+            val_mask = np.isin(np.arange(len(texts_processed)), val_idexes)
+            print('Done.')
 
-        texts_train = texts[train_mask].tolist()
-        texts_val = texts[val_mask].tolist()
+            texts_train = texts[train_mask].tolist()
+            texts_val = texts[val_mask].tolist()
+            labels_train = labels[train_mask].tolist()
+            labels_val = labels[val_mask].tolist()
+            topic_masks_train = topic_masks[train_mask].tolist()
+            topic_masks_val = topic_masks[val_mask].tolist()
+            print('Done\n')
+
+            print('Preparing dataset....')
+            train_dataset = NewsDataset(texts_train, topic_masks_train, labels=labels_train)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            val_dataset = NewsDataset(texts_val, topic_masks_val, labels=labels_val)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+        topic_masks = pd.Series(pickle.load(open(os.path.join(data_path, 'topic_masks.pkl'), 'rb')))
         texts = texts.tolist()
-        labels_train = labels[train_mask].tolist()
-        labels_val = labels[val_mask].tolist()
-        labels = labels.tolist()
-        topic_masks_train = topic_masks[train_mask].tolist()
-        topic_masks_val = topic_masks[val_mask].tolist()
+        if init_train:
+            labels = labels.tolist()
+        else:
+            labels = None
         topic_masks = topic_masks.tolist()
+        dataset = NewsDataset(texts, topic_masks, labels=labels)
+        loader = DataLoader(dataset, batch_size=int(1.5*batch_size))
+
         print('Done\n')
 
-        if args.init_train:
-            print('Preparing dataset....')
-            train_dataset = NewsDataset(texts_train, labels_train, topic_masks_train)
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-            val_dataset = NewsDataset(texts_val, labels_val, topic_masks_val)
-            val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
-            dataset = NewsDataset(texts, labels, topic_masks)
-            loader = DataLoader(dataset, batch_size=int(1.5*args.batch_size))
+        # model
+        print('Initializing model....')
+        from transformers import AutoModelForSequenceClassification, AdamW
+        model = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
 
-            print('Done\n')
+        print('Done\n')
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        model = nn.DataParallel(model)
+        model.to(device)
+        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=5e-4)
+        os.makedirs(os.path.join(data_path, 'ckp'), exist_ok=True)
 
-            # model
-            print('Initializing model....')
-            from transformers import AutoModelForSequenceClassification, AdamW
-            model = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
-
-            print('Done\n')
-            print("Let's use", torch.cuda.device_count(), "GPUs!")
-            model = nn.DataParallel(model)
-            model.to(device)
-            optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4)
-        os.makedirs('ckp', exist_ok=True)
-
-        if not args.shuffle:
-            model_path = f'ckp/model.pt'
-        else:
-            model_path = f'ckp/model_shuffle.pt'
+        if model_path is None:
+            if not shuffle:
+                model_path = os.path.join(data_path, 'ckp', 'model.pt')
+            else:
+                model_path = os.path.join(data_path, 'ckp', 'model_shuffle.pt')
 
         self.device = device
-        if args.init_train:
-            self.model = model
+        self.model = model
+        self.loader = loader
+        if init_train:
             self.optimizer = optimizer
             self.train_loader = train_loader
             self.val_loader = val_loader
-            self.loader = loader
+            self.labels = labels
         self.texts = texts
-        self.labels = labels
         self.model_path = model_path
-        self.args = args
+        self.data_path = data_path
+        self.shuffle = shuffle
+        self.unfinetuned = unfinetuned
+        self.epochs = epochs
 
     def train(self):
 
-        if (not os.path.exists(self.model_path)) and (not self.args.unfinetuned):
+        if (not os.path.exists(self.model_path)) and (not self.unfinetuned):
             best_epoch_loss = float('inf')
             best_epoch_f1 = 0
             best_epoch = 0
             import copy
             best_state_dict = copy.deepcopy(self.model.state_dict())
-            for epoch in range(self.args.epochs):
+            for epoch in range(self.epochs):
                 print(f"{'*' * 20}Epoch: {epoch + 1}{'*' * 20}")
                 loss = self.train_epoch()
                 acc, f1 = self.eval()
@@ -547,6 +574,18 @@ class Engine:
         f1 = f1_score(y_true, y_pred)
         return acc, f1
 
+    # def load_model(self, model_path):
+    #     print('Initializing model....')
+    #     from transformers import AutoModelForSequenceClassification
+    #     model = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
+    #     model = nn.DataParallel(model)
+    #     model_weights = torch.load(model_path)
+    #     model.load_state_dict(model_weights)
+
+    #     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    #     model.to(device)
+    #     self.model = model
+
     def calc_embeddings(self, topic_emb=False):
         '''
         Calculate the embeddings of all documents
@@ -555,17 +594,19 @@ class Engine:
         :return: the embeddings of all documents
         '''
 
-        os.makedirs('embeddings', exist_ok=True)
+        os.makedirs(os.path.join(self.data_path, 'embeddings'), exist_ok=True)
+        prediction_path = os.path.join(self.data_path, 'embeddings', f'predictions.pkl')
         if not topic_emb:
-            embedding_path = f'embeddings/embeddings_unfinetuned={self.args.unfinetuned}.pkl'
+            embedding_path = os.path.join(self.data_path, 'embeddings', f'embeddings_unfinetuned={self.unfinetuned}.pkl')
         else:
-            embedding_path = f'embeddings/topic_embeddings_unfinetuned={self.args.unfinetuned}.pkl'
-        if self.args.shuffle:
+            embedding_path = os.path.join(self.data_path, 'embeddings', f'topic_embeddings_unfinetuned={self.unfinetuned}.pkl')
+        if self.shuffle:
             embedding_path = embedding_path[:-4] + '_shuffle.pkl'
-        if not os.path.exists(embedding_path):
-            if not self.args.unfinetuned:
+        if (not os.path.exists(embedding_path)) or (not os.path.exists(prediction_path)):
+            if not self.unfinetuned:
                 self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
             embeddings = []
+            predictions = []
             self.model.eval()
             print('Calculating embedding....')
             with torch.no_grad():
@@ -573,18 +614,22 @@ class Engine:
                     input_ids = batch['input_ids'].to(self.device)
                     attention_mask = batch['attention_mask'].to(self.device)
                     outputs = self.model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                    preds_ = outputs['logits'].argmax(dim=1)
+                    predictions.append(preds_.detach().to('cpu').numpy())
                     if not topic_emb:
-                        embeddings_ = outputs[1][-1][:, 0].detach().to('cpu').numpy()
+                        embeddings_ = outputs['hidden_states'][-1][:, 0].detach().to('cpu').numpy()
                     else:
                         topic_masks = batch['topic_masks'].to(self.device).reshape(input_ids.shape[0],
                                                                                    input_ids.shape[1], -1)
-                        embeddings_ = (topic_masks * outputs[1][-1]).sum(dim=1).detach().to('cpu').numpy()
+                        embeddings_ = (topic_masks * outputs['hidden_states'][-1]).sum(dim=1).detach().to('cpu').numpy()
                     embeddings.append(embeddings_)
                     if i % 50 == 0:
                         print(f"{i}/{len(self.loader)}")
             print('Done')
             embeddings = np.concatenate(embeddings, axis=0)
+            predictions = np.concatenate(predictions, axis=0)
             pickle.dump(embeddings, open(embedding_path, 'wb'))
+            pickle.dump(predictions, open(prediction_path, 'wb'))
         else:
             embeddings = pickle.load(open(embedding_path, 'rb'))
 
@@ -597,14 +642,14 @@ class Engine:
         :param dim_reduction: which dimension reduction method to use. PCA or TSNE or UMAP
         :return:
         '''
-        os.makedirs('embeddings', exist_ok=True)
+        os.makedirs(os.path.join(self.data_path, 'embeddings'), exist_ok=True)
         print('Plotting....')
         print('Reducing dimension....')
         if not topic_emb:
-            embedding_path = f'embeddings/embeddings_{dim_reduction}_unfinetuned={self.args.unfinetuned}.pkl'
+            embedding_path = os.path.join(self.data_path, 'embeddings', f'embeddings_{dim_reduction}_unfinetuned={self.unfinetuned}.pkl')
         else:
-            embedding_path = f'embeddings/topic_embeddings_{dim_reduction}_unfinetuned={self.args.unfinetuned}.pkl'
-        if self.args.shuffle:
+            embedding_path = os.path.join(self.data_path, 'embeddings', f'topic_embeddings_{dim_reduction}_unfinetuned={self.unfinetuned}.pkl')
+        if self.shuffle:
             embedding_path = embedding_path[:-4] + '_shuffle.pkl'
         if not os.path.exists(embedding_path):
             embeddings = self.calc_embeddings(topic_emb)
@@ -622,8 +667,9 @@ class Engine:
             embeddings2 = pickle.load(open(embedding_path, 'rb'))
         print('Done')
         data = pd.DataFrame(embeddings2, columns=['x', 'y'])
-        data['labels'] = self.labels
-        df_doc_topic = pd.read_csv(os.path.join(self.args.data_path, 'df_doc_topic.csv'))
+        if hasattr(self, 'labels'):
+            data['labels'] = self.labels
+        df_doc_topic = pd.read_csv(os.path.join(self.data_path, 'df_doc_topic.csv'))
         df_doc_topic = df_doc_topic.sort_values(by=['prob'], ascending=False).drop_duplicates(subset='idx_doc',
                                                                                               keep='first')
 
@@ -634,48 +680,47 @@ class Engine:
 
         import matplotlib.pyplot as plt
         clustered = data[data['cluster_labels'] != -1]
-        clustered1 = clustered[clustered['labels'] == 0][:200]
-        clustered2 = clustered[clustered['labels'] == 1][:200]
+        if 'labels' in data.columns:
+            clustered1 = clustered[clustered['labels'] == 0][:200]
+            clustered2 = clustered[clustered['labels'] == 1][:200]
 
         from matplotlib.backends.backend_pdf import PdfPages
-        os.makedirs('fig', exist_ok=True)
+        os.makedirs(os.path.join(self.data_path, 'fig'), exist_ok=True)
         if not topic_emb:
-            fig_name = f'fig/embeddings_{dim_reduction}_unfinetuned={self.args.unfinetuned}.pdf'
+            fig_name = os.path.join(self.data_path, 'fig', f'embeddings_{dim_reduction}_unfinetuned={self.unfinetuned}.pdf')
             print(fig_name)
         else:
-            fig_name = f'fig/topic_embeddings_{dim_reduction}_unfinetuned={self.args.unfinetuned}.pdf'
+            fig_name = os.path.join(self.data_path, 'fig', f'topic_embeddings_{dim_reduction}_unfinetuned={self.unfinetuned}.pdf')
             print(fig_name)
 
         with PdfPages(fig_name) as pdf:
             _, _ = plt.subplots(figsize=(5, 5))
-            plt.scatter(clustered1.x, clustered1.y, c=clustered1['cluster_labels'], marker='o', s=30, cmap='hsv_r', alpha=0.2,
-                        label='liberal')
-            plt.scatter(clustered2.x, clustered2.y, c=clustered2['cluster_labels'], marker='x', s=30, cmap='hsv_r', alpha=0.5,
-                        label='conservative')
+            if 'labels' in data.columns:
+                plt.scatter(clustered1.x, clustered1.y, c=clustered1['cluster_labels'], marker='o', s=30, cmap='hsv_r', alpha=0.2,
+                            label='liberal')
+                plt.scatter(clustered2.x, clustered2.y, c=clustered2['cluster_labels'], marker='x', s=30, cmap='hsv_r', alpha=0.5,
+                            label='conservative')
+            else:
+                plt.scatter(clustered.x, clustered.y, c=clustered['cluster_labels'], marker='o', s=30, cmap='hsv_r', alpha=0.2)
 
             plt.xlabel('dim_1', fontsize=12)
             plt.ylabel('dim_2', fontsize=12)
             plt.legend(fontsize=12)
             pdf.savefig()
 
-    def get_polarization(self, args):
+    def get_polarization(self, polarization='emb', min_docs=10, max_docs=10):
         '''
         calculate the polarization score for each topic and save the ranking
         '''
 
-        def select_docs(df_doc_topic, topic_idx, source, month, max_docs=10, min_docs=2):
+        def select_docs(df_doc_topic, topic_idx, max_docs=10, min_docs=2, label=None):
             '''
             output the top-n documents from each source for each topic
             '''
-            if not isinstance(source, list):
-                source = [source]
-            if not isinstance(month, list):
-                month = [month]
+            if label is not None:
+                df_doc_topic = df_doc_topic[(df_doc_topic['label'] == label)]
 
-            df = df_doc_topic[(df_doc_topic['idx_topic'] == topic_idx) &
-                              (df_doc_topic['month'].isin(month)) &
-                              (df_doc_topic['source'].isin(source))].sort_values(by=['prob'],
-                                                                                 ascending=False).head(max_docs)
+            df = df_doc_topic[(df_doc_topic['idx_topic'] == topic_idx)].sort_values(by=['prob'], ascending=False).head(max_docs)
             if df.shape[0] >= min_docs:
                 return df['idx_doc'].tolist(), df['prob'].tolist()
             return [], []
@@ -691,30 +736,24 @@ class Engine:
             else:
                 return np.zeros(768)
 
-        topics = pickle.load(open(os.path.join(self.args.data_path, 'topics.pkl'), 'rb'))
+        topics = pickle.load(open(os.path.join(self.data_path, 'topics.pkl'), 'rb'))
         topic_stems = [[each[0] for each in each1[1]] for each1 in topics]
 
-        if args.polarization in ['emb', 'emb_pairwise']:
+        if polarization in ['emb', 'emb_pairwise']:
             doc_embeddings = self.calc_embeddings(True)
-        elif args.polarization == 'emb_doc':
+        elif polarization == 'emb_doc':
             doc_embeddings = self.calc_embeddings()
         else:
-            doc_embeddings = None
+            doc_embeddings = None, None
 
-        df_doc_topic = pd.read_csv(os.path.join(self.args.data_path, 'df_doc_topic.csv'))
+        df_doc_topic = pd.read_csv(os.path.join(self.data_path, 'df_doc_topic.csv'))
+        topic_ranks = pickle.load(open(os.path.join(self.data_path, 'topic_ranks.pkl'), 'rb'))
+        topic_idxes = [each[0] for each in topic_ranks]
 
-        ### the annotations of the document leanings for documents in the 10 labels topics
-        doc_idx2label = pickle.load(open(os.path.join(self.args.data_path, 'doc_idx2label.pkl'), 'rb'))
-
-        topic_ranks = pickle.load(open(os.path.join(self.args.data_path, 'topic_ranks.pkl'), 'rb'))
-        # topic_idxes = [each[0] for each in topic_ranks]
-        topic_idxes = [1, 2, 8, 9, 10, 11, 12, 27, 30, 33]
-        months = sorted(df_doc_topic['month'].unique().tolist())
-
-        if args.polarization in ['emb', 'emb_pairwise', 'emb_doc']:
+        if polarization in ['emb', 'emb_pairwise', 'emb_doc']:
             corpus, id2word = None, None
         else:
-            corpus, id2word = pickle.load(open(os.path.join(self.args.data_path, 'corpus_lo.pkl'), 'rb'))
+            corpus, id2word = pickle.load(open(os.path.join(self.data_path, 'corpus_lo.pkl'), 'rb'))
 
         data = []
         from sklearn.metrics.pairwise import cosine_similarity
@@ -722,14 +761,12 @@ class Engine:
             print(f"{'*' * 10}Topic: {topic_idx}{'*' * 10}")
             row = [','.join(topic_stems[topic_idx]), f'topic_{topic_idx}']
 
-            months_ = [months]
-            for month in months_:
-                idxes_docs1, text_probs1 = select_docs(df_doc_topic, topic_idx, self.args.source1, month,
-                                                       self.args.max_docs, self.args.min_docs)
-                idxes_docs2, text_probs2 = select_docs(df_doc_topic, topic_idx, self.args.source2, month,
-                                                       self.args.max_docs, self.args.min_docs)
+            if hasattr(self, 'labels'):
+                idxes_docs1, text_probs1 = select_docs(df_doc_topic, topic_idx,
+                                                        max_docs, min_docs, label=1)
+                idxes_docs2, text_probs2 = select_docs(df_doc_topic, topic_idx,
+                                                        max_docs, min_docs, label=0)
                 min_len = min(len(idxes_docs1), len(idxes_docs2))
-                print(f"month:{month}/{max(months)}, n_docs:{min_len}")
                 idxes_docs1_ = idxes_docs1[:min_len]
                 idxes_docs2_ = idxes_docs2[:min_len]
                 text_probs1 = np.array(text_probs1[:min_len])
@@ -737,9 +774,9 @@ class Engine:
                 text_probs1 /= text_probs1.mean()
                 text_probs2 /= text_probs2.mean()
 
-                if self.args.polarization in ['emb', 'emb_pairwise', 'emb_doc']:
+                if polarization in ['emb', 'emb_pairwise', 'emb_doc']:
 
-                    if args.polarization in ['emb', 'emb_doc']:
+                    if polarization in ['emb', 'emb_doc']:
                         emb1 = calc_corpus_embedding(doc_embeddings[idxes_docs1_], text_probs1)
                         emb2 = calc_corpus_embedding(doc_embeddings[idxes_docs2_], text_probs2)
                         cos_sim = cosine_similarity([emb1], [emb2])[0][0]
@@ -749,7 +786,7 @@ class Engine:
                         if embs1_.sum() != 0 and embs2_.sum() != 0:
                             pairwise_cossim = cosine_similarity(embs1_, embs2_)
                             weight_mat = np.matmul(np.array(text_probs1).reshape(-1, 1),
-                                                   np.array(text_probs2).reshape(1, -1))
+                                                    np.array(text_probs2).reshape(1, -1))
                             # weight_mat = np.ones((min_len, min_len))
                             weight_mat = weight_mat / weight_mat.mean()
                             cos_sim = (pairwise_cossim * weight_mat).mean()
@@ -757,58 +794,59 @@ class Engine:
                             cos_sim = float('nan')
                     pola_score = 0.5 * (-cos_sim + 1)
 
-                elif self.args.polarization == 'lo':
+                elif polarization == 'lo':
                     corpus1 = pd.Series(corpus)[idxes_docs1]
                     corpus2 = pd.Series(corpus)[idxes_docs2]
                     pola_score, pol_score_random, n_articles = get_leaveout_score(corpus1, corpus2, id2word,
-                                                                                  min_docs=args.min_docs,
-                                                                                  max_docs=args.max_docs)
+                                                                                    min_docs=min_docs,
+                                                                                    max_docs=max_docs)
                     # pola_score = 1 - 2 * pola_score
                 else:  # ground true
-                    annotations1 = [doc_idx2label[each] for each in idxes_docs1]
-                    annotations2 = [doc_idx2label[each] for each in idxes_docs2]
-                    label2indexes1 = {0: [], 1: [], -1: []}
-                    label2indexes2 = {0: [], 1: [], -1: []}
-                    for i, anno in enumerate(annotations1):
-                        label2indexes1[anno].append(i)
-                    for i, anno in enumerate(annotations2):
-                        label2indexes2[anno].append(i)
+                    raise ValueError('Invalid polarization method')
+            else:
+                idxes_docs, text_probs = select_docs(df_doc_topic, topic_idx,
+                                                        max_docs, min_docs)
+                if len(idxes_docs) < min_docs:
+                    continue
+                min_len = len(idxes_docs)
+                text_probs = np.array(text_probs)
+                text_probs /= text_probs.mean()
 
-                    x = 0
-                    for i in range(len(label2indexes1[1])):
-                        index = label2indexes1[1][i]
-                        prob = text_probs1[index]
-                        x += prob
-                    y = 0
-                    for i in range(len(label2indexes1[0])):
-                        index = label2indexes1[0][i]
-                        prob = text_probs1[index]
-                        y += prob
-                    score1 = (x-y)/len(annotations1)
+                if polarization in ['emb', 'emb_pairwise', 'emb_doc']:
 
-                    x = 0
-                    for i in range(len(label2indexes2[1])):
-                        index = label2indexes2[1][i]
-                        prob = text_probs2[index]
-                        x += prob
-                    y = 0
-                    for i in range(len(label2indexes2[0])):
-                        index = label2indexes2[0][i]
-                        prob = text_probs2[index]
-                        y += prob
-                    score2 = (x - y) / len(annotations2)
+                    if polarization in ['emb', 'emb_doc']:
+                        raise ValueError('Invalid polarization method')
+                    else:
+                        embs = doc_embeddings[idxes_docs]
+                        if embs.sum() != 0:
+                            pairwise_cossim = cosine_similarity(embs, embs)
+                            weight_mat = np.matmul(np.array(text_probs).reshape(-1, 1),
+                                                    np.array(text_probs).reshape(1, -1))
+                            # weight_mat = np.ones((min_len, min_len))
+                            weight_mat = weight_mat / weight_mat.mean()
+                            cos_sim = (pairwise_cossim * weight_mat).mean()
+                        else:
+                            cos_sim = float('nan')
+                        pola_score = 0.5 * (-cos_sim + 1)
 
-                    pola_score = np.abs(score1 - score2) / 2
+                elif polarization == 'lo':
+                    corpus = pd.Series(corpus)[idxes_docs]
+                    pola_score, pol_score_random, n_articles = get_leaveout_score(corpus, corpus, id2word,
+                                                                                    min_docs=min_docs,
+                                                                                    max_docs=max_docs)
+                    # pola_score = 1 - 2 * pola_score
+                else:  # ground true
+                    raise ValueError('Invalid polarization method')
 
-                # pola_score = float('nan') if pola_score == 0 else pola_score
-                row.append(pola_score)
+            # pola_score = float('nan') if pola_score == 0 else pola_score
+            row.append(pola_score)
 
             data.append([row[1], row[2], row[0]])
 
-        os.makedirs('results', exist_ok=True)
-        file_name = f"{args.source1}_{args.source2}{'_unfinetuned' if args.unfinetuned else ''}_{args.polarization}" \
-                    f"_{args.max_docs}_{args.min_docs}.csv"
-        if self.args.shuffle:
+        os.makedirs(os.path.join(self.data_path, 'results'), exist_ok=True)
+        file_name = f"all{'_unfinetuned' if self.unfinetuned else ''}_{polarization}" \
+                    f"_{max_docs}_{min_docs}.csv"
+        if self.shuffle:
             file_name = file_name[:-5] + '_shuffle.csv'
         data.sort(key=lambda x: x[1], reverse=True)
         df = pd.DataFrame(data, columns=['topic_idx', 'pola'] + ['topic_words'])
@@ -842,7 +880,7 @@ def get_rho(dem_q, rep_q):
 def get_token_user_counts(party_counts):
     no_tokens = party_counts.shape[1]
     nonzero = sp.find(party_counts)[:2]
-    user_t_counts = Counter(nonzero[1])  # number of users using each term
+    user_t_counts = collections.Counter(nonzero[1])  # number of users using each term
     party_t = np.ones(no_tokens)  # add one smoothing
     for k, v in user_t_counts.items():
         party_t[k] += v
@@ -1046,89 +1084,168 @@ def get_leaveout_emb_score(dem_counts, rep_counts, token_partisanship_measure='p
     return sim_mat.mean(), 0, 0
 
 
+class PaCTE:
+    def __init__(self):
+        pass
 
-def pacte(docs):
-    data = docs
+    def train(
+            self,
+            docs, 
+            labels,
+            seed=42, 
+            lr=1e-5, 
+            batch_size=24, 
+            epochs=50,
+            unfinetuned=False,
+            shuffle=False,
+            gpu=''
+        ):
+        self._run(
+            docs,
+            labels=labels,
+            train=True,
+            seed=seed,
+            lr=lr,
+            batch_size=batch_size,
+            epochs=epochs,
+            unfinetuned=unfinetuned,
+            shuffle=shuffle,
+            gpu=gpu,
+            polarization=None,
+            plotting=False
+        )
 
-    data_path = './data/pacte'
-    # https://github.com/zihaohe123/pacte-polarized-topics-detection
-    texts_processed_lda, corpus_lda, id2word_lda = preprocessing_lda(data)
-    pickle.dump(texts_processed_lda, open(os.path.join(data_path, 'texts_processed_lda.pkl'), 'wb'))
-    pickle.dump((corpus_lda, id2word_lda), open(os.path.join(data_path, 'corpus_lda.pkl'), 'wb'))
+    def fit_transform(
+            self,
+            docs, 
+            seed=42, 
+            model_path=None,
+            polarization='emb', 
+            n_topics=10, 
+            min_docs=10, 
+            max_docs=10, 
+            dim_reduction='tsne',
+            plotting=False
+        ):
+        return self._run(
+            docs,
+            train=False,
+            seed=seed,
+            model_path=model_path,
+            polarization=polarization,
+            n_topics=n_topics,
+            min_docs=min_docs,
+            max_docs=max_docs,
+            dim_reduction=dim_reduction,
+            plotting=plotting
+        )
+
+    def _run(
+            self,
+            docs, 
+            labels=None,
+            train=False,
+            seed=42, 
+            lr=1e-5, 
+            batch_size=24, 
+            epochs=50,
+            unfinetuned=False,
+            shuffle=False,
+            model_path=None,
+            polarization='emb', 
+            n_topics=10, 
+            min_docs=10, 
+            max_docs=10, 
+            dim_reduction='tsne',
+            plotting=False
+        ):
+        data = docs
+
+        hashable_docs = tuple(docs)
+        dataset_hash = hashlib.md5(str(hashable_docs).encode()).hexdigest()
+        data_path = f'./data/pacte/{dataset_hash}'
+        os.makedirs(data_path, exist_ok=True)
+        # https://github.com/zihaohe123/pacte-polarized-topics-detection
+        texts_processed_lda, corpus_lda, id2word_lda = preprocessing_lda(data)
+        pickle.dump(texts_processed_lda, open(os.path.join(data_path, 'texts_processed_lda.pkl'), 'wb'))
+        pickle.dump((corpus_lda, id2word_lda), open(os.path.join(data_path, 'corpus_lda.pkl'), 'wb'))
 
 
-    text_processed_bert = preprocessing_bert(data)
-    text_processed_bert = [[str(x) for x in y] for y in text_processed_bert]
-    pickle.dump(text_processed_bert, open(os.path.join(data_path, 'texts_processed_bert.pkl'), 'wb'))
+        text_processed_bert = preprocessing_bert(data)
+        text_processed_bert = [[str(x) for x in y] for y in text_processed_bert]
+        pickle.dump(text_processed_bert, open(os.path.join(data_path, 'texts_processed_bert.pkl'), 'wb'))
 
-    df_news = pd.DataFrame(data)
-    df_news.to_csv(os.path.join(data_path, 'df_news.csv'), index=False)
-    topic_modelling(data_path, df_news)
+        df_news = pd.DataFrame(data, columns=['text'])
+        df_news.insert(0, 'idx', np.arange(df_news.shape[0]))
+        if labels:
+            df_news['label'] = labels
+        df_news.to_csv(os.path.join(data_path, 'df_news.csv'), index=False)
 
-    import argparse
+        topic_modelling(data_path, df_news, train=train)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str)
+        assert dim_reduction in ['pca', 'tsne', 'umap']
+        assert polarization in [None, 'emb', 'lo', 'emb_pairwise', 'gt', 'emb_doc']
+        # parser.add_argument('--source1', nargs='+', default=['cnn', 'huff', 'nyt'], help='the left sources')
+        # parser.add_argument('--source2', nargs='+', default=['fox', 'breit', 'nyp'], help='the right sources')
 
-    # training BERT model
-    parser.add_argument('--lr', type=float, default=1e-5)
-    parser.add_argument('--batch_size', type=int, default=24)
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--unfinetuned', type=int, choices=(0, 1), default=0,
-                        help='whether to finetune the language model or not')
-    parser.add_argument('--gpu', type=str, default='', help='which gpus to use, starting from 0')
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--init_train', type=int, choices=(0,1), default=1)
+        if polarization in ['lo', 'gt']:
+            unfinetuned = False
+            init_train = False
+            plotting = False
 
-    parser.add_argument('--shuffle', type=int, choices=(0, 1), default=0,
-                        help='whether to shuffle the partisanship labels or not')
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        np.random.seed(seed)
+        engine = Engine(
+            data_path, 
+            model_path=model_path,
+            init_train=train, 
+            lr=lr, 
+            batch_size=batch_size,
+            epochs=epochs,
+            shuffle=shuffle,
+            unfinetuned=unfinetuned
+        )
+        if train:
+            engine.train()
+            print(f"Saved model to {engine.model_path}")
+        if polarization:
+            target_df = engine.get_polarization(polarization=polarization, min_docs=min_docs, max_docs=max_docs)
+        if plotting:
+            engine.plot_embeddings(dim_reduction='pca')
+            engine.plot_embeddings(dim_reduction='tsne')
+            engine.plot_embeddings(topic_emb=True, dim_reduction='pca')
+            engine.plot_embeddings(topic_emb=True, dim_reduction='tsne')
 
-    # plotting
-    parser.add_argument('--plotting', type=int, choices=(0, 1), default=0, help='whether to plot the embeddings or not')
-    parser.add_argument('--dim_reduction', type=str, choices=('pca', 'tsne', 'umap'), default='tsne', help='which ')
+        if polarization:
+            self.target_info = target_df
 
-    # calculating polarization
-    parser.add_argument('--polarization', type=str,
-                        choices=('emb', # pacte
-                                 'lo',  # leaveout estimator
-                                 'emb_pairwise',   # a baseline, never mind
-                                 'gt',  # ground truth from annotations
-                                 'emb_doc'  # pacte, but the document embedding is the holistic CLS embedding
-                                ),
-                        default='emb',
-                        help='the method to use to calculate the polarization scores')
-    parser.add_argument('--source1', nargs='+', default=['cnn', 'huff', 'nyt'], help='the left sources')
-    parser.add_argument('--source2', nargs='+', default=['fox', 'breit', 'nyp'], help='the right sources')
-    parser.add_argument('--n_topics', type=int, default=10)
-    parser.add_argument('--max_docs', type=int, default=10, help='max # of documents for a topic from each source')
-    parser.add_argument('--min_docs', type=int, default=10, help='min # of documents for a topic from each source')
+            predictions = pickle.load(open(os.path.join(engine.data_path, 'embeddings', f'predictions.pkl'), 'rb'))
 
-    args = parser.parse_args()
-
-    args.data_path = data_path
-
-    if args.polarization in ['lo', 'gt']:
-        args.unfinetuned = 0
-        args.init_train = 0
-        # args.plotting = 0
-
-    args.unfinetuned = {0: False, 1: True}[args.unfinetuned]
-    args.init_train = {0: False, 1: True}[args.init_train]
-    args.plotting = {0: False, 1: True}[args.plotting]
-    args.shuffle = {0: False, 1: True}[args.shuffle]
-
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    engine = Engine(args)
-    if args.init_train:
-        engine.train()
-    df = engine.get_polarization(args)
-    if args.plotting:
-        engine.plot_embeddings(dim_reduction='pca')
-        engine.plot_embeddings(dim_reduction='tsne')
-        engine.plot_embeddings(topic_emb=True, dim_reduction='pca')
-        engine.plot_embeddings(topic_emb=True, dim_reduction='tsne')
-
-    return df
+            df = pd.read_csv(os.path.join(engine.data_path, 'df_doc_topic.csv'))
+            docs_df = df.groupby('idx_doc').agg({'idx_topic': list, 'prob': list}).reset_index()
+            docs_df = docs_df.rename(columns={'idx_topic': 'idx_topics', 'prob': 'probs'})
+            assert docs_df.shape[0] == len(data)
+            assert len(predictions) == len(data)
+            docs_df['pred'] = predictions
+            doc_targets = []
+            probs = np.zeros((len(docs), len(self.target_info)))
+            polarity = np.zeros((len(docs), len(self.target_info)))
+            for i, row in docs_df.iterrows():
+                topic_nums = row['idx_topics']
+                topic_probs = row['probs']
+                pred = row['pred']
+                topic_idx = sorted(zip(topic_nums, topic_probs), key=lambda x: x[1], reverse=True)[0][0]
+                top_target_row = target_df[target_df['topic_idx'] == f'topic_{topic_idx}']
+                target = top_target_row['topic_words'].values[0]
+                doc_targets.append(target)
+                for topic_num, topic_prob in zip(topic_nums, topic_probs):
+                    target_row = target_df[target_df['topic_idx'] == f'topic_{topic_num}']
+                    target_idx = target_row.index[0]
+                    probs[row['idx_doc'], target_idx] = topic_prob
+                    polarity[row['idx_doc'], target_idx] = pred
+            return doc_targets, probs, polarity
+        
+    def get_target_info(self):
+        return self.target_info.rename(columns={'topic_words': 'ngram'})
 

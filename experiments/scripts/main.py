@@ -7,10 +7,10 @@ import wandb
 
 from experiments import metrics
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
     dataset_name = config['data']['datasetname']
-    model_name = config['model']['lllmmodelname']
+    model_name = config['model']['llmmodelname']
     method = config['model']['method']
     vectopic_method = config['model']['vectopicmethod']
     min_topic_size = config['model']['mintopicsize']
@@ -58,7 +58,10 @@ def main(config):
         target_info = wiba_model.get_target_info()
     elif method == 'pacte':
         from experiments.methods import pacte
-        results = pacte.pacte(docs)
+        pacte_model = pacte.PaCTE()
+        model_path = "./data/pacte/1f0d90862b696aa2a805ebc5c2e75ba1/ckp/model.pt"
+        doc_targets, probs, polarity = pacte_model.fit_transform(docs, model_path=model_path, min_docs=1, polarization='emb_pairwise')
+        target_info = pacte_model.get_target_info()
     elif method == 'annotator':
         from experiments.methods import annotator
         annotator_name = config['model']['AnnotatorName']
@@ -92,15 +95,20 @@ def main(config):
     output_docs_df.with_columns([pl.col('Probs').map_elements(lambda l: str(str(l)), pl.String), pl.col('Polarity').map_elements(lambda l: str(str(l)), pl.String)]).write_csv(f'./data/{dataset_base_name}_output.csv')
 
     # evaluate the stance targets
-    gold_targets = docs_df['Target'].to_list()
-    gold_stances = docs_df['Stance'].to_list()
-    label_map = {'FAVOR': 1, 'AGAINST': -1, 'NONE': 0}
-    gold_stances = [label_map[stance] for stance in gold_stances]
-    all_gold_targets = list(set(gold_targets))
-    
-    dists, matches = metrics.targets_closest_distance(all_targets, all_gold_targets)
-    targets_f1 = metrics.f1_targets(all_targets, all_gold_targets, doc_targets, gold_targets)
-    polarity_f1 = metrics.f1_stances(all_targets, all_gold_targets, doc_targets, gold_targets, polarity, gold_stances)
+    if 'Target' in docs_df.columns and 'Stance' in docs_df.columns:
+        gold_targets = docs_df['Target'].to_list()
+        gold_stances = docs_df['Stance'].to_list()
+        label_map = {'FAVOR': 1, 'AGAINST': -1, 'NONE': 0}
+        gold_stances = [label_map[stance] for stance in gold_stances]
+        all_gold_targets = list(set(gold_targets))
+        
+        dists, matches = metrics.targets_closest_distance(all_targets, all_gold_targets)
+        targets_f1 = metrics.f1_targets(all_targets, all_gold_targets, doc_targets, gold_targets)
+        polarity_f1 = metrics.f1_stances(all_targets, all_gold_targets, doc_targets, gold_targets, polarity, gold_stances)
+    else:
+        dists, matches = None, None
+        targets_f1, polarity_f1 = None, None
+
     norm_targets_dist = metrics.normalized_targets_distance(all_targets, docs)
     doc_dist = metrics.document_distance(probs)
     target_polarities = metrics.target_polarity(polarity)
