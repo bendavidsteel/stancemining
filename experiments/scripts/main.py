@@ -1,15 +1,18 @@
+import datetime
 import os
 
+import bertopic.representation
 import hydra
 import numpy as np
+import pandas as pd
 import polars as pl
 import wandb
 
-from experiments import metrics
+from experiments import metrics, datasets
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
-    dataset_name = config['data']['datasetname']
+    dataset_path = config['data']['dataset']
     model_name = config['model']['llmmodelname']
     method = config['model']['method']
     vectopic_method = config['model']['vectopicmethod']
@@ -21,17 +24,18 @@ def main(config):
 
         # track hyperparameters and run metadata
         config={
-            'dataset_name': dataset_name,
+            'dataset_name': dataset_path,
             'model_name': model_name,
             'method': method,
             'vectopic_method': vectopic_method,
         }
     )
 
-    dataset_base_name = os.path.splitext(dataset_name)[0]
-    docs_df = pl.read_csv(f'./data/{dataset_name}')
-    docs = docs_df['Tweet'].to_list()
+    dataset_base_name = os.path.splitext(dataset_path)[0]
+    docs_df = datasets.load_dataset(dataset_path)
+    docs = docs_df['Text'].to_list()
 
+    start_time = datetime.datetime.now()
     if method == 'vectopic':
         import vectopic as vp
         vector = vp.Vector('favor', 'against')
@@ -54,7 +58,9 @@ def main(config):
     elif method == 'wiba':
         from experiments.methods import wiba
         wiba_model = wiba.Wiba()
-        doc_targets, probs, polarity = wiba_model.fit_transform(docs)
+        topic_extraction_path = './models/wiba/meta-llama-Llama-3.2-1B-Instruct-topic-extraction'
+        stance_classification_path = './models/wiba/meta-llama-Llama-3.2-1B-Instruct-stance-classification'
+        doc_targets, probs, polarity = wiba_model.fit_transform(docs, config.wiba, argument_detection_path=None, topic_extraction_path=topic_extraction_path, stance_classification_path=stance_classification_path)
         target_info = wiba_model.get_target_info()
     elif method == 'pacte':
         from experiments.methods import pacte
@@ -69,10 +75,25 @@ def main(config):
         annotator_model = annotator.Annotator(annotation_path)
         doc_targets, probs, polarity = annotator_model.fit_transform(docs)
         target_info = annotator_model.get_target_info()
+    elif method == 'bertopic':
+        import bertopic
+        from bertopic.representation import KeyBERTInspired
+        rep_model = KeyBERTInspired()
+        topic_model = bertopic.BERTopic(representation_model=rep_model, calculate_probabilities=True)
+        targets, probs = topic_model.fit_transform(docs)
+        topics = topic_model.get_topic_info()
+        topic_names = [','.join(t.split('_')[1:]) for t in topics['Name'].tolist()]
+        doc_targets = [[topic_names[t]] for t in targets]
+        polarity = np.zeros((len(docs), len(topics)))
+        target_info = pd.DataFrame({
+            'ngram': topic_names
+        })
     else:
         raise ValueError(f'Unknown method: {method}')
+    end_time = datetime.datetime.now()
 
     all_targets = target_info['ngram'].tolist()
+    doc_targets = [[t] if not isinstance(t, list) else t for t in doc_targets]
     output_docs_df = pl.DataFrame({
         'Tweet': docs,
         'Target': doc_targets,
@@ -82,25 +103,19 @@ def main(config):
 
     target_to_idx = {target: idx for idx, target in enumerate(all_targets)}
 
-    if len(target_to_idx) > 0:
-        output_docs_df = output_docs_df.with_columns([
-            pl.col('Polarity').arr.get(
-                pl.col('Target').replace_strict(target_to_idx)
-            ).alias('TargetPolarity')
-        ])
-        output_docs_df = output_docs_df.with_columns(pl.col('TargetPolarity').replace_strict({-1: 'AGAINST', 0: 'NONE', 1: 'FAVOR'}))
-    else:
-        output_docs_df = output_docs_df.with_columns(pl.lit('NONE').alias('TargetPolarity'))
-
-    output_docs_df.with_columns([pl.col('Probs').map_elements(lambda l: str(str(l)), pl.String), pl.col('Polarity').map_elements(lambda l: str(str(l)), pl.String)]).write_csv(f'./data/{dataset_base_name}_output.csv')
+    output_docs_df.with_columns([
+        pl.col('Probs').map_elements(lambda l: str(str(l)), pl.String), 
+        pl.col('Polarity').map_elements(lambda l: str(str(l)), pl.String),
+        pl.col('Target').map_elements(lambda l: str(l.to_list()), pl.String)
+    ]).write_csv(f'./data/{dataset_base_name}_output.csv')
 
     # evaluate the stance targets
     if 'Target' in docs_df.columns and 'Stance' in docs_df.columns:
         gold_targets = docs_df['Target'].to_list()
         gold_stances = docs_df['Stance'].to_list()
-        label_map = {'FAVOR': 1, 'AGAINST': -1, 'NONE': 0}
-        gold_stances = [label_map[stance] for stance in gold_stances]
-        all_gold_targets = list(set(gold_targets))
+        label_map = {'favor': 1, 'against': -1, 'neutral': 0}
+        gold_stances = [[label_map[s] for s in stances] for stances in gold_stances]
+        all_gold_targets = docs_df['Target'].explode().unique().to_list()
         
         dists, matches = metrics.targets_closest_distance(all_targets, all_gold_targets)
         targets_f1 = metrics.f1_targets(all_targets, all_gold_targets, doc_targets, gold_targets)
@@ -114,6 +129,7 @@ def main(config):
     target_polarities = metrics.target_polarity(polarity)
     inclusion = metrics.hard_inclusion(doc_targets)
     target_dist = metrics.target_distance(doc_targets, docs)
+    total_time = (end_time - start_time).total_seconds()
 
     wandb.log({
         'targets_closest_distance': dists,
@@ -123,7 +139,8 @@ def main(config):
         'document_distance': doc_dist,
         'target_polarities': target_polarities,
         'hard_inclusion': inclusion,
-        'target_distance': target_dist
+        'target_distance': target_dist,
+        'wall_time': total_time
     })
     wandb.finish()
 

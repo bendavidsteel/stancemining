@@ -194,6 +194,7 @@ class VectorTopic:
         all_targets = self.target_info['ngram'].to_list()
         target_to_idx = {target: idx for idx, target in enumerate(all_targets)}
         doc_targets = documents['Target'].to_list()
+        doc_targets = [[t] if t is not None else [] for t in doc_targets]
 
         num_targets = len(self.target_info)
         

@@ -103,37 +103,66 @@ def test_get_targets_probs_polarity():
     assert polarity.shape[0] == len(documents)
     assert polarity.shape[1] == num_targets
 
+
 @pytest.mark.parametrize("gold_targets, extracted_targets", [
     (['labradors', 'pet cats', 'farm animals'], ['dogs', 'cats', 'cows']),
-    (['labradors', 'pet cats', 'farm animals', 'spaceships'], ['dogs', 'cats', 'cows']),
+    (['labradors', 'pet cats', 'farm animals', 'spaceships'], ['dogs', 'cats', 'cows'])
 ])
 def test_target_match_and_supervised_metrics(gold_targets, extracted_targets):
     num_docs = 20
+    gold_doc_targets = []
+    doc_targets = []
+    polarity = np.zeros((num_docs, len(extracted_targets)))
+    gold_polarity = []
+    cycle_len = len(extracted_targets) + 2
+    for i in range(num_docs):
+        if i % cycle_len == 0:
+            doc_target = random.sample(extracted_targets, 2)
+            doc_targets.append(doc_target)
+            for t in doc_target:
+                polarity[i, extracted_targets.index(t)] = np.random.choice([-1, 0, 1])
+
+            gold_doc_targets.append(random.sample(gold_targets, 2))
+            gold_p = []
+            for t in gold_doc_targets:
+                gold_p.append(np.random.choice([-1, 0, 1]))
+            gold_polarity.append(gold_p)
+
+        elif i % cycle_len == 1:
+            doc_targets.append([])
+            gold_doc_targets.append([])
+            gold_polarity.append([])
+        else:
+            doc_target = extracted_targets[i % len(extracted_targets)]
+            doc_targets.append([doc_target])
+            polarity[i, extracted_targets.index(doc_target)] = np.random.choice([-1, 0, 1])
+
+            gold_target = gold_targets[i % len(extracted_targets)]
+            gold_doc_targets.append([gold_target])
+            gold_polarity.append([np.random.choice([-1, 0, 1])])
+
+
     gold_stances = pd.DataFrame({
         "Document": [f"doc_{i}" for i in range(num_docs)],
-        "Target": itertools.islice(itertools.cycle(gold_targets), num_docs),
-        "Stance": itertools.islice(itertools.cycle([1, -1, 0]), num_docs)
+        "Target": gold_doc_targets,
+        "Stance": gold_polarity
     })
 
-    sent_a = "sent_a"
-    sent_b = "sent_b"
-    vector = Vector(sent_a, sent_b)
-    vectopic = MockVectorTopic(vector, targets=extracted_targets)
-    doc_targets, probs, polarity = vectopic.fit_transform(gold_stances['Document'])
+    assert all(isinstance(t, list) for t in doc_targets)
+    assert all(isinstance(t, list) for t in gold_doc_targets)
 
-    targets = vectopic.get_target_info()['ngram'].tolist()
-    dists, matches = metrics.targets_closest_distance(targets, gold_targets)
-    assert len(dists) == len(targets)
-    assert len(matches) == len(targets)
+    dists, matches = metrics.targets_closest_distance(extracted_targets, gold_targets)
+    assert len(dists) == len(extracted_targets)
+    assert len(matches) == len(extracted_targets)
 
-    targets_f1 = metrics.f1_targets(targets, gold_targets, doc_targets, gold_stances['Target'].tolist())
+    targets_f1 = metrics.f1_targets(extracted_targets, gold_targets, doc_targets, gold_stances['Target'].tolist())
     assert 0 <= targets_f1 <= 1
 
-    polarity_f1 = metrics.f1_stances(targets, gold_targets, doc_targets, gold_stances['Target'].tolist(), polarity, gold_stances['Stance'].tolist())
+    polarity_f1 = metrics.f1_stances(extracted_targets, gold_targets, doc_targets, gold_stances['Target'].tolist(), polarity, gold_stances['Stance'].tolist())
     assert 0 <= polarity_f1 <= 1
 
 def test_unsupervised_metrics():
-    num_docs = 10
+    num_docs = 100
     docs = [f"doc_{i}" for i in range(num_docs)]
     sent_a = "sent_a"
     sent_b = "sent_b"

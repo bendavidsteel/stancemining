@@ -119,7 +119,7 @@ class Polar:
                 # if not, tag with None
 
                 if len(d['attitudes']) == 0:
-                    doc_targets.append(None)
+                    doc_targets.append([])
                     continue
 
                 for attitude in d['attitudes']:
@@ -146,10 +146,10 @@ class Polar:
                 topic_vals = probs[doc_idx, :]
                 num_topics = (topic_vals > 0).sum()
                 if num_topics == 0:
-                    doc_targets.append(None)
+                    doc_targets.append([])
                 elif num_topics == 1:
                     topic_idx = np.argmax(topic_vals)
-                    doc_targets.append(self.ngrams[topic_idx])
+                    doc_targets.append([self.ngrams[topic_idx]])
                 else:
                     # check if two topic probs are the same
                     num_max = (topic_vals == np.max(topic_vals)).sum()

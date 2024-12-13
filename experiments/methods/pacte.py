@@ -283,6 +283,10 @@ def get_doc2topics(ldamodel, corpus, threshold=0.15):
     for idx_doc in range(len(corpus)):
         corpus_doc = corpus[idx_doc]
         document_topics = ldamodel.get_document_topics(corpus_doc, minimum_probability=threshold, per_word_topics=False)
+        
+        if len(document_topics) == 0:
+            data.append([idx_doc, -1, 0])
+        
         for j, (idx_topic, prob) in enumerate(document_topics):
             if prob < threshold:
                 continue
@@ -1097,8 +1101,7 @@ class PaCTE:
             batch_size=24, 
             epochs=50,
             unfinetuned=False,
-            shuffle=False,
-            gpu=''
+            shuffle=False
         ):
         self._run(
             docs,
@@ -1110,7 +1113,6 @@ class PaCTE:
             epochs=epochs,
             unfinetuned=unfinetuned,
             shuffle=shuffle,
-            gpu=gpu,
             polarization=None,
             plotting=False
         )
@@ -1237,10 +1239,18 @@ class PaCTE:
                 pred = row['pred']
                 topic_idx = sorted(zip(topic_nums, topic_probs), key=lambda x: x[1], reverse=True)[0][0]
                 top_target_row = target_df[target_df['topic_idx'] == f'topic_{topic_idx}']
-                target = top_target_row['topic_words'].values[0]
-                doc_targets.append(target)
+                targets = top_target_row['topic_words'].values
+                if len(targets) == 0:
+                    doc_targets.append([])
+                elif len(targets) == 1:
+                    target = targets[0]
+                    doc_targets.append([target])
+                else:
+                    doc_targets.append(targets)
                 for topic_num, topic_prob in zip(topic_nums, topic_probs):
                     target_row = target_df[target_df['topic_idx'] == f'topic_{topic_num}']
+                    if len(target_row) == 0:
+                        continue
                     target_idx = target_row.index[0]
                     probs[row['idx_doc'], target_idx] = topic_prob
                     polarity[row['idx_doc'], target_idx] = pred

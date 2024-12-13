@@ -1,13 +1,17 @@
 import os
 
+import hydra
 import polars as pl
 
+from experiments import datasets
 from experiments.methods import pacte
 
-def main():
-    docs_df = pl.read_csv(f'./data/semeval_train.csv')
+@hydra.main(version_base=None, config_path="../../config", config_name="config")
+def main(config):
+    dataset_path = config['data']['dataset']
+    docs_df = datasets.load_dataset(dataset_path)
     docs_df = docs_df.filter(docs_df['Stance'] != 'NONE')
-    docs = docs_df['Tweet'].to_list()
+    docs = docs_df['Text'].to_list()
     labels = docs_df['Stance'].to_list()
     
     pacte_model = pacte.PaCTE()
