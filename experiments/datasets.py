@@ -27,7 +27,12 @@ def load_dataset(name, split='test'):
     elif name == 'ezstance':
         path = f'ezstance/subtaskA/mixed/raw_{split}_all_onecol.csv'
         df = pl.read_csv(os.path.join('.', 'data', path))
-        pass
+        df = df.rename({'Target 1': 'Target', 'Stance 1': 'Stance'})
+        mapping = {
+            'FAVOR': 'favor',
+            'AGAINST': 'against',
+            'NONE': 'neutral'
+        }
     
     df = df.with_columns(pl.col('Stance').replace_strict(mapping))
     df = df.group_by('Text').agg([pl.col('Target'), pl.col('Stance')])

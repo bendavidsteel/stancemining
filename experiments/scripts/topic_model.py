@@ -5,8 +5,8 @@ import polars as pl
 from experiments import datasets
 
 def main():
-    dataset_path = 'vast/vast_test.csv'
-    docs_df = datasets.load_dataset(dataset_path)
+    dataset_name = 'ezstance'
+    docs_df = datasets.load_dataset(dataset_name)
     docs = docs_df['Text'].to_list()
 
     rep_model = KeyBERTInspired()
