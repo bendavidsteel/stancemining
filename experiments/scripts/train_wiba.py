@@ -15,7 +15,7 @@ from experiments.methods.wiba import (
     ModelEvaluator, 
     load_system_message,
     load_training_data,
-    get_validation_split,
+    load_validation_data,
     load_test_data,
     get_model_save_path,
     print_metrics,
@@ -36,7 +36,7 @@ def main(config):
     )
     
     data_config = DataConfig(
-        dataset_name=args.training_data,
+        dataset_name=config.data.dataset,
         add_system_message=args.add_system_message,
         add_topic=args.add_topic,
         id2labels={
@@ -60,7 +60,7 @@ def main(config):
     hf_token = os.environ['HF_TOKEN']
     
     # Setup model path
-    model_save_path = get_model_save_path(args.task, args.save_model_path, args.model_name)
+    model_save_path = get_model_save_path(args.task, args.save_model_path, args.model_name, data_config.dataset_name)
     
     if args.do_train:
         # Setup model and tokenizer
@@ -69,9 +69,9 @@ def main(config):
         trainer.prepare_for_training()
         
         # Process training data
-        train_data = load_training_data(args.training_data)
+        train_data = load_training_data(data_config.dataset_name)
         train_dataset = processor.process_data(train_data)
-        val_dataset = processor.process_data(get_validation_split(train_data))
+        val_dataset = processor.process_data(load_validation_data(data_config.dataset_name))
         
         # Train model
         trainer.train(train_dataset, val_dataset, model_save_path, evaluator)

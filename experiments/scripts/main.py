@@ -12,7 +12,7 @@ from experiments import metrics, datasets
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
-    dataset_path = config['data']['dataset']
+    dataset_name = config['data']['dataset']
     model_name = config['model']['llmmodelname']
     method = config['model']['method']
     vectopic_method = config['model']['vectopicmethod']
@@ -24,15 +24,15 @@ def main(config):
 
         # track hyperparameters and run metadata
         config={
-            'dataset_name': dataset_path,
+            'dataset_name': dataset_name,
             'model_name': model_name,
             'method': method,
             'vectopic_method': vectopic_method,
         }
     )
 
-    dataset_base_name = os.path.splitext(dataset_path)[0]
-    docs_df = datasets.load_dataset(dataset_path)
+    dataset_base_name = os.path.splitext(dataset_name)[0]
+    docs_df = datasets.load_dataset(dataset_name)
     docs = docs_df['Text'].to_list()
 
     start_time = datetime.datetime.now()

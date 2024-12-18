@@ -10,26 +10,22 @@ import evaluate
 import numpy as np
 import pandas as pd
 import peft
+import polars as pl
 import torch
 import tqdm
 import transformers
 import huggingface_hub
 
+import experiments.datasets
 
 def load_training_data(dataset_name: str) -> pd.DataFrame:
-    if dataset_name == "semeval":
-        return pd.read_csv('./data/semeval/semeval_train.csv')
-    raise ValueError(f"Unknown dataset: {dataset_name}")
+    return experiments.datasets.load_dataset(dataset_name, split="train", group=False)
 
-def get_validation_split(df: pd.DataFrame) -> pd.DataFrame:
-    val_split = 0.2
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-    return df.iloc[int(len(df) * (1 - val_split)):]
+def load_validation_data(dataset_name: str) -> pd.DataFrame:
+    return experiments.datasets.load_dataset(dataset_name, split="val", group=False)
 
 def load_test_data(dataset_name: str) -> pd.DataFrame:
-    if dataset_name == "semeval":
-        return pd.read_csv('./data/semeval/semeval_test.csv')
-    raise ValueError(f"Unknown dataset: {dataset_name}")
+    return experiments.datasets.load_dataset(dataset_name, split="test", group=False)
 
 def save_predictions(predictions: List[Any], df: pd.DataFrame, save_path: str) -> None:
     if not os.path.exists(save_path):
@@ -41,7 +37,7 @@ def print_metrics(metrics: Dict[str, float]) -> None:
     for metric, value in metrics.items():
         print(f"{metric}: {value}")
 
-def get_model_save_path(task, model_path_dir, model_name):
+def get_model_save_path(task, model_path_dir, model_name, dataset_name):
     if task == "stance-classification":
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-stance-classification"
     elif task == "argument-classification":
@@ -50,7 +46,7 @@ def get_model_save_path(task, model_path_dir, model_name):
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-topic-extraction"
     else:
         raise ValueError("Task not found")
-    return model_path_name
+    return model_path_name + f"-{dataset_name}"
 
 def load_system_message(task: str) -> str:
     if task == "stance-classification" or task == "argument-classification":
@@ -193,7 +189,7 @@ class DataProcessor:
         else:
             raise ValueError(f"Unknown task: {self.model_config.task}")
             
-        dataset = datasets.Dataset.from_pandas(df)
+        dataset = datasets.Dataset.from_polars(df)
         dataset = self._add_prompts(dataset)
         dataset = self._tokenize_dataset(dataset, train=train)
         if train:
@@ -215,27 +211,28 @@ class DataProcessor:
             **loader_kwargs
         )
     
-    def _process_stance_classification(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.rename(columns={"Stance": "class", "Tweet": "text", "Target": "topic"})
+    def _process_stance_classification(self, df: pl.DataFrame) -> pl.DataFrame:
+        df = df.rename({"Stance": "class", "Text": "text", "Target": "topic"})
         if 'class' in df.columns:
-            df["class"] = df["class"].map(lambda l: {
+            mapping = {
                 'AGAINST': 'Argument_against',
                 'FAVOR': 'Argument_for',
                 'NONE': 'NoArgument'
-            }[l])
-            df["class"] = df["class"].map(self.data_config.id2labels)
+            }
+            df = df.with_columns(pl.col('class').replace_strict(mapping))
+            df = df.with_columns(pl.col('class').replace_strict(self.data_config.id2labels))
             cols = ['text', 'class', 'topic']
         else:
             cols = ['text', 'topic']
-        return df[cols]
+        return df.select(cols)
     
-    def _process_topic_extraction(self, df: pd.DataFrame, train: bool = True) -> pd.DataFrame:
-        df = df.rename(columns={"Target": "topic", "Tweet": "text"})
+    def _process_topic_extraction(self, df: pl.DataFrame, train: bool = True) -> pl.DataFrame:
+        df = df.rename({"Target": "topic", "Text": "text"})
         if train:
             cols = ['text', 'topic']
         else:
             cols = ['text']
-        return df[cols]
+        return df.select(cols)
     
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
         if self.data_config.add_system_message:
@@ -243,8 +240,8 @@ class DataProcessor:
                 return dataset.map(
                     lambda examples: {
                         "text": [
-                            f"[INST] <<SYS>>\n{self.model_config.system_message.strip()}\n<</SYS>>\n\n"
-                            f"Topic: '{topic}' Text: '{text}' [/INST] "
+                            f"{self.model_config.system_message.strip()}\n"
+                            f"Topic: '{topic}' Text: '{text}'"
                             for topic, text in zip(examples['topic'], examples['text'])
                         ]
                     },
@@ -254,8 +251,8 @@ class DataProcessor:
                 return dataset.map(
                     lambda examples: {
                         "text": [
-                            f"[INST] <<SYS>>\n{self.model_config.system_message.strip()}\n<</SYS>>\n\n"\
-                            + "Text: '" + prompt +"' [/INST] "
+                            f"{self.model_config.system_message.strip()}\n"\
+                            + "Text: '" + prompt +"'"
                             for prompt in examples['text']
                         ]
                     }, batched=True)
@@ -697,27 +694,6 @@ def target_extraction(data, config, model_path, token):
     if model_path is None:
         model_path = "armaniii/llama-3-8b-claim-topic-extraction"
 
-    
-    # model = AutoModelForCausalLM.from_pretrained("armaniii/llama-3-8b-claim-topic-extraction",torch_dtype=torch.float16,device_map="auto",low_cpu_mem_usage = True, token=HF_TOKEN)
-    # tokenizer = AutoTokenizer.from_pretrained("armaniii/llama-3-8b-claim-topic-extraction",use_fast = False)
-
-    # tokenizer.pad_token_id = tokenizer.eos_token_id
-    # tokenizer.pad_token_id= 18610
-    # tokenizer.padding_side = "left"
-
-    # with open('./models/wiba/system_message_cte.txt', 'r') as file:
-    #     system_message = file.read()
-
-    # # Using Pipeline
-    # pipe = pipeline('text-generation', model=model, tokenizer=tokenizer,max_new_tokens=8,device_map="auto",torch_dtype=torch.float16,pad_token_id=128009)
-    # data['sentence'] = data['text'].map(lambda x: f'<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_message.strip()}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{x}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n')
-    # inputs = data['sentence']
-    # results = []
-    # for input in tqdm(inputs, total=len(inputs), desc="Generating Topics"):          
-    #     out = pipe(input,batch_size=4)
-    #     result=out[0]['generated_text']
-    #     result = result.split("assistant<|end_header_id|>\n\n")[1]
-    #     results.append(result)
     print(f"Extracting topics using model: {model_path}")
     results = get_predictions("topic-extraction", data, model_path, token, config)
 
@@ -732,33 +708,6 @@ def stance_detection(data, config, model_path, token):
 
         snapshot_download(repo_id=hf_repo_url,local_dir=local_directory)
 
-    # with open('./models/wiba/system_message_arg.txt', 'r') as file:
-    #     system_message = file.read()
-
-    # with open(os.path.join(local_directory, 'adapter_config.json'), 'r') as file:
-    #     adapter_config = json.load(file)
-
-    # base_model = adapter_config['base_model_name_or_path']
-
-    # tokenizer = AutoTokenizer.from_pretrained(base_model)
-    # tokenizer.pad_token = tokenizer.eos_token
-    # model = AutoModelForSequenceClassification.from_pretrained(local_directory,num_labels=3, torch_dtype=torch.float16,device_map="auto",token=HF_TOKEN)
-    # model.eval()
-
-    # # Using Pipeline
-    # pipe = pipeline(task="text-classification", model=model, tokenizer=tokenizer,padding=True,truncation=True,device_map="auto",max_length=2048,torch_dtype=torch.float16)
-
-    # data['sentence'] = data[['topic', 'text']].apply(lambda r: f"[INST] <<SYS>>\n{system_message.strip()}\n<</SYS>>\n\nTarget: '{r['topic']}' Text: '{r['text']}' [/INST] ", axis=1)
-    # inputs = data['sentence']
-    # results = []
-    # for input in tqdm(inputs):          
-    #     out = pipe(input,batch_size=1)
-    #     if out['label'] == 'LABEL_0':
-    #         results.append('No Argument')
-    #     elif out['label'] == 'LABEL_1':
-    #         results.append('Argument in Favor')
-    #     else:
-    #         results.append('Argument Against')
     print(f"Detecting stance using model: {model_path}")
     results = get_predictions("stance-classification", data, model_path, token, config)
     mapping = {
@@ -780,7 +729,7 @@ class Wiba:
         HF_TOKEN = os.environ['HF_TOKEN']
 
         # https://github.com/Armaniii/WIBA
-        data = pd.DataFrame(docs, columns=['text'])
+        data = pl.DataFrame(docs, columns=['text'])
         
         if argument_detection_path is not None:
             data = argument_detection(data, config, argument_detection_path, token=HF_TOKEN)
@@ -796,7 +745,7 @@ class Wiba:
         docs = data['text'].to_list()
         doc_targets = data['topic'].to_list()
         doc_targets = [[t] if not isinstance(t, list) else t for t in doc_targets]
-        self.all_targets = list(set(data['topic'].drop_duplicates()))
+        self.all_targets = list(set(data['topic'].unique()))
         target_to_idx = {target: idx for idx, target in enumerate(self.all_targets)}
         probs = np.zeros((len(docs), len(self.all_targets)))
         for idx, targets in enumerate(doc_targets):

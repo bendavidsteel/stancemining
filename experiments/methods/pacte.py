@@ -283,10 +283,6 @@ def get_doc2topics(ldamodel, corpus, threshold=0.15):
     for idx_doc in range(len(corpus)):
         corpus_doc = corpus[idx_doc]
         document_topics = ldamodel.get_document_topics(corpus_doc, minimum_probability=threshold, per_word_topics=False)
-        
-        if len(document_topics) == 0:
-            data.append([idx_doc, -1, 0])
-        
         for j, (idx_topic, prob) in enumerate(document_topics):
             if prob < threshold:
                 continue
@@ -327,7 +323,7 @@ def topic_modelling(data_path, df_news, train=True):
     df_topic = pd.DataFrame(df_topic, columns=['topic_idx', 'topic_stems', 'probs'])
 
     if train:
-        max_threshold = 0.5
+        max_threshold = 0.8
         threshold = 0.15
         while threshold < max_threshold:
             df_doc_topic = get_doc2topics(lda_model, corpus, threshold=threshold)
@@ -430,11 +426,12 @@ class Engine:
         texts = texts_processed.apply(lambda x: ' '.join(x))
         df_news = pd.read_csv(os.path.join(data_path, 'df_news.csv'))
         if init_train:
-            labels = df_news['label'].map(lambda l: {'FAVOR': 1, 'AGAINST': 0}[l])
+            labels = df_news['label'].map(lambda l: {'favor': 1, 'against': 0}[l])
             if shuffle: # shuffle the labels to serve as the baseline, where the languge model cannot learn partisanship
                 labels = labels.sample(frac=1)
         del df_news
         
+        topic_masks = pd.Series(pickle.load(open(os.path.join(data_path, 'topic_masks.pkl'), 'rb')))
         if init_train:
             val_idexes = pickle.load(open(os.path.join(data_path, 'idxes_val.pkl'), 'rb'))
             train_idexes = set(list(range(len(texts_processed)))) - val_idexes
@@ -461,7 +458,6 @@ class Engine:
             val_dataset = NewsDataset(texts_val, topic_masks_val, labels=labels_val)
             val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
-        topic_masks = pd.Series(pickle.load(open(os.path.join(data_path, 'topic_masks.pkl'), 'rb')))
         texts = texts.tolist()
         if init_train:
             labels = labels.tolist()
@@ -1163,7 +1159,7 @@ class PaCTE:
         ):
         data = docs
 
-        hashable_docs = tuple(docs)
+        hashable_docs = tuple(sorted(docs))
         dataset_hash = hashlib.md5(str(hashable_docs).encode()).hexdigest()
         data_path = f'./data/pacte/{dataset_hash}'
         os.makedirs(data_path, exist_ok=True)

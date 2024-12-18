@@ -5,7 +5,7 @@ import polars as pl
 from experiments import datasets
 
 def main():
-    dataset_name = 'ezstance'
+    dataset_name = 'vast'
     docs_df = datasets.load_dataset(dataset_name)
     docs = docs_df['Text'].to_list()
 
