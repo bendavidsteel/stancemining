@@ -19,12 +19,25 @@ class Transformers(BaseLLM):
             model_name,
             **model_kwargs
         )
+        self.tokenizer.padding_side = 'left'
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
     
-    def generate(self, prompt, max_new_tokens=100, num_samples=3):
-        conversation = [
-            {'role': 'user', 'content': prompt}
-        ]
-        inputs = self.tokenizer.apply_chat_template(conversation, return_dict=True, return_tensors='pt', add_generation_prompt=True)
+    def generate(self, prompt, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
+        if isinstance(prompt, str):
+            conversation = [
+                {'role': 'user', 'content': prompt}
+            ]
+        elif isinstance(prompt, list):
+            conversation = []
+            conversation.append({'role': 'system', 'content': prompt[0]})
+            role = 'user'
+            for i, p in enumerate(prompt[1:]):
+                conversation.append({'role': role, 'content': p})
+                role = 'assistant' if role == 'user' else 'user'
+        else:
+            raise ValueError('Prompt must be a string or list of strings')
+        inputs = self.tokenizer.apply_chat_template(conversation, return_dict=True, return_tensors='pt', add_generation_prompt=add_generation_prompt, continue_final_message=continue_final_message)
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         generate_kwargs = {}
         if num_samples > 1:

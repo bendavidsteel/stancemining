@@ -61,7 +61,7 @@ class VectorTopic:
 
     def _ask_llm_differences(self, docs):
         prompt = f"""Describe some specific stance targets that some of these documents would disagree on.
-        {docs}. Please output 3 suggestions of stance targets of max 3 words, separated by commas. Do not output 'something vs something', just name one version of the stance target."""
+        Documents: {docs}. Please output 3 suggestions of stance targets of max 3 words, separated by commas. Do not output 'something vs something', just name one version of the stance target."""
         outputs = self.generator.generate(prompt, max_new_tokens=30, num_samples=3)
         ngrams = [g.split('\n')[0] for g in outputs]
         ngrams = [i for g in ngrams for i in g.split(',')]
@@ -69,6 +69,107 @@ class VectorTopic:
         ngrams = [g for g in ngrams if g != '']
         ngrams = [g.strip() for g in ngrams]
         return list(set(ngrams))
+
+    def _ask_llm_stance_target(self, doc: str):
+        prompt = [
+            "You are an expert at analyzing documents for stance detection. ",
+            """Your task is to identify the primary stance target in the given document, if one exists. A stance target is the specific topic, entity, or concept that is being supported or opposed in the text.
+
+            Instructions:
+            1. Carefully read the entire document.
+            2. Determine if there is a clear stance being expressed towards any specific target.
+            3. If a stance target exists:
+            - Extract it as a noun phrase (e.g., "gun control", "climate change policy", "vaccination requirements")
+            - Ensure the noun phrase captures the specific target being discussed
+            - Do not include stance indicators (support/oppose) in the target
+            4. If no clear stance target exists, return "None"
+
+            Output format:
+            Stance target: [noun phrase or "None"]
+
+            Reasoning: [Brief explanation of why this is the stance target or why no stance target was found]
+            ---
+            Examples:
+
+            Input: 'We must act now to reduce carbon emissions. The future of our planet depends on immediate action to address this crisis.'""",
+            """Output:
+            Stance target: climate change action
+            Reasoning: The text clearly takes a position on the need for reducing carbon emissions and addressing climate issues.""",
+
+            """Input: 'The weather was beautiful yesterday. I went for a long walk in the park and saw many birds.'""",
+            """Output:
+            Stance target: None
+            Reasoning: This text is purely descriptive and does not express a stance towards any particular target.""",
+            f"""---
+            Input: '{doc}'""",
+            """Output:
+            Stance target: """
+        ]
+        outputs = self.generator.generate(prompt, max_new_tokens=5, num_samples=3, add_generation_prompt=False, continue_final_message=True)
+        # remove reasoning and none responses
+        outputs = [o.split('Reasoning:')[0].split('\n')[0].strip() for o in outputs if 'None' not in o]
+        return outputs
+
+    def _ask_llm_stance(self, doc: str, stance_target: str):
+        # Stance Classification Prompt
+        prompt = [
+            "You are an expert at analyzing stances in documents.",
+            """Your task is to determine the stance expressed towards a specific target in the given document. Consider both explicit and implicit indicators of stance.
+
+            Instructions:
+            1. Carefully read the document while focusing on content related to the provided stance target.
+            2. Classify the stance as one of:
+            - FAVOR: Supporting, promoting, or agreeing with the target
+            - AGAINST: Opposing, criticizing, or disagreeing with the target
+            - NEUTRAL: Presenting balanced or objective information about the target
+
+            Input:
+            Document: [text]
+            Stance target: [noun phrase]
+
+            Output format:
+            Stance: [FAVOR/AGAINST/NEUTRAL]
+            Reasoning: [Brief explanation citing specific evidence from the text]
+
+            Examples:
+
+            Input:
+            Document: "Research shows that diverse communities have higher rates of innovation. Cities with more international residents see increased patent filings and startups."
+            Stance target: immigration""",
+            """Output:
+            Stance: FAVOR
+            Reasoning: Text implicitly supports immigration by highlighting its positive economic impacts through innovation and business creation.
+            """,
+            """Input:
+            Document: "Tech companies want self-governance of social media, while lawmakers push for oversight. Recent polls show the public remains divided."
+            Stance target: social media regulation""",
+            """Output:
+            Stance: NEUTRAL
+            Reasoning: Presents both industry and government perspectives without favoring either side.
+            """,
+            """Input:
+            Document: "Standardized test scores correlate more with family income than academic ability, while countries using alternative assessments report better outcomes."
+            Stance target: standardized testing""",
+            """Output:
+            Stance: AGAINST
+            Reasoning: Implies tests are flawed by linking them to wealth rather than ability and noting superior alternatives.
+            """,
+            """Input:
+            Document: "Some remote workers report higher productivity, others struggle with collaboration. Companies are testing hybrid models."
+            Stance target: remote work""",
+            """Output:
+            Stance: NEUTRAL
+            Reasoning: Balances positive and negative aspects of remote work without taking a position.
+            """,
+            f"""---
+            Document: "{doc}"
+            Stance target: {stance_target}""",
+            """Output:
+            Stance: """
+        ]
+        outputs = self.generator.generate(prompt, max_new_tokens=2, num_samples=1, add_generation_prompt=False, continue_final_message=True)
+        outputs = [o.split('Reasoning:')[0].split('\n')[0].strip() for o in outputs]
+        return outputs[0]
     
     def _ask_llm_score(self, ngram, docs):
         text_name = "comment"
@@ -158,18 +259,19 @@ class VectorTopic:
         target_info = []
         documents = pd.DataFrame({"Document": docs, "ID": range(len(docs))})
         documents = documents.assign(Targets=[[]] * len(documents), Polarities=[[]] * len(documents))
-        for idx, doc in documents.iterrows():
+        for idx, row in tqdm(documents.iterrows(), total=len(docs), desc="Processing documents"):
             # prompt LLM with sample of docs, and ask for suggestions of disagreement
-            ngrams = self._ask_llm_differences(doc)
+            doc = row['Document']
+            ngrams = self._ask_llm_stance_target(doc)
             ngrams_data = []
             for ngram in ngrams:
                 # calculate probability of doc along vector
                 # prompt LLM with target and docs, use token probs as scalar along vector
-                classifications = self._ask_llm_class(ngram, doc)
-                ngram_polarities = [1 if c == self.vector.sent_a else -1 if c == self.vector.sent_b else 0 for c in classifications]
+                c = self._ask_llm_stance(doc, ngram)
+                ngram_polarity = 1 if c == 'FAVOR' else -1 if c == 'AGAINST' else 0
                 # topic_docs[f'{ngram}_Polarity'] = ngram_polarities
                 # topic_info.at[idx, f"{ngram}_polarities"] = polarities
-                ngram_data = {'ngram': ngram, 'polarities': ngram_polarities}
+                ngram_data = {'ngram': ngram, 'polarities': ngram_polarity}
                 ngrams_data.append(ngram_data)
                 # ngram_data['topic_id'] = topic_id
                 target_info.append(ngram_data)
