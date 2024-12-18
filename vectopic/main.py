@@ -1,6 +1,7 @@
 from bertopic import BERTopic
 import numpy as np
 import pandas as pd
+import polars as pl
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 import torch
@@ -93,7 +94,7 @@ class VectorTopic:
     def _get_base_topic_model(self, bertopic_kwargs):
         return BERTopic(**bertopic_kwargs)
 
-    def _llm_fit_transform(self, docs, embeddings=None, bertopic_kwargs={}):
+    def _topic_llm_fit_transform(self, docs, embeddings=None, bertopic_kwargs={}):
         if embeddings is None:
             embeddings = self._get_embeddings(docs)
 
@@ -138,6 +139,58 @@ class VectorTopic:
                 doc_polarities = [{'ngram': ngram, 'polarity': doc[f"{ngram}_Polarity"]} for ngram in ngrams]
                 documents.at[i, 'Targets'] = targets
                 documents.at[i, 'Polarities'] = doc_polarities
+
+        target_info_df = pd.DataFrame(target_info)
+        target_info_df = target_info_df.groupby('ngram').agg({'topic_id': list, 'polarities': sum}).reset_index()
+        target_info_df['mean'] = target_info_df['polarities'].apply(lambda x: np.mean(x))
+        target_info_df['var'] = target_info_df['polarities'].apply(lambda x: np.var(x))
+        self.target_info = target_info_df
+
+        ngram_to_var = {row['ngram']: row['var'] for idx, row in target_info_df.iterrows()}
+
+        # calculate ngram with largest variance
+        documents['Target'] = documents['Targets'].apply(lambda x: max(x, key=lambda ngram: ngram_to_var[ngram]) if len(x) > 0 else None)
+
+        return documents
+    
+    def _llm_topic_fit_transform(self, docs, bertopic_kwargs={}):
+        
+        target_info = []
+        documents = pd.DataFrame({"Document": docs, "ID": range(len(docs))})
+        documents = documents.assign(Targets=[[]] * len(documents), Polarities=[[]] * len(documents))
+        for idx, doc in documents.iterrows():
+            # prompt LLM with sample of docs, and ask for suggestions of disagreement
+            ngrams = self._ask_llm_differences(doc)
+            ngrams_data = []
+            for ngram in ngrams:
+                # calculate probability of doc along vector
+                # prompt LLM with target and docs, use token probs as scalar along vector
+                classifications = self._ask_llm_class(ngram, doc)
+                ngram_polarities = [1 if c == self.vector.sent_a else -1 if c == self.vector.sent_b else 0 for c in classifications]
+                # topic_docs[f'{ngram}_Polarity'] = ngram_polarities
+                # topic_info.at[idx, f"{ngram}_polarities"] = polarities
+                ngram_data = {'ngram': ngram, 'polarities': ngram_polarities}
+                ngrams_data.append(ngram_data)
+                # ngram_data['topic_id'] = topic_id
+                target_info.append(ngram_data)
+            self.topic_info.at[idx, f"ngrams"] = ngrams_data
+
+            targets = [ngram for ngram in ngrams]
+            doc_polarities = [{'ngram': ngram, 'polarity': doc[f"{ngram}_Polarity"]} for ngram in ngrams]
+            documents.at[idx, 'Targets'] = targets
+            documents.at[idx, 'Polarities'] = doc_polarities
+
+        topic_model = self._get_base_topic_model(bertopic_kwargs)
+        topics, probs = topic_model.fit_transform(documents.explode('ngrams').to_list())
+        repr_docs, _, _, _ = topic_model._extract_representative_docs(
+            topic_model.c_tf_idf_,
+            documents,
+            topic_model.topic_representations_,
+            nr_samples=500,
+            nr_repr_docs=self.num_representative_docs,
+        )
+        topic_model.representative_docs_ = repr_docs
+        topic_info = topic_model.get_topic_info()
 
         target_info_df = pd.DataFrame(target_info)
         target_info_df = target_info_df.groupby('ngram').agg({'topic_id': list, 'polarities': sum}).reset_index()
@@ -217,8 +270,10 @@ class VectorTopic:
 
         # the same idea more fleshed out for evaluation 
         # https://arjunbansal.substack.com/p/llms-know-more-than-what-they-say
-        if self.method == 'llm':
-            documents = self._llm_fit_transform(docs, embeddings, bertopic_kwargs)
+        if self.method == 'topicllm':
+            documents = self._topic_llm_fit_transform(docs, embeddings, bertopic_kwargs)
+        elif self.method == 'llmtopic':
+            documents = self._llm_topic_fit_transform(docs, embeddings)
         elif self.method == 'steeringvectors':
             documents = self._embedding_fit_transform(docs, embeddings)
         else:
