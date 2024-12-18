@@ -77,7 +77,7 @@ def test_llm_fit_transform():
     vector = Vector(sent_a, sent_b)
     num_targets = 3
     vectopic = MockVectorTopic(vector, num_targets=3)
-    documents = vectopic._llm_fit_transform(docs)
+    documents = vectopic._topic_llm_fit_transform(docs)
     assert hasattr(vectopic, "topic_info")
     assert hasattr(vectopic, "target_info")
     assert len(vectopic.target_info) == num_targets
@@ -92,7 +92,7 @@ def test_get_targets_probs_polarity():
     num_targets = 4
     vector = Vector(sent_a, sent_b)
     vectopic = MockVectorTopic(vector, num_targets=num_targets, num_topics=num_topics)
-    documents = vectopic._llm_fit_transform(docs)
+    documents = vectopic._topic_llm_fit_transform(docs)
     targets, probs, polarity = vectopic._get_targets_probs_polarity(documents)
     assert len(targets) == len(documents)
     assert isinstance(targets, list)

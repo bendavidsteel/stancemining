@@ -36,7 +36,7 @@ def main(config):
     docs = docs_df['Text'].to_list()
 
     start_time = datetime.datetime.now()
-    if method == 'vectopic':
+    if method in ['topicllm', 'llmtopic']:
         import vectopic as vp
         vector = vp.Vector('favor', 'against')
         model = vp.VectorTopic(
