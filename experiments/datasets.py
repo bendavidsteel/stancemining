@@ -2,7 +2,7 @@ import os
 
 import polars as pl
 
-def load_dataset(name, split='test', group=True):
+def load_dataset(name, split='test', group=True, remove_synthetic_neutral=True):
     
     if name == 'semeval':
         if split == 'val':
@@ -24,8 +24,9 @@ def load_dataset(name, split='test', group=True):
             split = 'dev'
         path = f'vast/vast_{split}.csv'
         df = pl.read_csv(os.path.join('.', 'data', path))
-        # remove synthetic neutrals
-        df = df.filter(pl.col('type_idx') != 4)
+        if remove_synthetic_neutral:
+            # remove synthetic neutrals
+            df = df.filter(pl.col('type_idx') != 4)
         df = df.rename({'post': 'Text', 'topic_str': 'Target', 'label': 'Stance'}).select(['Text', 'Target', 'Stance'])
         mapping = {
             0: 'against',

@@ -65,7 +65,10 @@ def main(config):
     elif method == 'pacte':
         from experiments.methods import pacte
         pacte_model = pacte.PaCTE()
-        model_path = "./data/pacte/1f0d90862b696aa2a805ebc5c2e75ba1/ckp/model.pt"
+        if dataset_name == 'semeval':
+            model_path = "./data/pacte/1f0d90862b696aa2a805ebc5c2e75ba1/ckp/model.pt"
+        elif dataset_name == 'vast':
+            model_path = './data/pacte/0d2834e691aea1247746d643a5116752/ckp/model.pt'
         doc_targets, probs, polarity = pacte_model.fit_transform(docs, model_path=model_path, min_docs=1, polarization='emb_pairwise')
         target_info = pacte_model.get_target_info()
     elif method == 'annotator':

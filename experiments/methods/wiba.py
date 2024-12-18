@@ -18,14 +18,14 @@ import huggingface_hub
 
 import experiments.datasets
 
-def load_training_data(dataset_name: str) -> pd.DataFrame:
-    return experiments.datasets.load_dataset(dataset_name, split="train", group=False)
+def load_training_data(dataset_name: str, task: str) -> pd.DataFrame:
+    return experiments.datasets.load_dataset(dataset_name, split="train", group=False, remove_synthetic_neutral=task!="stance-classification")
 
-def load_validation_data(dataset_name: str) -> pd.DataFrame:
-    return experiments.datasets.load_dataset(dataset_name, split="val", group=False)
+def load_validation_data(dataset_name: str, task: str) -> pd.DataFrame:
+    return experiments.datasets.load_dataset(dataset_name, split="val", group=False, remove_synthetic_neutral=task!="stance-classification")
 
-def load_test_data(dataset_name: str) -> pd.DataFrame:
-    return experiments.datasets.load_dataset(dataset_name, split="test", group=False)
+def load_test_data(dataset_name: str, task: str) -> pd.DataFrame:
+    return experiments.datasets.load_dataset(dataset_name, split="test", group=False, remove_synthetic_neutral=task!="stance-classification")
 
 def save_predictions(predictions: List[Any], df: pd.DataFrame, save_path: str) -> None:
     if not os.path.exists(save_path):
@@ -215,9 +215,9 @@ class DataProcessor:
         df = df.rename({"Stance": "class", "Text": "text", "Target": "topic"})
         if 'class' in df.columns:
             mapping = {
-                'AGAINST': 'Argument_against',
-                'FAVOR': 'Argument_for',
-                'NONE': 'NoArgument'
+                'against': 'Argument_against',
+                'favor': 'Argument_for',
+                'neutral': 'NoArgument'
             }
             df = df.with_columns(pl.col('class').replace_strict(mapping))
             df = df.with_columns(pl.col('class').replace_strict(self.data_config.id2labels))

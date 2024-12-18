@@ -69,9 +69,9 @@ def main(config):
         trainer.prepare_for_training()
         
         # Process training data
-        train_data = load_training_data(data_config.dataset_name)
+        train_data = load_training_data(data_config.dataset_name, model_config.task)
         train_dataset = processor.process_data(train_data)
-        val_dataset = processor.process_data(load_validation_data(data_config.dataset_name))
+        val_dataset = processor.process_data(load_validation_data(data_config.dataset_name, model_config.task))
         
         # Train model
         trainer.train(train_dataset, val_dataset, model_save_path, evaluator)
@@ -81,7 +81,7 @@ def main(config):
             model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.num_labels, model_config.device_map, model_save_path=model_save_path, hf_token=hf_token)
             trainer.set_model_and_tokenizer(model, tokenizer)
 
-        test_data = load_test_data(args.test_data)
+        test_data = load_test_data(data_config.dataset_name, model_config.task)
         test_dataset = processor.process_data(test_data, train=False)
         
         predictions = []
@@ -92,7 +92,7 @@ def main(config):
         if model_config.task in ["argument-classification", "stance-classification"]:
             references = test_dataset['class']
         else:
-            references = test_data['labels']
+            references = test_data['Target']
         metrics = evaluator.evaluate(
             predictions,
             references
