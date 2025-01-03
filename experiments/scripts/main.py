@@ -4,7 +4,6 @@ import os
 import bertopic.representation
 import hydra
 import numpy as np
-import pandas as pd
 import polars as pl
 import wandb
 
@@ -48,7 +47,7 @@ def main(config):
         )
 
         doc_targets, probs, polarity = model.fit_transform(docs, bertopic_kwargs={'min_topic_size': min_topic_size})
-        topic_info = model.get_topic_info()
+        # topic_info = model.get_topic_info()
         target_info = model.get_target_info()
     elif method == 'polar':
         from experiments.methods import polar
@@ -58,9 +57,9 @@ def main(config):
     elif method == 'wiba':
         from experiments.methods import wiba
         wiba_model = wiba.Wiba()
-        topic_extraction_path = './models/wiba/meta-llama-Llama-3.2-1B-Instruct-topic-extraction'
-        stance_classification_path = './models/wiba/meta-llama-Llama-3.2-1B-Instruct-stance-classification'
-        doc_targets, probs, polarity = wiba_model.fit_transform(docs, config.wiba, argument_detection_path=None, topic_extraction_path=topic_extraction_path, stance_classification_path=stance_classification_path)
+        topic_extraction_path = f'./models/wiba/meta-llama-Llama-3.2-1B-Instruct-topic-extraction-vast-ezstance'
+        stance_classification_path = f'./models/wiba/meta-llama-Llama-3.2-1B-Instruct-stance-classification-vast-ezstance'
+        doc_targets, probs, polarity = wiba_model.fit_transform(docs, config.finetune, argument_detection_path=None, topic_extraction_path=topic_extraction_path, stance_classification_path=stance_classification_path)
         target_info = wiba_model.get_target_info()
     elif method == 'pacte':
         from experiments.methods import pacte
@@ -88,14 +87,14 @@ def main(config):
         topic_names = [','.join(t.split('_')[1:]) for t in topics['Name'].tolist()]
         doc_targets = [[topic_names[t]] for t in targets]
         polarity = np.zeros((len(docs), len(topics)))
-        target_info = pd.DataFrame({
-            'ngram': topic_names
+        target_info = pl.DataFrame({
+            'noun_phrase': topic_names
         })
     else:
         raise ValueError(f'Unknown method: {method}')
     end_time = datetime.datetime.now()
 
-    all_targets = target_info['ngram'].tolist()
+    all_targets = target_info['noun_phrase'].to_list()
     doc_targets = [[t] if not isinstance(t, list) else t for t in doc_targets]
     output_docs_df = pl.DataFrame({
         'Tweet': docs,

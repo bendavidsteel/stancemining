@@ -11,6 +11,7 @@ def get_latest_runs():
         'vast/vast_test.csv': 'vast',
         'semeval/semeval_test.csv': 'semeval',
         'semeval_test.csv': 'semeval',
+        'ezstance/ezstance_test.csv': 'ezstance',
     }
 
     latest_by_dataset = {}
@@ -52,7 +53,7 @@ def generate_latex_table(runs_data):
     ]
 
     # Configuration
-    methods = ['PaCTE', 'POLAR', 'WIBA']
+    methods = ['PaCTE', 'POLAR', 'WIBA', 'LLMTopic', 'TopicLLM']
     datasets = ['semeval', 'vast', 'ezstance']
     metrics = [
         'targets_f1',

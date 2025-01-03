@@ -1253,5 +1253,5 @@ class PaCTE:
             return doc_targets, probs, polarity
         
     def get_target_info(self):
-        return self.target_info.rename(columns={'topic_words': 'ngram'})
+        return self.target_info.rename(columns={'topic_words': 'noun_phrase'})
 

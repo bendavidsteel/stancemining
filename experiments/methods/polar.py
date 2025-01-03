@@ -22,7 +22,7 @@ class Polar:
 
     def fit_transform(self, docs):
         # https://github.com/dpasch01/polarlib
-        hashable_docs = tuple(docs)
+        hashable_docs = tuple(sorted(docs))
         dataset_hash = hashlib.md5(str(hashable_docs).encode()).hexdigest()
         output_dir = f"./data/polar/{dataset_hash}/"
         os.makedirs(output_dir, exist_ok=True)
@@ -135,9 +135,9 @@ class Polar:
                                         probs[doc_idx, doc_topic_idx] += 1
 
 
-                    for noun_phrase in attitude['noun_phrases']:
+                    for ngram in attitude['noun_phrases']:
                         for topic_idx, topic in enumerate(topic_attitudes):
-                            if noun_phrase['ngram'] in topic['topic']['nps']:
+                            if ngram['ngram'] in topic['topic']['nps']:
                                 # set probs of doc belonging to noun phrase topic
                                 # if the document features a noun phrase that is considered polarized in a dipole, it seems likely that the document is relevant to the topics discussed in the dipole
                                 # but polarity is neutral
@@ -180,4 +180,4 @@ class Polar:
         return doc_targets, probs, polarity
     
     def get_target_info(self):
-        return pd.DataFrame(self.ngrams, columns=['ngram'])
+        return pd.DataFrame(self.ngrams, columns=['noun_phrase'])

@@ -6,7 +6,7 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 import torch
 
-from vectopic import llms
+from vectopic import llms, finetune, prompting
 from vectopic.ngram_gen import NGramGeneration
 
 keyword_prompt = """<|system|>You are a helpful, respectful and honest assistant for labeling topics..</s>
@@ -19,6 +19,30 @@ The topic is described by the following keywords: '[KEYWORDS]'.
 Based on the information about the topic above, please create a short label of this topic. Make sure you to only return the label and nothing more.</s>
 <|assistant|>"""
 
+def get_var_and_max_var_target(documents_df, target_info):
+    target_info_df = pl.DataFrame(target_info)
+    target_info_df = target_info_df.group_by('noun_phrase')\
+        .agg(pl.col('topic_id'), pl.col('polarity'))
+    target_info_df = target_info_df.with_columns([
+        pl.col('polarity').list.mean().alias('mean'),
+        pl.when(pl.col('polarity').list.len() > 1)\
+            .then(pl.col('polarity').list.var())\
+            .otherwise(0)
+            .alias('var')
+    ])
+
+    documents_df = documents_df.join(
+        documents_df.explode('Targets')\
+            .join(target_info_df, left_on='Targets', right_on='noun_phrase', how='left')\
+            .group_by('ID')\
+            .agg(pl.all().sort_by('var').last())\
+            .with_columns(pl.col('Targets').alias('Target'))\
+            .select(['ID', 'Target']),
+        on='ID',
+        how='left'
+    )
+    return documents_df, target_info_df
+
 
 class Vector:
     def __init__(self, sent_a, sent_b):
@@ -30,14 +54,17 @@ class VectorTopic:
     def __init__(self, 
                  vector, 
                  method='llm', 
+                 llm_method='zero-shot',
                  num_representative_docs=5,
                  model_lib='transformers', 
                  model_name='microsoft/Phi-3.5-mini-instruct', 
                  model_kwargs={}, 
-                 tokenizer_kwargs={}
+                 tokenizer_kwargs={},
+                 finetune_kwargs={}
                 ):
         self.vector = vector
         self.method = method
+        self.llm_method = llm_method
 
         self.num_representative_docs = num_representative_docs
 
@@ -45,6 +72,7 @@ class VectorTopic:
         self.model_name = model_name
         self.model_kwargs = model_kwargs
         self.tokenizer_kwargs = tokenizer_kwargs
+        self.finetune_kwargs = finetune_kwargs
 
         self.generator = self._get_generator()
 
@@ -54,131 +82,41 @@ class VectorTopic:
         model = SentenceTransformer(self.embedding_model)
         return model
 
-    def _get_embeddings(self, docs):
-        embedding_model = self._get_embedding_model()
-        embeddings = embedding_model.encode(docs)
+    def _get_embeddings(self, docs, model=None):
+        if model is None:
+            model = self._get_embedding_model()
+        embeddings = model.encode(docs)
         return embeddings
 
-    def _ask_llm_differences(self, docs):
-        prompt = f"""Describe some specific stance targets that some of these documents would disagree on.
-        Documents: {docs}. Please output 3 suggestions of stance targets of max 3 words, separated by commas. Do not output 'something vs something', just name one version of the stance target."""
-        outputs = self.generator.generate(prompt, max_new_tokens=30, num_samples=3)
-        ngrams = [g.split('\n')[0] for g in outputs]
-        ngrams = [i for g in ngrams for i in g.split(',')]
-        ngrams = [g.lower().replace(f'{self.vector.sent_a}:', '').replace(f'{self.vector.sent_b}:', '') for g in ngrams]
-        ngrams = [g for g in ngrams if g != '']
-        ngrams = [g.strip() for g in ngrams]
-        return list(set(ngrams))
-
-    def _ask_llm_stance_target(self, doc: str):
-        prompt = [
-            "You are an expert at analyzing documents for stance detection. ",
-            """Your task is to identify the primary stance target in the given document, if one exists. A stance target is the specific topic, entity, or concept that is being supported or opposed in the text.
-
-            Instructions:
-            1. Carefully read the entire document.
-            2. Determine if there is a clear stance being expressed towards any specific target.
-            3. If a stance target exists:
-            - Extract it as a noun phrase (e.g., "gun control", "climate change policy", "vaccination requirements")
-            - Ensure the noun phrase captures the specific target being discussed
-            - Do not include stance indicators (support/oppose) in the target
-            4. If no clear stance target exists, return "None"
-
-            Output format:
-            Stance target: [noun phrase or "None"]
-
-            Reasoning: [Brief explanation of why this is the stance target or why no stance target was found]
-            ---
-            Examples:
-
-            Input: 'We must act now to reduce carbon emissions. The future of our planet depends on immediate action to address this crisis.'""",
-            """Output:
-            Stance target: climate change action
-            Reasoning: The text clearly takes a position on the need for reducing carbon emissions and addressing climate issues.""",
-
-            """Input: 'The weather was beautiful yesterday. I went for a long walk in the park and saw many birds.'""",
-            """Output:
-            Stance target: None
-            Reasoning: This text is purely descriptive and does not express a stance towards any particular target.""",
-            f"""---
-            Input: '{doc}'""",
-            """Output:
-            Stance target: """
-        ]
-        outputs = self.generator.generate(prompt, max_new_tokens=5, num_samples=3, add_generation_prompt=False, continue_final_message=True)
-        # remove reasoning and none responses
-        outputs = [o.split('Reasoning:')[0].split('\n')[0].strip() for o in outputs if 'None' not in o]
-        return outputs
-
-    def _ask_llm_stance(self, doc: str, stance_target: str):
-        # Stance Classification Prompt
-        prompt = [
-            "You are an expert at analyzing stances in documents.",
-            """Your task is to determine the stance expressed towards a specific target in the given document. Consider both explicit and implicit indicators of stance.
-
-            Instructions:
-            1. Carefully read the document while focusing on content related to the provided stance target.
-            2. Classify the stance as one of:
-            - FAVOR: Supporting, promoting, or agreeing with the target
-            - AGAINST: Opposing, criticizing, or disagreeing with the target
-            - NEUTRAL: Presenting balanced or objective information about the target
-
-            Input:
-            Document: [text]
-            Stance target: [noun phrase]
-
-            Output format:
-            Stance: [FAVOR/AGAINST/NEUTRAL]
-            Reasoning: [Brief explanation citing specific evidence from the text]
-
-            Examples:
-
-            Input:
-            Document: "Research shows that diverse communities have higher rates of innovation. Cities with more international residents see increased patent filings and startups."
-            Stance target: immigration""",
-            """Output:
-            Stance: FAVOR
-            Reasoning: Text implicitly supports immigration by highlighting its positive economic impacts through innovation and business creation.
-            """,
-            """Input:
-            Document: "Tech companies want self-governance of social media, while lawmakers push for oversight. Recent polls show the public remains divided."
-            Stance target: social media regulation""",
-            """Output:
-            Stance: NEUTRAL
-            Reasoning: Presents both industry and government perspectives without favoring either side.
-            """,
-            """Input:
-            Document: "Standardized test scores correlate more with family income than academic ability, while countries using alternative assessments report better outcomes."
-            Stance target: standardized testing""",
-            """Output:
-            Stance: AGAINST
-            Reasoning: Implies tests are flawed by linking them to wealth rather than ability and noting superior alternatives.
-            """,
-            """Input:
-            Document: "Some remote workers report higher productivity, others struggle with collaboration. Companies are testing hybrid models."
-            Stance target: remote work""",
-            """Output:
-            Stance: NEUTRAL
-            Reasoning: Balances positive and negative aspects of remote work without taking a position.
-            """,
-            f"""---
-            Document: "{doc}"
-            Stance target: {stance_target}""",
-            """Output:
-            Stance: """
-        ]
-        outputs = self.generator.generate(prompt, max_new_tokens=2, num_samples=1, add_generation_prompt=False, continue_final_message=True)
-        outputs = [o.split('Reasoning:')[0].split('\n')[0].strip() for o in outputs]
-        return outputs[0]
     
-    def _ask_llm_score(self, ngram, docs):
+    def _ask_llm_stance_target(self, doc: str):
+        if self.llm_method == 'zero-shot':
+            return prompting.ask_llm_zero_shot_stance_target(self.generator, doc)
+        elif self.llm_method == 'finetuned':
+            model_name = self.finetune_kwargs['model_name']
+            topic_extraction_path = f'./models/wiba/{model_name}-topic-extraction-vast-ezstance'
+            results = finetune.get_predictions("topic-extraction", [doc], topic_extraction_path, self.finetune_kwargs)
+            return results[0]
+
+    def _ask_llm_stance(self, docs, stance_targets):
+        if self.llm_method == 'zero-shot':
+            return prompting.ask_llm_zero_shot_stance(self.generator, docs, stance_targets)
+        elif self.llm_method == 'finetuned':
+            model_name = self.finetune_kwargs['model_name']
+            stance_classification_path = f'./models/wiba/{model_name}-stance-classification-vast-ezstance'
+            data = pd.DataFrame({'text': docs, 'target': stance_targets})
+            results = finetune.get_predictions("stance-classification", data, stance_classification_path, self.finetune_kwargs)
+            return results[0]
+
+
+    def _ask_llm_score(self, noun_phrase, docs):
         text_name = "comment"
-        prompt = f"""Targeted towards {ngram}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
+        prompt = f"""Targeted towards {noun_phrase}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
         return self.generator.get_prompt_response_probs(prompt, docs, self.vector.sent_a, self.vector.sent_b, self.vector.neutral)
 
-    def _ask_llm_class(self, ngram, docs):
+    def _ask_llm_class(self, noun_phrase, docs):
         text_name = "comment"
-        prompt = f"""Targeted towards {ngram}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
+        prompt = f"""Targeted towards {noun_phrase}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
         classifications = []
         for doc in docs:
             prompt = prompt.format(doc=doc)
@@ -192,12 +130,27 @@ class VectorTopic:
             classifications.append(classification)
         return classifications
 
+    def _remove_similar_phrases(self, noun_phrases, embedding_model=None):
+        if len(noun_phrases) < 2:
+            return noun_phrases
+        # use embedding model to remove similar phrases
+        embeddings = self._get_embeddings(noun_phrases, model=embedding_model)
+        # get cosine similarity
+        similarity = np.dot(embeddings, embeddings.T) / (np.linalg.norm(embeddings, axis=1) * np.linalg.norm(embeddings, axis=1)[:, None])
+        similarity = np.triu(similarity, k=1)
+        # get indices of similar phrases
+        indices = np.where(similarity > 0.8)
+        # remove similar phrases
+        noun_phrases = [noun_phrases[i] for i in range(len(noun_phrases)) if i not in indices[0]]
+        return noun_phrases
+
     def _get_base_topic_model(self, bertopic_kwargs):
         return BERTopic(**bertopic_kwargs)
 
     def _topic_llm_fit_transform(self, docs, embeddings=None, bertopic_kwargs={}):
+        embedding_model = self._get_embedding_model()
         if embeddings is None:
-            embeddings = self._get_embeddings(docs)
+            embeddings = self._get_embeddings(docs, model=embedding_model)
 
         topic_model = self._get_base_topic_model(bertopic_kwargs)
         topics, probs = topic_model.fit_transform(docs, embeddings=embeddings)
@@ -210,83 +163,102 @@ class VectorTopic:
             nr_repr_docs=self.num_representative_docs,
         )
         topic_model.representative_docs_ = repr_docs
-        self.topic_info = topic_model.get_topic_info()
+        topic_info = topic_model.get_topic_info()
         target_info = []
 
-        self.topic_info = self.topic_info.assign(ngrams=[[]] * len(self.topic_info))
-        documents = documents.assign(Targets=[[]] * len(documents), Polarities=[[]] * len(documents))
-        for idx, topic in self.topic_info.iterrows():
-            # prompt LLM with sample of docs, and ask for suggestions of disagreement
-            ngrams = self._ask_llm_differences(topic['Representative_Docs'])
-            topic_id = topic['Topic']
-            topic_docs = documents[documents['Topic'] == topic_id]
-            ngrams_data = []
-            for ngram in ngrams:
-                # calculate probability of doc along vector
-                # prompt LLM with target and docs, use token probs as scalar along vector
-                raw_topic_docs = topic_docs['Document']
-                classifications = self._ask_llm_class(ngram, raw_topic_docs)
-                ngram_polarities = [1 if c == self.vector.sent_a else -1 if c == self.vector.sent_b else 0 for c in classifications]
-                topic_docs[f'{ngram}_Polarity'] = ngram_polarities
-                # topic_info.at[idx, f"{ngram}_polarities"] = polarities
-                ngram_data = {'ngram': ngram, 'polarities': ngram_polarities}
-                ngrams_data.append(ngram_data)
-                ngram_data['topic_id'] = topic_id
-                target_info.append(ngram_data)
-            self.topic_info.at[idx, f"ngrams"] = ngrams_data
+        document_df = pl.from_pandas(documents)
+        topic_info_df = pl.from_pandas(topic_info)
 
-            for i, doc in topic_docs.iterrows():
-                targets = [ngram for ngram in ngrams]
-                doc_polarities = [{'ngram': ngram, 'polarity': doc[f"{ngram}_Polarity"]} for ngram in ngrams]
-                documents.at[i, 'Targets'] = targets
-                documents.at[i, 'Polarities'] = doc_polarities
+        # get stance targets for outliers
+        outliers_df = document_df.filter(pl.col('Topic') == -1)
+        stance_targets = self._ask_llm_stance_target(tqdm(outliers_df['Document'], desc="Getting base stance targets"))
+        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        outliers_df = outliers_df.with_columns(pl.Series(name='Targets', values=stance_targets))
 
-        target_info_df = pd.DataFrame(target_info)
-        target_info_df = target_info_df.groupby('ngram').agg({'topic_id': list, 'polarities': sum}).reset_index()
-        target_info_df['mean'] = target_info_df['polarities'].apply(lambda x: np.mean(x))
-        target_info_df['var'] = target_info_df['polarities'].apply(lambda x: np.var(x))
+        # get stance targets for non-outliers
+        stance_targets = [prompting.ask_llm_topic_stance_targets(self.generator, r['Representative_Docs'], r['Representation']) for r in tqdm(topic_info_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
+        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        topic_info_df = topic_info_df.with_columns(pl.Series(name='Targets', values=stance_targets))
+
+        non_outliers_df = document_df.filter(pl.col('Topic') != -1)
+        non_outliers_df = non_outliers_df.join(topic_info_df, on='Topic', how='left')
+        document_df = pl.concat([outliers_df, non_outliers_df], how='diagonal_relaxed')
+
+        # get stances for all targets
+        targets_df = document_df.explode('Targets')
+        targets_df = targets_df.with_columns(
+            pl.Series(name='Stance', values=self._ask_llm_stance(targets_df['Document'], targets_df['Targets']))
+        )
+        targets_df = targets_df.with_columns(
+            pl.when(pl.col('Stance') == 'FAVOR')\
+                .then(1)\
+                .when(pl.col('Stance') == 'AGAINST')\
+                .then(-1)\
+                .otherwise(0)\
+                .alias('Polarity')
+        )
+        target_info.extend(targets_df[['Targets', 'Polarity']].rename({'Targets': 'noun_phrase', 'Polarity': 'polarity'}).to_dicts())
+
+        # join targets back to documents
+        document_df = document_df.join(
+            targets_df.group_by('ID')\
+                .agg(pl.col('Targets'), pl.col('Polarity'))\
+                .rename({'Targets': 'Targets', 'Polarity': 'Polarities'}),
+            on='ID',
+            how='left'
+        )
+
+        documents_df, target_info_df = get_var_and_max_var_target(documents_df, target_info)
         self.target_info = target_info_df
-
-        ngram_to_var = {row['ngram']: row['var'] for idx, row in target_info_df.iterrows()}
-
-        # calculate ngram with largest variance
-        documents['Target'] = documents['Targets'].apply(lambda x: max(x, key=lambda ngram: ngram_to_var[ngram]) if len(x) > 0 else None)
 
         return documents
     
-    def _llm_topic_fit_transform(self, docs, bertopic_kwargs={}):
-        
+    def _get_base_targets(self, docs, embedding_model):
         target_info = []
-        documents = pd.DataFrame({"Document": docs, "ID": range(len(docs))})
-        documents = documents.assign(Targets=[[]] * len(documents), Polarities=[[]] * len(documents))
-        for idx, row in tqdm(documents.iterrows(), total=len(docs), desc="Processing documents"):
-            # prompt LLM with sample of docs, and ask for suggestions of disagreement
-            doc = row['Document']
-            ngrams = self._ask_llm_stance_target(doc)
-            ngrams_data = []
-            for ngram in ngrams:
-                # calculate probability of doc along vector
-                # prompt LLM with target and docs, use token probs as scalar along vector
-                c = self._ask_llm_stance(doc, ngram)
-                ngram_polarity = 1 if c == 'FAVOR' else -1 if c == 'AGAINST' else 0
-                # topic_docs[f'{ngram}_Polarity'] = ngram_polarities
-                # topic_info.at[idx, f"{ngram}_polarities"] = polarities
-                ngram_data = {'ngram': ngram, 'polarities': ngram_polarity}
-                ngrams_data.append(ngram_data)
-                # ngram_data['topic_id'] = topic_id
-                target_info.append(ngram_data)
-            self.topic_info.at[idx, f"ngrams"] = ngrams_data
+        documents_df = pl.DataFrame({"Document": docs, "ID": range(len(docs))})
 
-            targets = [ngram for ngram in ngrams]
-            doc_polarities = [{'ngram': ngram, 'polarity': doc[f"{ngram}_Polarity"]} for ngram in ngrams]
-            documents.at[idx, 'Targets'] = targets
-            documents.at[idx, 'Polarities'] = doc_polarities
+        stance_targets = self._ask_llm_stance_target(tqdm(documents_df['Document'], desc="Getting base stance targets"))
+        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        documents_df = documents_df.with_columns(pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String)))
+        
+        noun_phrase_df = documents_df.explode('noun_phrases').rename({'noun_phrases': 'noun_phrase'}).drop_nulls()
+        noun_phrase_df = noun_phrase_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(noun_phrase_df['Document'], noun_phrase_df['noun_phrase'])))
+        noun_phrase_df = noun_phrase_df.with_columns(
+            pl.when(pl.col('stance') == 'FAVOR')\
+                .then(1)\
+                .when(pl.col('stance') == 'AGAINST')\
+                .then(-1)\
+                .otherwise(0)\
+                .alias('polarity')
+        )
+        target_info.extend(noun_phrase_df[['noun_phrase', 'polarity']].to_dicts())
+        documents_df = documents_df.drop('noun_phrases').join(
+            noun_phrase_df.group_by('ID')\
+                .agg(pl.col('noun_phrase'), pl.col('polarity'))\
+                .rename({'noun_phrase': 'Targets', 'polarity': 'Polarities'}),
+            on='ID',
+            how='left'
+        ).with_columns([
+            pl.col('Targets').fill_null([]),
+            pl.col('Polarities').fill_null([])
+        ])
+        return documents_df, target_info
 
+    def _llm_topic_fit_transform(self, docs, bertopic_kwargs={}):
+        embedding_model = self._get_embedding_model()
+        documents_df, target_info = self._get_base_targets(docs, embedding_model)
+
+        # cluster initial stance targets
         topic_model = self._get_base_topic_model(bertopic_kwargs)
-        topics, probs = topic_model.fit_transform(documents.explode('ngrams').to_list())
+        base_targets_df = documents_df.explode('Targets').unique('Targets').drop_nulls()[['Targets']]
+        topics, probs = topic_model.fit_transform(base_targets_df['Targets'].to_list())
+        base_targets_df = base_targets_df.with_columns([
+            pl.Series(name='Topic', values=topics),
+            pl.col('Targets').alias('Document')
+        ]).with_row_index(name='ID')
         repr_docs, _, _, _ = topic_model._extract_representative_docs(
             topic_model.c_tf_idf_,
-            documents,
+            base_targets_df.to_pandas(),
             topic_model.topic_representations_,
             nr_samples=500,
             nr_repr_docs=self.num_representative_docs,
@@ -294,18 +266,47 @@ class VectorTopic:
         topic_model.representative_docs_ = repr_docs
         topic_info = topic_model.get_topic_info()
 
-        target_info_df = pd.DataFrame(target_info)
-        target_info_df = target_info_df.groupby('ngram').agg({'topic_id': list, 'polarities': sum}).reset_index()
-        target_info_df['mean'] = target_info_df['polarities'].apply(lambda x: np.mean(x))
-        target_info_df['var'] = target_info_df['polarities'].apply(lambda x: np.var(x))
+        # get higher level stance targets for each topic
+        topic_info = pl.from_pandas(topic_info)
+        no_outliers_df = topic_info.filter(pl.col('Topic') != -1)
+        stance_targets = [prompting.ask_llm_target_aggregate(self.generator, r['Representative_Docs'], r['Representation']) for r in tqdm(no_outliers_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
+        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        no_outliers_df = no_outliers_df.with_columns(
+            pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String))
+        )
+        topic_info = pl.concat([topic_info.filter(pl.col('Topic') == -1), no_outliers_df], how='diagonal_relaxed')\
+            .with_columns(pl.col('noun_phrases').fill_null([]))
+
+        # map documents to new noun phrases, then get stance on new noun phrases
+        targets_df = documents_df.explode('Targets')
+        targets_df = targets_df.join(base_targets_df, on='Targets', how='left')
+        targets_df = targets_df.filter(pl.col('Topic') != -1)
+        targets_df = targets_df.join(topic_info, on='Topic', how='left')
+        noun_phrases_df = targets_df.explode('noun_phrases').rename({'noun_phrases': 'noun_phrase'})
+        noun_phrases_df = noun_phrases_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(noun_phrases_df['Document'], noun_phrases_df['noun_phrase'])))
+        noun_phrases_df = noun_phrases_df.with_columns(pl.when(pl.col('stance') == 'FAVOR').then(1).when(pl.col('stance') == 'AGAINST').then(-1).otherwise(0).alias('polarity'))
+        target_info.extend(noun_phrases_df.rename({'Topic': 'topic_id'}).select(['noun_phrase', 'polarity', 'topic_id']).to_dicts())
+        documents_df = documents_df.join(
+                noun_phrases_df.group_by('ID')\
+                    .agg(pl.col('noun_phrase'), pl.col('polarity'))\
+                    .rename({'noun_phrase': 'NewTargets', 'polarity': 'NewPolarities'}), 
+            on='ID', 
+            how='left'
+        )
+        documents_df = documents_df.with_columns(
+            pl.when(pl.col('NewTargets').is_not_null())\
+                .then(pl.concat_list(pl.col('Targets'), pl.col('NewTargets')))\
+                .otherwise(pl.col('Targets')))
+        documents_df = documents_df.with_columns(
+            pl.when(pl.col('NewPolarities').is_not_null())\
+                .then(pl.concat_list(pl.col('Polarities'), pl.col('NewPolarities')))\
+                .otherwise(pl.col('Polarities')))
+        documents_df = documents_df.drop(['NewTargets', 'NewPolarities'])
+
+        documents_df, target_info_df = get_var_and_max_var_target(documents_df, target_info)
         self.target_info = target_info_df
 
-        ngram_to_var = {row['ngram']: row['var'] for idx, row in target_info_df.iterrows()}
-
-        # calculate ngram with largest variance
-        documents['Target'] = documents['Targets'].apply(lambda x: max(x, key=lambda ngram: ngram_to_var[ngram]) if len(x) > 0 else None)
-
-        return documents
+        return documents_df
     
     def _embedding_fit_transform():
         raise NotImplementedError("Method 'steeringvectors' not implemented")
@@ -323,30 +324,30 @@ class VectorTopic:
         for idx, topic in topic_info.iterrows():
             # get generic vector, check projections of docs along that vector
             # then for multiple points in the space, take the mean difference vector, and use that as a steering vector
-            # to produce generations of suggestions for ngrams
-            ngrams = ask_llm(topic['representative_docs'])
+            # to produce generations of suggestions for noun_phrases
+            noun_phrases = ask_llm(topic['representative_docs'])
             topic_id = topic['id']
             topic_docs = [docs[i] for i in range(len(docs)) if topics[i] == topic_id]
-            ngram_probs = []
+            noun_phrase_probs = []
             means = []
             vars = []
-            for ngram in ngrams:
+            for noun_phrase in noun_phrases:
                 # calculate probability of doc along vector
                 # https://arjunbansal.substack.com/p/llms-know-more-than-what-they-say
-                # get ngram specific target vector, and check projection of doc activations along that vector
-                probs = ask_llm(ngram, topic_docs)
-                ngram_probs.append(probs)
+                # get noun_phrase specific target vector, and check projection of doc activations along that vector
+                probs = ask_llm(noun_phrase, topic_docs)
+                noun_phrase_probs.append(probs)
                 means.append(np.mean(probs))
                 vars.append(np.var(probs))
 
-            self.topic_info.at[idx, 'ngram_probs'] = ngram_probs
-            self.topic_info.at[idx, 'ngram_means'] = means
-            self.topic_info.at[idx, 'ngram_vars'] = vars
+            self.topic_info.at[idx, 'noun_phrase_probs'] = noun_phrase_probs
+            self.topic_info.at[idx, 'noun_phrase_means'] = means
+            self.topic_info.at[idx, 'noun_phrase_vars'] = vars
 
         return documents
     
     def _get_targets_probs_polarity(self, documents):
-        all_targets = self.target_info['ngram'].to_list()
+        all_targets = self.target_info['noun_phrase'].to_list()
         target_to_idx = {target: idx for idx, target in enumerate(all_targets)}
         doc_targets = documents['Target'].to_list()
         doc_targets = [[t] if t is not None else [] for t in doc_targets]
@@ -356,11 +357,11 @@ class VectorTopic:
         polarities = np.zeros((len(documents), num_targets))
         probs = np.zeros((len(documents), num_targets))
         polarities_dict = documents['Polarities'].to_list()
-        for i, doc_polarities in enumerate(polarities_dict):
-            doc_num_targets = len(doc_polarities)
-            for d in doc_polarities:
-                idx = target_to_idx[d['ngram']]
-                polarities[i, idx] = d['polarity']
+        for i, doc_data in enumerate(documents.to_dicts()):
+            doc_num_targets = len(doc_data['Targets'])
+            for doc_target, doc_polarity in zip(doc_data['Targets'], doc_data['Polarities']):
+                idx = target_to_idx[doc_target]
+                polarities[i, idx] = doc_polarity
                 probs[i, idx] = 1/doc_num_targets
 
         return doc_targets, probs, polarities
@@ -375,7 +376,7 @@ class VectorTopic:
         if self.method == 'topicllm':
             documents = self._topic_llm_fit_transform(docs, embeddings, bertopic_kwargs)
         elif self.method == 'llmtopic':
-            documents = self._llm_topic_fit_transform(docs, embeddings)
+            documents = self._llm_topic_fit_transform(docs, bertopic_kwargs=bertopic_kwargs)
         elif self.method == 'steeringvectors':
             documents = self._embedding_fit_transform(docs, embeddings)
         else:
@@ -395,9 +396,9 @@ class VectorTopic:
         else:
             raise ValueError(f"LLM library '{self.model_lib}' not implemented")
         
-    def _get_vector_probs(self, ngram, vector, topic_docs, model, tokenizer):
-        # for each ngram, get probability of doc along vector
-        prompt = "{text}. Targeted towards {ngram}, is the preceeding text more likely to be {sent_a} or {sent_b}?".format(text="{text}", ngram=ngram, sent_a=vector.sent_a, sent_b=vector.sent_b)
+    def _get_vector_probs(self, noun_phrase, vector, topic_docs, model, tokenizer):
+        # for each noun_phrase, get probability of doc along vector
+        prompt = "{text}. Targeted towards {noun_phrase}, is the preceeding text more likely to be {sent_a} or {sent_b}?".format(text="{text}", noun_phrase=noun_phrase, sent_a=vector.sent_a, sent_b=vector.sent_b)
         # get probability of doc along vector
         probs = self.generator.get_prompt_response_probs(prompt, topic_docs, model, tokenizer, vector.sent_a, vector.sent_b)
         return probs

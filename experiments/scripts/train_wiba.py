@@ -6,7 +6,7 @@ import hydra
 import torch
 import tqdm
 
-from experiments.methods.wiba import (
+from vectopic.finetune import (
     ModelConfig, 
     DataConfig, 
     TrainingConfig, 
@@ -25,7 +25,7 @@ from experiments.methods.wiba import (
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
-    args = config.wiba
+    args = config.finetune
     # Setup configurations
     model_config = ModelConfig(
         model_name=args.model_name,
@@ -38,11 +38,10 @@ def main(config):
     data_config = DataConfig(
         dataset_name=config.data.dataset,
         add_system_message=args.add_system_message,
-        add_topic=args.add_topic,
         id2labels={
-            "NoArgument": 0,
-            "Argument_for": 1,
-            "Argument_against": 2
+            "neutral": 0,
+            "favor": 1,
+            "against": 2
         }
     )
     

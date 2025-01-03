@@ -82,9 +82,9 @@ def f1_targets(all_targets, all_gold_targets, doc_targets, gold_doc_targets):
         f1.append(ex_f1)
     
     df = df.with_columns([
-        pl.Series(name='P', values=p),
-        pl.Series(name='R', values=r),
-        pl.Series(name='F1', values=f1)
+        pl.Series(name='P', values=p, dtype=pl.Float32),
+        pl.Series(name='R', values=r, dtype=pl.Float32),
+        pl.Series(name='F1', values=f1, dtype=pl.Float32)
     ])
     bertscore_f1 = df['F1'].mean()
 

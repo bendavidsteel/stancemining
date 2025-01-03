@@ -26,7 +26,8 @@ class MockTopicModel:
     def get_topic_info(self):
         return pd.DataFrame({
             "Topic": list(range(self.num_topics)),
-            "Representative_Docs": [["doc"] * self.nr_repr_docs] * self.num_topics
+            "Representative_Docs": [["doc"] * self.nr_repr_docs] * self.num_topics,
+            "Representation": [['keyword'] * 5] * self.num_topics
         })
     
     def _extract_representative_docs(self, tf_idf, documents, topic_reps, nr_samples=5, nr_repr_docs=5):
@@ -69,7 +70,7 @@ class MockVectorTopic(VectorTopic):
             res.append(random.choice(classes))
         return res
 
-def test_llm_fit_transform():
+def test_topic_llm_fit_transform():
     num_docs = 10
     docs = [f"doc_{i}" for i in range(num_docs)]
     sent_a = "sent_a"
@@ -78,6 +79,20 @@ def test_llm_fit_transform():
     num_targets = 3
     vectopic = MockVectorTopic(vector, num_targets=3)
     documents = vectopic._topic_llm_fit_transform(docs)
+    assert hasattr(vectopic, "topic_info")
+    assert hasattr(vectopic, "target_info")
+    assert len(vectopic.target_info) == num_targets
+    assert len(documents) == len(docs)
+
+def test_llm_topic_fit_transform():
+    num_docs = 10
+    docs = [f"doc_{i}" for i in range(num_docs)]
+    sent_a = "sent_a"
+    sent_b = "sent_b"
+    vector = Vector(sent_a, sent_b)
+    num_targets = 3
+    vectopic = MockVectorTopic(vector, num_targets=3)
+    documents = vectopic._llm_topic_fit_transform(docs)
     assert hasattr(vectopic, "topic_info")
     assert hasattr(vectopic, "target_info")
     assert len(vectopic.target_info) == num_targets
@@ -171,7 +186,7 @@ def test_unsupervised_metrics():
     doc_targets, probs, polarity = vectopic.fit_transform(docs)
 
     target_info = vectopic.get_target_info()
-    all_targets = target_info['ngram'].tolist()
+    all_targets = target_info['noun_phrase'].tolist()
     norm_targets_dist = metrics.normalized_targets_distance(all_targets, docs)
     assert 0 <= norm_targets_dist <= 1
 
