@@ -125,34 +125,36 @@ class ChatTemplateTokenizer:
         return inputs
     
     def create_input_sequence_for_training(self, sample):
-        messages = to_message_format(sample['text'], sample['labels'])
-        
+        text = sample['text']
+        label = sample['labels'].strip()
+        messages = to_message_format(text, label)
+    
         inputs = self.tokenizer.apply_chat_template(
-            messages, 
-            truncation=True, 
-            max_length=2048, 
-            padding='max_length', 
+            messages,
+            truncation=True,
+            max_length=2048,
+            padding='max_length',
             return_tensors="pt",
             return_dict=True
         )
-
+        
         inputs['input_ids'] = inputs['input_ids'].squeeze(0)
         inputs['attention_mask'] = inputs['attention_mask'].squeeze(0)
         
+        # Get the chat template format without the response
         # Find the assistant's response start
-        response_tokens = self.tokenizer.encode(sample['labels'], add_special_tokens=False)
+        response_tokens = self.tokenizer.encode(label, add_special_tokens=False)
         response_start = None
-        
         # Find where the assistant's response starts in the tokenized input
-        for i in range(len(inputs['input_ids']) - len(response_tokens)):
+        for i in range(len(inputs['input_ids']) - len(response_tokens), 0, -1):
             if inputs['input_ids'][i:i+len(response_tokens)].tolist() == response_tokens:
                 response_start = i
                 break
-        
+        else:
+            raise ValueError("Response not found in input")
         # Create labels tensor with -100s before the response
         labels = inputs['input_ids'].clone()
         labels[:response_start] = -100
-        
         return {
             "input_ids": inputs['input_ids'],
             "attention_mask": inputs['attention_mask'],
@@ -185,7 +187,7 @@ class DataProcessor:
         if self.model_config.task == "stance-classification":
             df = self._process_stance_classification(df)
         elif self.model_config.task == "topic-extraction":
-            df = self._process_topic_extraction(df, train=train)
+            df = self._process_topic_extraction(df)
         else:
             raise ValueError(f"Unknown task: {self.model_config.task}")
             
@@ -212,20 +214,27 @@ class DataProcessor:
         )
     
     def _process_stance_classification(self, df: pl.DataFrame) -> pl.DataFrame:
-        df = df.rename({"Stance": "class", "Text": "text", "Target": "topic"})
+        cols = ['text', 'topic']
+        if 'Stance' in df.columns and 'class' not in df.columns:
+            df = df.rename({"Stance": "class"})
         if 'class' in df.columns:
             df = df.with_columns(pl.col('class').replace_strict(self.data_config.id2labels))
-            cols = ['text', 'class', 'topic']
-        else:
-            cols = ['text', 'topic']
+            cols.append('class')
+            
+        if 'Text' in df.columns and 'text' not in df.columns:
+            df = df.rename({"Text": "text"})
+        if 'Target' in df.columns and 'topic' not in df.columns:
+            df = df.rename({"Target": "topic"})
         return df.select(cols)
     
-    def _process_topic_extraction(self, df: pl.DataFrame, train: bool = True) -> pl.DataFrame:
-        df = df.rename({"Target": "topic", "Text": "text"})
-        if train:
-            cols = ['text', 'topic']
-        else:
-            cols = ['text']
+    def _process_topic_extraction(self, df: pl.DataFrame) -> pl.DataFrame:
+        if 'Text' in df.columns and 'text' not in df.columns:
+            df = df.rename({"Text": "text"})
+        if 'Target' in df.columns and 'topic' not in df.columns:
+            df = df.rename({"Target": "topic"})
+        cols = ['text']
+        if 'topic' in df.columns:
+            cols.append('topic')
         return df.select(cols)
     
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
