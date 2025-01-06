@@ -41,9 +41,11 @@ def main(config):
         model = vp.VectorTopic(
             vector, 
             method=method, 
+            llm_method=config.model.llm_method,
             model_lib='transformers', 
             model_name=model_name,
-            model_kwargs={'device_map': 'auto'}
+            model_kwargs={'device_map': 'auto'},
+            finetune_kwargs=config.wiba
         )
 
         doc_targets, probs, polarity = model.fit_transform(docs, bertopic_kwargs={'min_topic_size': min_topic_size})
@@ -59,15 +61,12 @@ def main(config):
         wiba_model = wiba.Wiba()
         topic_extraction_path = f'./models/wiba/meta-llama-Llama-3.2-1B-Instruct-topic-extraction-vast-ezstance'
         stance_classification_path = f'./models/wiba/meta-llama-Llama-3.2-1B-Instruct-stance-classification-vast-ezstance'
-        doc_targets, probs, polarity = wiba_model.fit_transform(docs, config.finetune, argument_detection_path=None, topic_extraction_path=topic_extraction_path, stance_classification_path=stance_classification_path)
+        doc_targets, probs, polarity = wiba_model.fit_transform(docs, config.wiba, argument_detection_path=None, topic_extraction_path=topic_extraction_path, stance_classification_path=stance_classification_path)
         target_info = wiba_model.get_target_info()
     elif method == 'pacte':
         from experiments.methods import pacte
         pacte_model = pacte.PaCTE()
-        if dataset_name == 'semeval':
-            model_path = "./data/pacte/1f0d90862b696aa2a805ebc5c2e75ba1/ckp/model.pt"
-        elif dataset_name == 'vast':
-            model_path = './data/pacte/0d2834e691aea1247746d643a5116752/ckp/model.pt'
+        model_path = './data/pacte/fddb4f5701a1701a3fee0e3e7b8cb75a/ckp/model.pt'
         doc_targets, probs, polarity = pacte_model.fit_transform(docs, model_path=model_path, min_docs=1, polarization='emb_pairwise')
         target_info = pacte_model.get_target_info()
     elif method == 'annotator':
@@ -97,7 +96,7 @@ def main(config):
     all_targets = target_info['noun_phrase'].to_list()
     doc_targets = [[t] if not isinstance(t, list) else t for t in doc_targets]
     output_docs_df = pl.DataFrame({
-        'Tweet': docs,
+        'Text': docs,
         'Target': doc_targets,
         'Probs': probs,
         'Polarity': polarity

@@ -11,9 +11,17 @@ class BaseLLM:
     
     
 class Transformers(BaseLLM):
-    def __init__(self, model_name, model_kwargs={}, tokenizer_kwargs={}):
+    def __init__(self, model_name, model_kwargs={}, tokenizer_kwargs={}, lazy=False):
         super().__init__(model_name)
         
+        self.lazy = lazy
+        if not lazy:
+            self.load_model(model_name, model_kwargs, tokenizer_kwargs)
+        else:
+            self.model = None
+            self.tokenizer = None
+
+    def load_model(self, model_name, model_kwargs={}, tokenizer_kwargs={}):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -37,6 +45,10 @@ class Transformers(BaseLLM):
                 role = 'assistant' if role == 'user' else 'user'
         else:
             raise ValueError('Prompt must be a string or list of strings')
+        
+        if self.lazy:
+            self.load_model(self.model_name)
+
         inputs = self.tokenizer.apply_chat_template(conversation, return_dict=True, return_tensors='pt', add_generation_prompt=add_generation_prompt, continue_final_message=continue_final_message)
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         generate_kwargs = {}
@@ -46,7 +58,11 @@ class Transformers(BaseLLM):
             generate_kwargs['do_sample'] = True
 
         outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **generate_kwargs)
-        return [self.tokenizer.decode(output[inputs['input_ids'].shape[1]:], skip_special_tokens=True) for output in outputs]
+        outputs = [self.tokenizer.decode(output[inputs['input_ids'].shape[1]:], skip_special_tokens=True) for output in outputs]
+        if self.lazy:
+            self.model = None
+            self.tokenizer = None
+        return outputs
 
     def calculate_sequence_prob(self, inputs, seq_id):
         # TODO should be a faster way of doing this?

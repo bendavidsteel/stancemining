@@ -1221,8 +1221,14 @@ class PaCTE:
             predictions = pickle.load(open(os.path.join(engine.data_path, 'embeddings', f'predictions.pkl'), 'rb'))
 
             df = pd.read_csv(os.path.join(engine.data_path, 'df_doc_topic.csv'))
-            docs_df = df.groupby('idx_doc').agg({'idx_topic': list, 'prob': list}).reset_index()
-            docs_df = docs_df.rename(columns={'idx_topic': 'idx_topics', 'prob': 'probs'})
+            topic_docs_df = df.groupby('idx_doc').agg({'idx_topic': list, 'prob': list}).reset_index()
+            topic_docs_df = topic_docs_df.rename(columns={'idx_topic': 'idx_topics', 'prob': 'probs'})
+            docs_df = pd.DataFrame({'text': docs, 'idx_doc': np.arange(len(docs))})
+            docs_df = docs_df.merge(topic_docs_df, on='idx_doc', how='left')
+
+            # fill docs with no assigned topics
+            docs_df['idx_topics'] = docs_df['idx_topics'].apply(lambda x: x if isinstance(x, list) else [])
+            docs_df['probs'] = docs_df['probs'].apply(lambda x: x if isinstance(x, list) else [])
             assert docs_df.shape[0] == len(data)
             assert len(predictions) == len(data)
             docs_df['pred'] = predictions
@@ -1232,17 +1238,20 @@ class PaCTE:
             for i, row in docs_df.iterrows():
                 topic_nums = row['idx_topics']
                 topic_probs = row['probs']
+
+                if len(topic_nums) == 0:
+                    doc_targets.append([])
+                    continue
+
                 pred = row['pred']
+                # get highest probablity topic
                 topic_idx = sorted(zip(topic_nums, topic_probs), key=lambda x: x[1], reverse=True)[0][0]
                 top_target_row = target_df[target_df['topic_idx'] == f'topic_{topic_idx}']
                 targets = top_target_row['topic_words'].values
                 if len(targets) == 0:
                     doc_targets.append([])
-                elif len(targets) == 1:
-                    target = targets[0]
-                    doc_targets.append([target])
                 else:
-                    doc_targets.append(targets)
+                    doc_targets.append(targets[0])
                 for topic_num, topic_prob in zip(topic_nums, topic_probs):
                     target_row = target_df[target_df['topic_idx'] == f'topic_{topic_num}']
                     if len(target_row) == 0:

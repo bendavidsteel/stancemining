@@ -1,3 +1,5 @@
+from typing import List
+
 from bertopic import BERTopic
 import numpy as np
 import pandas as pd
@@ -64,6 +66,7 @@ class VectorTopic:
                 ):
         self.vector = vector
         self.method = method
+        assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
         self.llm_method = llm_method
 
         self.num_representative_docs = num_representative_docs
@@ -74,7 +77,8 @@ class VectorTopic:
         self.tokenizer_kwargs = tokenizer_kwargs
         self.finetune_kwargs = finetune_kwargs
 
-        self.generator = self._get_generator()
+        # lazily load generator if using in between fine-tuned models
+        self.generator = self._get_generator(lazy=llm_method=='finetuned')
 
         self.embedding_model = 'paraphrase-MiniLM-L6-v2'
 
@@ -89,24 +93,29 @@ class VectorTopic:
         return embeddings
 
     
-    def _ask_llm_stance_target(self, doc: str):
+    def _ask_llm_stance_target(self, docs: List[str]):
         if self.llm_method == 'zero-shot':
-            return prompting.ask_llm_zero_shot_stance_target(self.generator, doc)
+            num_samples = 3
+            return prompting.ask_llm_zero_shot_stance_target(self.generator, docs, {'num_samples': num_samples})
         elif self.llm_method == 'finetuned':
-            model_name = self.finetune_kwargs['model_name']
+            model_name = self.finetune_kwargs['model_name'].replace('/', '-')
             topic_extraction_path = f'./models/wiba/{model_name}-topic-extraction-vast-ezstance'
-            results = finetune.get_predictions("topic-extraction", [doc], topic_extraction_path, self.finetune_kwargs)
-            return results[0]
+            df = pl.DataFrame({'Text': docs})
+            results = finetune.get_predictions("topic-extraction", df, topic_extraction_path, self.finetune_kwargs)
+            if isinstance(results[0], str):
+                results = [[r] for r in results]
+            return results
 
     def _ask_llm_stance(self, docs, stance_targets):
         if self.llm_method == 'zero-shot':
             return prompting.ask_llm_zero_shot_stance(self.generator, docs, stance_targets)
         elif self.llm_method == 'finetuned':
-            model_name = self.finetune_kwargs['model_name']
+            model_name = self.finetune_kwargs['model_name'].replace('/', '-')
             stance_classification_path = f'./models/wiba/{model_name}-stance-classification-vast-ezstance'
-            data = pd.DataFrame({'text': docs, 'target': stance_targets})
+            data = pl.DataFrame({'Text': docs, 'Target': stance_targets})
             results = finetune.get_predictions("stance-classification", data, stance_classification_path, self.finetune_kwargs)
-            return results[0]
+            results = [r.upper() for r in results]
+            return results
 
 
     def _ask_llm_score(self, noun_phrase, docs):
@@ -171,12 +180,12 @@ class VectorTopic:
 
         # get stance targets for outliers
         outliers_df = document_df.filter(pl.col('Topic') == -1)
-        stance_targets = self._ask_llm_stance_target(tqdm(outliers_df['Document'], desc="Getting base stance targets"))
+        stance_targets = self._ask_llm_stance_target(outliers_df['Document'])
         stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
         outliers_df = outliers_df.with_columns(pl.Series(name='Targets', values=stance_targets))
 
         # get stance targets for non-outliers
-        stance_targets = [prompting.ask_llm_topic_stance_targets(self.generator, r['Representative_Docs'], r['Representation']) for r in tqdm(topic_info_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
+        stance_targets = [prompting.ask_llm_multi_doc_targets(self.generator, r['Representative_Docs']) for r in tqdm(topic_info_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
         stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
         topic_info_df = topic_info_df.with_columns(pl.Series(name='Targets', values=stance_targets))
 
@@ -189,14 +198,7 @@ class VectorTopic:
         targets_df = targets_df.with_columns(
             pl.Series(name='Stance', values=self._ask_llm_stance(targets_df['Document'], targets_df['Targets']))
         )
-        targets_df = targets_df.with_columns(
-            pl.when(pl.col('Stance') == 'FAVOR')\
-                .then(1)\
-                .when(pl.col('Stance') == 'AGAINST')\
-                .then(-1)\
-                .otherwise(0)\
-                .alias('Polarity')
-        )
+        targets_df = targets_df.with_columns(pl.col('Stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('Polarity'))
         target_info.extend(targets_df[['Targets', 'Polarity']].rename({'Targets': 'noun_phrase', 'Polarity': 'polarity'}).to_dicts())
 
         # join targets back to documents
@@ -217,20 +219,13 @@ class VectorTopic:
         target_info = []
         documents_df = pl.DataFrame({"Document": docs, "ID": range(len(docs))})
 
-        stance_targets = self._ask_llm_stance_target(tqdm(documents_df['Document'], desc="Getting base stance targets"))
+        stance_targets = self._ask_llm_stance_target(documents_df['Document'])
         stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
         documents_df = documents_df.with_columns(pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String)))
         
         noun_phrase_df = documents_df.explode('noun_phrases').rename({'noun_phrases': 'noun_phrase'}).drop_nulls()
         noun_phrase_df = noun_phrase_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(noun_phrase_df['Document'], noun_phrase_df['noun_phrase'])))
-        noun_phrase_df = noun_phrase_df.with_columns(
-            pl.when(pl.col('stance') == 'FAVOR')\
-                .then(1)\
-                .when(pl.col('stance') == 'AGAINST')\
-                .then(-1)\
-                .otherwise(0)\
-                .alias('polarity')
-        )
+        noun_phrase_df = noun_phrase_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
         target_info.extend(noun_phrase_df[['noun_phrase', 'polarity']].to_dicts())
         documents_df = documents_df.drop('noun_phrases').join(
             noun_phrase_df.group_by('ID')\
@@ -284,7 +279,7 @@ class VectorTopic:
         targets_df = targets_df.join(topic_info, on='Topic', how='left')
         noun_phrases_df = targets_df.explode('noun_phrases').rename({'noun_phrases': 'noun_phrase'})
         noun_phrases_df = noun_phrases_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(noun_phrases_df['Document'], noun_phrases_df['noun_phrase'])))
-        noun_phrases_df = noun_phrases_df.with_columns(pl.when(pl.col('stance') == 'FAVOR').then(1).when(pl.col('stance') == 'AGAINST').then(-1).otherwise(0).alias('polarity'))
+        noun_phrases_df = noun_phrases_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
         target_info.extend(noun_phrases_df.rename({'Topic': 'topic_id'}).select(['noun_phrase', 'polarity', 'topic_id']).to_dicts())
         documents_df = documents_df.join(
                 noun_phrases_df.group_by('ID')\
@@ -390,9 +385,9 @@ class VectorTopic:
     def get_target_info(self):
         return self.target_info
 
-    def _get_generator(self):
+    def _get_generator(self, lazy=False):
         if self.model_lib == 'transformers':
-            return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs)
+            return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs, lazy=lazy)
         else:
             raise ValueError(f"LLM library '{self.model_lib}' not implemented")
         

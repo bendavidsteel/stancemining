@@ -42,14 +42,14 @@ def argument_detection(data, config, model_path, token):
     #         results.append('Argument')
     #     else:
     #         results.append('NoArgument')
-    results = get_predictions("argument-classification", data, model_path)
+    results = get_predictions("argument-classification", data, model_path, config, hf_token=token)
 
     model.to('cpu')
     del model
     del pipe
     torch.cuda.empty_cache()
 
-    data['is_argument'] = results
+    data = data.with_columns(pl.Series(name='is_argument', values=results))
     return data
 
 def target_extraction(data, config, model_path, token):
@@ -57,9 +57,9 @@ def target_extraction(data, config, model_path, token):
         model_path = "armaniii/llama-3-8b-claim-topic-extraction"
 
     print(f"Extracting topics using model: {model_path}")
-    results = get_predictions("topic-extraction", data, model_path, config, token=token)
+    results = get_predictions("topic-extraction", data, model_path, config, hf_token=token)
 
-    data['topic'] = results
+    data = data.with_columns(pl.Series(name='topic', values=results))
     return data
 
 def stance_detection(data, config, model_path, token):
@@ -71,14 +71,8 @@ def stance_detection(data, config, model_path, token):
         huggingface_hub.snapshot_download(repo_id=hf_repo_url,local_dir=local_directory)
 
     print(f"Detecting stance using model: {model_path}")
-    results = get_predictions("stance-classification", data, model_path, config, token=token)
-    mapping = {
-        0: 'No Argument',
-        1: 'Argument in Favor',
-        2: 'Argument Against'
-    }
-    results = [mapping[r] for r in results]
-    data['stance'] = results
+    results = get_predictions("stance-classification", data, model_path, config, hf_token=token)
+    data = data.with_columns(pl.Series(name='stance', values=results))
 
     return data
 
@@ -91,18 +85,18 @@ class Wiba:
         HF_TOKEN = os.environ['HF_TOKEN']
 
         # https://github.com/Armaniii/WIBA
-        data = pl.DataFrame(docs, columns=['text'])
+        data = pl.DataFrame({'text': docs})
         
         if argument_detection_path is not None:
             data = argument_detection(data, config, argument_detection_path, token=HF_TOKEN)
         else:
             # just set all as arguments
-            data['is_argument'] = 'Argument'
+            data = data.with_columns(pl.lit('Argument').alias('is_argument'))
 
         
         data = target_extraction(data, config, topic_extraction_path, HF_TOKEN)
         data = stance_detection(data, config, stance_classification_path, HF_TOKEN)
-        data = data[['text', 'is_argument', 'topic', 'stance']]
+        data = data.select(['text', 'is_argument', 'topic', 'stance'])
 
         docs = data['text'].to_list()
         doc_targets = data['topic'].to_list()
@@ -116,9 +110,9 @@ class Wiba:
         polarity = np.zeros((len(docs), len(self.all_targets)))
         for idx, targets in enumerate(doc_targets):
             for target in targets:
-                if data['stance'][idx] == 'Argument in Favor':
+                if data['stance'][idx] == 'favor':
                     polarity[idx, target_to_idx[target]] = 1
-                elif data['stance'][idx] == 'Argument Against':
+                elif data['stance'][idx] == 'against':
                     polarity[idx, target_to_idx[target]] = -1
         return doc_targets, probs, polarity
     

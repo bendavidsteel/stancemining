@@ -1,5 +1,5 @@
 
-def ask_llm_zero_shot_stance_target(generator, docs):
+def ask_llm_zero_shot_stance_target(generator, docs, generate_kwargs):
     all_outputs = []
     for doc in docs:
         prompt = [
@@ -36,8 +36,16 @@ def ask_llm_zero_shot_stance_target(generator, docs):
             """Output:
             Stance target: """
         ]
+
+        if 'max_new_tokens' not in generate_kwargs:
+            generate_kwargs['max_new_tokens'] = 7
+        if 'num_samples' not in generate_kwargs:
+            generate_kwargs['num_samples'] = 3
+
+        generate_kwargs['add_generation_prompt'] = False
+        generate_kwargs['continue_final_message'] = True
     
-        outputs = generator.generate(prompt, max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)
+        outputs = generator.generate(prompt, **generate_kwargs)
         # remove reasoning and none responses
         outputs = [o.split('Reasoning:')[0].split('\n')[0].strip().lower() for o in outputs]
         outputs = [o for o in outputs if o != 'none']

@@ -49,15 +49,25 @@ def get_model_save_path(task, model_path_dir, model_name, dataset_name):
         d_name = '-'.join(dataset_name)
         return model_path_name + f"-{d_name}"
 
-def load_system_message(task: str) -> str:
+def load_prompt(task: str, prompting_method: str) -> str:
     if task == "stance-classification" or task == "argument-classification":
-        with open('./models/wiba/system_message_arg.txt', 'r') as file:
-            system_message = file.read()
+        if prompting_method == 'wiba':
+            file_path = './models/wiba/system_message_arg.txt'
+        elif prompting_method == 'vectopic':
+            file_path = './models/vectopic/prompt_stance.txt'
+        else:
+            raise ValueError("Prompting method not found")
     elif task == "topic-extraction":
-        with open('./models/wiba/system_message_cte.txt', 'r') as file:
-            system_message = file.read()
+        if prompting_method == 'wiba':
+            file_path = './models/wiba/system_message_cte.txt'
+        elif prompting_method == 'vectopic':
+            file_path = './models/vectopic/prompt_stance_target.txt'
+        else:
+            raise ValueError("Prompting method not found")
     else:
         raise ValueError("Task not found")
+    with open(file_path, 'r') as file:
+        system_message = file.read()
     return system_message
 
 def to_message_format(text, label):
@@ -167,25 +177,25 @@ class ModelConfig:
     task: str
     num_labels: Optional[int]
     device_map: Dict[str, int]
-    system_message: str
+    prompt: str
     tokenizer: Optional[transformers.PreTrainedTokenizer] = None
     model: Optional[transformers.PreTrainedModel] = None
+    classification_method: Optional[str] = "head"
 
 @dataclass
 class DataConfig:
     dataset_name: str
-    add_system_message: bool
-    id2labels: Dict[str, int]
+    labels2id: Dict[str, int]
 
 class DataProcessor:
     def __init__(self, model_config: ModelConfig, data_config: DataConfig):
         self.model_config = model_config
         self.data_config = data_config
         
-    def process_data(self, df: pd.DataFrame, train: bool = True) -> datasets.Dataset:
+    def process_data(self, df: pd.DataFrame, classification_method: str, train: bool = True) -> datasets.Dataset:
         """Process dataframe into a format suitable for model input"""
         if self.model_config.task == "stance-classification":
-            df = self._process_stance_classification(df)
+            df = self._process_stance_classification(df, classification_method)
         elif self.model_config.task == "topic-extraction":
             df = self._process_topic_extraction(df)
         else:
@@ -193,7 +203,7 @@ class DataProcessor:
             
         dataset = datasets.Dataset.from_polars(df)
         dataset = self._add_prompts(dataset)
-        dataset = self._tokenize_dataset(dataset, train=train)
+        dataset = self._tokenize_dataset(dataset, classification_method, train=train)
         if train:
             columns = ['input_ids', 'attention_mask', 'labels']
         else:
@@ -213,12 +223,13 @@ class DataProcessor:
             **loader_kwargs
         )
     
-    def _process_stance_classification(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _process_stance_classification(self, df: pl.DataFrame, classification_method: str) -> pl.DataFrame:
         cols = ['text', 'topic']
         if 'Stance' in df.columns and 'class' not in df.columns:
             df = df.rename({"Stance": "class"})
         if 'class' in df.columns:
-            df = df.with_columns(pl.col('class').replace_strict(self.data_config.id2labels))
+            if classification_method == 'head':
+                df = df.with_columns(pl.col('class').replace_strict(self.data_config.labels2id))
             cols.append('class')
             
         if 'Text' in df.columns and 'text' not in df.columns:
@@ -238,57 +249,40 @@ class DataProcessor:
         return df.select(cols)
     
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
-        if self.data_config.add_system_message:
-            if self.model_config.task == "stance-classification":
-                return dataset.map(
-                    lambda examples: {
-                        "text": [
-                            f"{self.model_config.system_message.strip()}\n"
-                            f"Topic: '{topic}' Text: '{text}'"
-                            for topic, text in zip(examples['topic'], examples['text'])
-                        ]
-                    },
-                    batched=True
-                )
-            elif self.model_config.task == "topic-extraction":
-                return dataset.map(
-                    lambda examples: {
-                        "text": [
-                            f"{self.model_config.system_message.strip()}\n"\
-                            + "Text: '" + prompt +"'"
-                            for prompt in examples['text']
-                        ]
-                    }, batched=True)
-            else:
-                raise ValueError("Task not found")
+        if self.model_config.task == "stance-classification":
+            return dataset.map(
+                lambda examples: {
+                    "text": [
+                        self.model_config.prompt.format(target=topic, text=text)
+                        for topic, text in zip(examples['topic'], examples['text'])
+                    ]
+                },
+                batched=True
+            )
+        elif self.model_config.task == "topic-extraction":
+            return dataset.map(
+                lambda examples: {
+                    "text": [
+                        self.model_config.prompt.format(text=prompt)
+                        for prompt in examples['text']
+                    ]
+                }, batched=True)
         else:
-            if self.model_config.task == "stance-classification":
-                return dataset.map(
-                    lambda examples: {
-                        "text": [
-                            f"Topic: '{topic}' Text: '{text}'"
-                            for topic, text in zip(examples['topic'], examples['text'])
-                        ]
-                    },
-                    batched=True
-                )
-            else:
-                return dataset.map(
-                    lambda examples: {
-                        "text": [
-                            f"Text: '{text}'"
-                            for text in examples['text']
-                        ]
-                    },
-                    batched=True
-                )
+            raise ValueError("Task not found")
+        
             
-    def _tokenize_dataset(self, dataset: datasets.Dataset, train: bool = True) -> datasets.Dataset:
+    def _tokenize_dataset(self, dataset: datasets.Dataset, classification_method: str, train: bool = True) -> datasets.Dataset:
         tokenizer = ChatTemplateTokenizer(self.model_config.tokenizer)
         if self.model_config.task in ["stance-classification", "argument-classification"]:
-            dataset = dataset.map(tokenizer.create_input_sequence_for_generation)
             if train:
                 dataset = dataset.rename_column("class", "labels")
+                if classification_method == 'head':
+                    dataset = dataset.map(tokenizer.create_input_sequence_for_generation)
+                elif classification_method == 'generation':
+                    dataset = dataset.map(tokenizer.create_input_sequence_for_training)
+            else:
+                dataset = dataset.map(tokenizer.create_input_sequence_for_generation)
+            
         elif self.model_config.task == "topic-extraction":
             if train:
                 dataset = dataset.rename_column("topic", "labels")
@@ -298,8 +292,9 @@ class DataProcessor:
         return dataset
 
 class ModelEvaluator:
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, model_config: ModelConfig, data_config: DataConfig):
         self.model_config = model_config
+        self.data_config = data_config
         self.metrics = self._setup_metrics()
     
     def _setup_metrics(self) -> Dict[str, Any]:
@@ -319,6 +314,9 @@ class ModelEvaluator:
     
     def evaluate(self, predictions: List[Any], references: List[Any]) -> Dict[str, float]:
         if self.model_config.task in ["stance-classification", "argument-classification"]:
+            if isinstance(predictions[0], str):
+                predictions = [self.data_config.labels2id[p] for p in predictions]
+                references = [self.data_config.labels2id[r] for r in references]
             return self._evaluate_classification(predictions, references)
         return self._evaluate_generation(predictions, references)
     
@@ -374,15 +372,18 @@ class ModelTrainer:
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
         
-        if self.model_config.task in ["stance-classification", "argument-classification"]:
+        if self.model_config.task in ["stance-classification", "argument-classification"] and self.model_config.classification_method == 'head':
             self.model_config.model = peft.prepare_model_for_kbit_training(self.model_config.model)
         
         # Setup LoRA
         modules = self._find_all_linear_names()
         lora_kwargs = {}
         if self.model_config.task in ["stance-classification", "argument-classification"]:
-            lora_kwargs['task_type'] = "SEQ_CLS"
-            lora_kwargs['modules_to_save'] = ['score']
+            if self.model_config.classification_method == 'head':
+                lora_kwargs['task_type'] = "SEQ_CLS"
+                lora_kwargs['modules_to_save'] = ['score']
+            elif self.model_config.classification_method == 'generation':
+                lora_kwargs['task_type'] = "CAUSAL_LM"
         elif self.model_config.task == "topic-extraction":
             lora_kwargs['task_type'] = "CAUSAL_LM"
 
@@ -542,11 +543,17 @@ class ModelTrainer:
         with torch.no_grad():
             for batch in eval_loader:
                 pbar.update(1)
-                preds = get_prediction(batch, self.model_config.task, self.model_config.model, self.model_config.tokenizer)
+                preds = get_prediction(batch, self.model_config.task, self.model_config.model, self.model_config.tokenizer, self.model_config.classification_method)
                 all_preds.extend(preds)
                 
                 if self.model_config.task in ["stance-classification", "argument-classification"]:
-                    all_labels.extend(batch["labels"].cpu().numpy())
+                    if self.model_config.classification_method == 'head':
+                        all_labels.extend(batch["labels"].cpu().numpy())
+                    elif self.model_config.classification_method == 'generation':
+                        all_labels.extend(self.model_config.tokenizer.batch_decode(
+                            batch["labels"][batch['labels'] != -100].unsqueeze(0),
+                            skip_special_tokens=True
+                        ))
                 else:
                     all_labels.extend(self.model_config.tokenizer.batch_decode(
                         batch["labels"][batch['labels'] != -100].unsqueeze(0),
@@ -555,7 +562,7 @@ class ModelTrainer:
         
         return evaluator.evaluate(all_preds, all_labels)
 
-def setup_model_and_tokenizer(task, num_labels, device_map, model_save_path=None, model_name=None, hf_token=None):
+def setup_model_and_tokenizer(task, classification_method, num_labels, device_map, model_save_path=None, model_name=None, hf_token=None):
     """Initialize model and tokenizer based on config"""
     model_path = model_save_path if model_save_path else model_name
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -564,14 +571,25 @@ def setup_model_and_tokenizer(task, num_labels, device_map, model_save_path=None
     )
     
     if task in ["stance-classification", "argument-classification"]:
-        model = transformers.AutoModelForSequenceClassification.from_pretrained(
-            model_path,
-            num_labels=num_labels,
-            torch_dtype=torch.float16,
-            device_map=device_map,
-            attn_implementation='flash_attention_2',
-            token=hf_token
-        )
+        if classification_method == 'head':
+            model = transformers.AutoModelForSequenceClassification.from_pretrained(
+                model_path,
+                num_labels=num_labels,
+                torch_dtype=torch.float16,
+                device_map=device_map,
+                attn_implementation='flash_attention_2',
+                token=hf_token
+            )
+        elif classification_method == 'generation':
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.float16,
+                device_map=device_map,
+                attn_implementation='flash_attention_2',
+                token=hf_token
+            )
+        else:
+            raise ValueError("Classification method not found")
     elif task == "topic-extraction":
         model = transformers.AutoModelForCausalLM.from_pretrained(
             model_path,
@@ -585,19 +603,49 @@ def setup_model_and_tokenizer(task, num_labels, device_map, model_save_path=None
     tokenizer.pad_token = tokenizer.eos_token
     # Setup tokens
     if task in ["stance-classification", "argument-classification"]:
-        model.config.pad_token_id = tokenizer.pad_token_id
+        if classification_method == 'head':
+            model.config.pad_token_id = tokenizer.pad_token_id
+        elif classification_method == 'generation':
+            model.generation_config.pad_token_id = tokenizer.pad_token_id
     elif task == "topic-extraction":
         model.generation_config.pad_token_id = tokenizer.pad_token_id
         
     return model, tokenizer
 
-def get_prediction(inputs, task, model, tokenizer):
+def get_prediction(inputs, task, model, tokenizer, classification_method, generate_kwargs={}):
     """Get model predictions"""
     if task in ["stance-classification", "argument-classification"]:
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        output = model(**inputs)
-        predicted_class = torch.argmax(output.logits, dim=1)
-        return predicted_class.cpu().tolist()
+        if classification_method == 'head':
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            output = model(**inputs)
+            predicted_class = torch.argmax(output.logits, dim=1)
+            return predicted_class.cpu().tolist()
+        elif classification_method == 'generation':
+            if 'labels' in inputs:
+                prompt = {
+                    "input_ids": inputs["input_ids"][inputs['labels'] == -100].unsqueeze(0),
+                    "attention_mask": inputs["attention_mask"][inputs['labels'] == -100].unsqueeze(0),
+                }
+            else:
+                prompt = {
+                    "input_ids": inputs["input_ids"],
+                    "attention_mask": inputs["attention_mask"],
+                }
+            prompt = {k: v.to(model.device) for k, v in prompt.items()}
+            if 'max_new_tokens' not in generate_kwargs:
+                generate_kwargs['max_new_tokens'] = 2
+            outputs = model.generate(**prompt, **generate_kwargs)
+            completions = [tokenizer.decode(
+                output[prompt['input_ids'].shape[1]:],
+                skip_special_tokens=True
+            ) for output in outputs]
+            def get_label(c):
+                for label in ['neutral', 'favor', 'against']:
+                    if label in c.lower():
+                        return [label]
+                else:
+                    return ['neutral']
+            return [get_label(c) for c in completions]
     else:
         if 'labels' in inputs:
             prompt = {
@@ -610,27 +658,29 @@ def get_prediction(inputs, task, model, tokenizer):
                 "attention_mask": inputs["attention_mask"],
             }
         prompt = {k: v.to(model.device) for k, v in prompt.items()}
-        output = model.generate(**prompt, max_new_tokens=20)
-        completion = tokenizer.decode(
-            output[0][prompt['input_ids'].shape[1]:],
+        if 'max_new_tokens' not in generate_kwargs:
+            generate_kwargs['max_new_tokens'] = 20
+        outputs = model.generate(**prompt, **generate_kwargs)
+        completions = [tokenizer.decode(
+            output[prompt['input_ids'].shape[1]:],
             skip_special_tokens=True
-        )
-        return [completion]
+        ) for output in outputs]
+        return completions
 
-def get_predictions(task, df, model_path_name, config, hf_token=None):
+def get_predictions(task, df, model_path_name, config, generate_kwargs={}, hf_token=None):
     # Setup configurations
     model_config = ModelConfig(
         model_name=None,
         task=task,
         num_labels=2 if task == "argument-classification" else 3,
         device_map={"": 0},
-        system_message=load_system_message(task)
+        prompt=load_prompt(task, prompting_method=config['prompting_method']),
+        classification_method=config['classification_method']
     )
     
     data_config = DataConfig(
         dataset_name=None,
-        add_system_message=config.add_system_message,
-        id2labels={
+        labels2id={
             "neutral": 0,
             "favor": 1,
             "against": 2
@@ -638,14 +688,19 @@ def get_predictions(task, df, model_path_name, config, hf_token=None):
     )
     
     # Initialize components
-    model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.num_labels, model_config.device_map, model_save_path=model_path_name, hf_token=hf_token)
+    model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_save_path=model_path_name, hf_token=hf_token)
     model_config.model, model_config.tokenizer = model, tokenizer
     processor = DataProcessor(model_config, data_config)
-    test_dataset = processor.process_data(df, train=False)
+    test_dataset = processor.process_data(df, model_config.classification_method, train=False)
     
     predictions = []
     test_loader = processor.get_loader(test_dataset, loader_kwargs={"batch_size": 1})
     for inputs in tqdm.tqdm(test_loader, desc="Evaluating"):
-        predictions.extend(get_prediction(inputs, task, model, tokenizer))
+        predictions.extend(get_prediction(inputs, task, model, tokenizer, model_config.classification_method, generate_kwargs=generate_kwargs))
     
+    if task in ["stance-classification", "argument-classification"]:
+        if model_config.classification_method == 'head':
+            id2labels = {v: k for k, v in data_config.labels2id.items()}
+            predictions = [id2labels[p] for p in predictions]
+
     return predictions
