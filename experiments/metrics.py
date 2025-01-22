@@ -5,6 +5,7 @@ import sentence_transformers
 from sklearn.metrics import f1_score
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import LabelEncoder
+from tqdm import tqdm
 import evaluate
 
 def sentence_embedding_similarity(targets, gold_targets):
@@ -25,19 +26,15 @@ def targets_closest_distance(targets, gold_targets):
     return closest_distances, matches
 
 def multi_label_bertscore(scorer, pred_labels, true_labels):
+    if not pred_labels:
+        return 0, 0, 0
+
     # For each predicted label, find its highest similarity with any true label
-    pred_scores = []
-    for p in pred_labels:
-        # Calculate BERTScore between this pred and all true labels
-        p_scores = [scorer.score([p], [t])[2].item() for t in true_labels]  # Using F1 score
-        pred_scores.append(max(p_scores) if p_scores else 0)
-    
-    # For each true label, find its highest similarity with any predicted label    
-    true_scores = []
-    for t in true_labels:
-        t_scores = [scorer.score([t], [p])[2].item() for p in pred_labels]
-        true_scores.append(max(t_scores) if t_scores else 0)
-    
+    # For each true label, find its highest similarity with any predicted label  
+    pred_true_scores = scorer.score(pred_labels + true_labels, [true_labels] * len(pred_labels) + [pred_labels] * len(true_labels))[2].tolist()
+    pred_scores = pred_true_scores[:len(pred_labels)]
+    true_scores = pred_true_scores[len(pred_labels):]
+
     # Calculate overall precision/recall/F1
     precision = sum(pred_scores) / len(pred_scores) if pred_scores else 0
     recall = sum(true_scores) / len(true_scores) if true_scores else 0
@@ -63,22 +60,32 @@ def multi_label_f1(pred_labels, true_labels):
     return precision, recall, f1
 
 
-def f1_targets(all_targets, all_gold_targets, doc_targets, gold_doc_targets):
-    similarity_matrix = sentence_embedding_similarity(all_targets, all_gold_targets)
-    gold_to_extracted = {all_gold_targets[i]: all_targets[j] for i, j in enumerate(np.argmax(similarity_matrix, axis=0))}
-    gold_extracted_doc_targets = [[gold_to_extracted[t] for t in targets] for targets in gold_doc_targets]
-    
+def f1_targets(doc_targets, gold_doc_targets):
     df = pl.DataFrame({
         'doc_id': list(range(len(doc_targets))),
         'pred': doc_targets,
-        'gold': gold_extracted_doc_targets
+        'gold': gold_doc_targets
     })
     p, r, f1 = [], [], []
     scorer = bert_score.BERTScorer(lang='en')
-    for ex in df.to_dicts():
-        ex_p, ex_r, ex_f1 = multi_label_bertscore(scorer, ex['pred'], ex['gold'])
-        p.append(ex_p)
-        r.append(ex_r)
+    for ex in tqdm(df.to_dicts(), desc='Calculating BERTScore'):
+        pred_labels = ex['pred']
+        true_labels = ex['gold']
+        if not pred_labels:
+            precision, recall, ex_f1 = 0, 0, 0
+        else:
+            # For each predicted label, find its highest similarity with any true label
+            # For each true label, find its highest similarity with any predicted label  
+            pred_true_scores = scorer.score(pred_labels + true_labels, [true_labels] * len(pred_labels) + [pred_labels] * len(true_labels))[2].tolist()
+            pred_scores = pred_true_scores[:len(pred_labels)]
+            true_scores = pred_true_scores[len(pred_labels):]
+            
+            # Calculate overall precision/recall/F1
+            precision = sum(pred_scores) / len(pred_scores) if pred_scores else 0
+            recall = sum(true_scores) / len(true_scores) if true_scores else 0
+            ex_f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        p.append(precision)
+        r.append(recall)
         f1.append(ex_f1)
     
     df = df.with_columns([
@@ -87,27 +94,30 @@ def f1_targets(all_targets, all_gold_targets, doc_targets, gold_doc_targets):
         pl.Series(name='F1', values=f1, dtype=pl.Float32)
     ])
     bertscore_f1 = df['F1'].mean()
+    bertscore_precision = df['P'].mean()
+    bertscore_recall = df['R'].mean()
 
-    return bertscore_f1
+    return bertscore_f1, bertscore_precision, bertscore_recall
 
-def f1_stances(all_targets, all_gold_targets, doc_targets, gold_doc_targets, polarity, gold_polarity):
+def f1_stances(all_targets, all_gold_targets, doc_targets, gold_doc_targets, polarity, gold_polarity, threshold=0.9):
     similarity_matrix = sentence_embedding_similarity(all_targets, all_gold_targets)
-    gold_to_extracted = {all_gold_targets[i]: all_targets[j] for i, j in enumerate(np.argmax(similarity_matrix, axis=0))}
-    gold_extracted_doc_targets = [[gold_to_extracted[t] for t in targets] for targets in gold_doc_targets]
-    polarity_to_score = [[(t, polarity[i, all_targets.index(t)]) for t in gold_extracted_doc_targets[i]] for i in range(len(doc_targets))]
-    gold_polarity_to_score = [[(t, p) for t, p in zip(gold_extracted_doc_targets[i], gold_polarity[i])] for i in range(len(doc_targets))]
+    extracted_to_gold = {all_targets[i]: all_gold_targets[j] for i, j in enumerate(np.argmax(similarity_matrix, axis=1)) if similarity_matrix[i, j] >= threshold}
+    pred_stance = [[(extracted_to_gold[t], polarity[i, all_targets.index(t)]) for t in doc_targets[i] if t in extracted_to_gold] for i in range(len(doc_targets))]
+    gold_stance = [list(set([(t, p) for t, p in zip(gold_doc_targets[i], gold_polarity[i])])) for i in range(len(doc_targets))]
     # TODO split f1 scores by target?
     p, r, f1 = [], [], []
-    for gold_ex, pred_ex in zip(gold_polarity_to_score, polarity_to_score):
+    for gold_ex, pred_ex in zip(gold_stance, pred_stance):
         ex_p, ex_r, ex_f1 = multi_label_f1(pred_ex, gold_ex)
         p.append(ex_p)
         r.append(ex_r)
         f1.append(ex_f1)
 
     f1 = np.mean(f1)
+    p = np.mean(p)
+    r = np.mean(r)
 
     # f1 = f1_score(gold_polarity, polarity_to_score, average='macro')
-    return f1
+    return f1, p, r
 
 def normalized_targets_distance(all_targets, documents):
     all_docs = all_targets + documents
@@ -129,8 +139,9 @@ def soft_inclusion(target_probs):
 def document_distance(target_probs):
     return np.mean(np.triu(cosine_similarity(target_probs), k=1))
 
-def target_polarity(polarity):
-    return np.var(polarity, axis=1)
+def stance_variance(polarity):
+    return np.mean(np.nanvar(polarity, axis=0))
+
 
 def target_distance(doc_targets, docs):
     df = pl.DataFrame({

@@ -1,9 +1,11 @@
 import datetime
+import json
 import os
 
 import bertopic.representation
 import hydra
 import numpy as np
+import omegaconf
 import polars as pl
 import wandb
 
@@ -27,6 +29,7 @@ def main(config):
             'model_name': model_name,
             'method': method,
             'vectopic_method': vectopic_method,
+            'config': omegaconf.OmegaConf.to_object(config)
         }
     )
 
@@ -54,7 +57,7 @@ def main(config):
     elif method == 'polar':
         from experiments.methods import polar
         model = polar.Polar()
-        doc_targets, probs, polarity = model.fit_transform(docs)
+        doc_targets, probs, polarity = model.fit_transform(docs, use_cache=False)
         target_info = model.get_target_info()
     elif method == 'wiba':
         from experiments.methods import wiba
@@ -67,7 +70,7 @@ def main(config):
         from experiments.methods import pacte
         pacte_model = pacte.PaCTE()
         model_path = './data/pacte/fddb4f5701a1701a3fee0e3e7b8cb75a/ckp/model.pt'
-        doc_targets, probs, polarity = pacte_model.fit_transform(docs, model_path=model_path, min_docs=1, polarization='emb_pairwise')
+        doc_targets, probs, polarity = pacte_model.fit_transform(docs, model_path=model_path, min_docs=1, polarization='emb_pairwise', use_cache=False)
         target_info = pacte_model.get_target_info()
     elif method == 'annotator':
         from experiments.methods import annotator
@@ -92,6 +95,7 @@ def main(config):
     else:
         raise ValueError(f'Unknown method: {method}')
     end_time = datetime.datetime.now()
+    total_time = (end_time - start_time).total_seconds()
 
     all_targets = target_info['noun_phrase'].to_list()
     doc_targets = [[t] if not isinstance(t, list) else t for t in doc_targets]
@@ -102,13 +106,21 @@ def main(config):
         'Polarity': polarity
     })
 
-    target_to_idx = {target: idx for idx, target in enumerate(all_targets)}
-
-    output_docs_df.with_columns([
-        pl.col('Probs').map_elements(lambda l: str(str(l)), pl.String), 
-        pl.col('Polarity').map_elements(lambda l: str(str(l)), pl.String),
-        pl.col('Target').map_elements(lambda l: str(l.to_list()), pl.String)
-    ]).write_csv(f'./data/{dataset_base_name}_output.csv')
+    # create unique directory
+    cur_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+    working_dir = f'./data/{cur_time}'
+    # update wandb config with working directory
+    wandb.config.update({'working_dir': working_dir})
+    os.makedirs(working_dir, exist_ok=True)
+    output_docs_df.write_parquet(os.path.join(working_dir, f'{dataset_name}_{method}_output.parquet.zstd'), compression='zstd')
+    with open(os.path.join(working_dir, 'config.json'), 'w') as f:
+        json.dump(omegaconf.OmegaConf.to_object(config), f)
+    target_info.write_parquet(os.path.join(working_dir, f'{dataset_name}_{method}_targets.parquet.zstd'), compression='zstd')
+    with open(os.path.join(working_dir, 'metrics.json'), 'w') as f:
+        json.dump({
+            'wall_time': total_time,
+            'end_time': end_time.isoformat(),
+        }, f)
 
     # evaluate the stance targets
     if 'Target' in docs_df.columns and 'Stance' in docs_df.columns:
@@ -118,29 +130,33 @@ def main(config):
         gold_stances = [[label_map[s] for s in stances] for stances in gold_stances]
         all_gold_targets = docs_df['Target'].explode().unique().to_list()
         
-        dists, matches = metrics.targets_closest_distance(all_targets, all_gold_targets)
-        targets_f1 = metrics.f1_targets(all_targets, all_gold_targets, doc_targets, gold_targets)
-        polarity_f1 = metrics.f1_stances(all_targets, all_gold_targets, doc_targets, gold_targets, polarity, gold_stances)
+        # dists, matches = metrics.targets_closest_distance(all_targets, all_gold_targets)
+        # TODO extract the f1 scores from the probs, not the given targets 
+        targets_f1, targets_precision, targets_recall = metrics.f1_targets(doc_targets, gold_targets)
+        stance_f1, stance_precision, stance_recall  = metrics.f1_stances(all_targets, all_gold_targets, doc_targets, gold_targets, polarity, gold_stances)
     else:
         dists, matches = None, None
-        targets_f1, polarity_f1 = None, None
+        targets_f1, stance_f1 = None, None
 
     norm_targets_dist = metrics.normalized_targets_distance(all_targets, docs)
     doc_dist = metrics.document_distance(probs)
-    target_polarities = metrics.target_polarity(polarity)
     inclusion = metrics.hard_inclusion(doc_targets)
     target_dist = metrics.target_distance(doc_targets, docs)
-    total_time = (end_time - start_time).total_seconds()
+    stance_variance = metrics.stance_variance(polarity)
 
     wandb.log({
-        'targets_closest_distance': dists,
+        # 'targets_closest_distance': dists,
         'targets_f1': targets_f1,
-        'polarity_f1': polarity_f1,
+        'targets_precision': targets_precision,
+        'targets_recall': targets_recall,
+        'stance_f1': stance_f1,
+        'stance_precision': stance_precision,
+        'stance_recall': stance_recall,
         'normalized_targets_distance': norm_targets_dist,
         'document_distance': doc_dist,
-        'target_polarities': target_polarities,
         'hard_inclusion': inclusion,
         'target_distance': target_dist,
+        'stance_variance': stance_variance,
         'wall_time': total_time
     })
     wandb.finish()

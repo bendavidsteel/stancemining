@@ -69,23 +69,23 @@ def _main(config, args):
         model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_name=model_config.model_name, hf_token=hf_token)
         trainer.set_model_and_tokenizer(model, tokenizer)
 
-        test_data = load_test_data(data_config.dataset_name, model_config.task)
-        test_dataset = processor.process_data(test_data, model_config.classification_method, train=False)
+        # test_data = load_test_data(data_config.dataset_name, model_config.task)
+        # test_dataset = processor.process_data(test_data, model_config.classification_method, train=False)
         
-        predictions = []
-        test_loader = processor.get_loader(test_dataset, {"batch_size": 1})
-        for inputs in tqdm.tqdm(test_loader, desc="Evaluating"):
-            predictions.extend(get_prediction(inputs, trainer.model_config.task, trainer.model_config.model, trainer.model_config.tokenizer, model_config.classification_method))
+        # predictions = []
+        # test_loader = processor.get_loader(test_dataset, {"batch_size": 1})
+        # for inputs in tqdm.tqdm(test_loader, desc="Evaluating"):
+        #     predictions.extend(get_prediction(inputs, trainer.model_config.task, trainer.model_config.model, trainer.model_config.tokenizer, model_config.classification_method))
         
-        if model_config.task in ["argument-classification", "stance-classification"]:
-            references = test_dataset['class']
-        else:
-            references = test_data['Target']
-        metrics = evaluator.evaluate(
-            predictions,
-            references
-        )
-        print_metrics(metrics)
+        # if model_config.task in ["argument-classification", "stance-classification"]:
+        #     references = test_dataset['class']
+        # else:
+        #     references = test_data['Target']
+        # metrics = evaluator.evaluate(
+        #     predictions,
+        #     references
+        # )
+        # print_metrics(metrics)
         
         trainer.prepare_for_training()
         
@@ -98,9 +98,8 @@ def _main(config, args):
         trainer.train(train_dataset, val_dataset, model_save_path, evaluator)
     
     if args.do_eval:
-        if not args.do_train:
-            model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_save_path=model_save_path, hf_token=hf_token)
-            trainer.set_model_and_tokenizer(model, tokenizer)
+        model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_save_path=model_save_path, hf_token=hf_token)
+        trainer.set_model_and_tokenizer(model, tokenizer)
 
         test_data = load_test_data(data_config.dataset_name, model_config.task)
         test_dataset = processor.process_data(test_data, model_config.classification_method, train=False)
@@ -108,7 +107,7 @@ def _main(config, args):
         predictions = []
         test_loader = processor.get_loader(test_dataset, {"batch_size": 1})
         for inputs in tqdm.tqdm(test_loader, desc="Evaluating"):
-            predictions.extend(get_prediction(inputs, trainer.model_config.task, trainer.model_config.model, trainer.model_config.tokenizer))
+            predictions.extend(get_prediction(inputs, trainer.model_config.task, trainer.model_config.model, trainer.model_config.tokenizer, trainer.model_config.classification_method))
         
         if model_config.task in ["argument-classification", "stance-classification"]:
             references = test_dataset['class']

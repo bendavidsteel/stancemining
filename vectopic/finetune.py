@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
+import json
 import os
 from typing import Optional, Dict, List, Any
 
@@ -473,7 +474,7 @@ class ModelTrainer:
         model_save_path
     ):
         """Main training loop"""
-        best_eval_metric = float('inf')
+        best_eval_metric = -float('inf')
         chosen_metric = "f1_macro" if self.model_config.task in [
             "stance-classification",
             "argument-classification"
@@ -520,7 +521,7 @@ class ModelTrainer:
                         print(state_str)
                         
                         # Save best model
-                        if metrics[chosen_metric] < best_eval_metric:
+                        if metrics[chosen_metric] > best_eval_metric:
                             best_eval_metric = metrics[chosen_metric]
                             self.model_config.model.save_pretrained(model_save_path)
                             self.model_config.tokenizer.save_pretrained(model_save_path)
@@ -572,7 +573,11 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
     
     if task in ["stance-classification", "argument-classification"]:
         if classification_method == 'head':
-            model = transformers.AutoModelForSequenceClassification.from_pretrained(
+            if model_save_path:
+                create_fn = peft.AutoPeftModelForSequenceClassification.from_pretrained
+            else:
+                create_fn = transformers.AutoModelForSequenceClassification.from_pretrained
+            model = create_fn(
                 model_path,
                 num_labels=num_labels,
                 torch_dtype=torch.float16,
@@ -581,7 +586,11 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
                 token=hf_token
             )
         elif classification_method == 'generation':
-            model = transformers.AutoModelForCausalLM.from_pretrained(
+            if model_save_path:
+                create_fn = peft.AutoPeftModelForCausalLM.from_pretrained
+            else:
+                create_fn = transformers.AutoModelForCausalLM.from_pretrained
+            model = create_fn(
                 model_path,
                 torch_dtype=torch.float16,
                 device_map=device_map,
@@ -591,7 +600,11 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
         else:
             raise ValueError("Classification method not found")
     elif task == "topic-extraction":
-        model = transformers.AutoModelForCausalLM.from_pretrained(
+        if model_save_path:
+            create_fn = peft.AutoPeftModelForCausalLM.from_pretrained
+        else:
+            create_fn = transformers.AutoModelForCausalLM.from_pretrained
+        model = create_fn(
             model_path,
             torch_dtype=torch.float16,
             device_map=device_map,
@@ -665,7 +678,10 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             output[prompt['input_ids'].shape[1]:],
             skip_special_tokens=True
         ) for output in outputs]
-        return completions
+        if generate_kwargs.get('num_return_sequences', 1) == 1:
+            return completions
+        else:
+            return [completions]
 
 def get_predictions(task, df, model_path_name, config, generate_kwargs={}, hf_token=None):
     # Setup configurations

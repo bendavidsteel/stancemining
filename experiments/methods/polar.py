@@ -3,9 +3,11 @@ import hashlib
 import json
 import os
 import pickle
+import shutil
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import requests
 import spacy
 
@@ -20,11 +22,13 @@ class Polar:
     def __init__(self):
         pass
 
-    def fit_transform(self, docs):
+    def fit_transform(self, docs, use_cache=True):
         # https://github.com/dpasch01/polarlib
         hashable_docs = tuple(sorted(docs))
         dataset_hash = hashlib.md5(str(hashable_docs).encode()).hexdigest()
         output_dir = f"./data/polar/{dataset_hash}/"
+        if not use_cache:
+            shutil.rmtree(output_dir, ignore_errors=True)
         os.makedirs(output_dir, exist_ok=True)
         nlp = spacy.load("en_core_web_sm")
 
@@ -107,7 +111,7 @@ class Polar:
 
             doc_targets = []
             probs = np.zeros((len(docs), len(self.ngrams)))
-            polarity = np.zeros((len(docs), len(self.ngrams)))
+            polarity = np.full((len(docs), len(self.ngrams)), np.nan)
 
             assert len(sag_generator.attitude_path_list) == len(docs)
             for doc_idx, (doc, file_path) in enumerate(zip(docs, sorted(sag_generator.attitude_path_list))):
@@ -170,7 +174,7 @@ class Polar:
 
             doc_targets = [None] * len(docs)
             probs = np.zeros((len(docs), 0))
-            polarity = np.zeros((len(docs), 0))
+            polarity = np.full((len(docs), 0), np.nan)
 
         
         # normalize probs
@@ -180,4 +184,4 @@ class Polar:
         return doc_targets, probs, polarity
     
     def get_target_info(self):
-        return pd.DataFrame(self.ngrams, columns=['noun_phrase'])
+        return pl.DataFrame({'noun_phrase': self.ngrams})

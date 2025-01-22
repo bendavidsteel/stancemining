@@ -107,17 +107,21 @@ class Wiba:
         for idx, targets in enumerate(doc_targets):
             for target in targets:
                 probs[idx, target_to_idx[target]] = 1
-        polarity = np.zeros((len(docs), len(self.all_targets)))
+        polarity = np.full((len(docs), len(self.all_targets)), np.nan)
         for idx, targets in enumerate(doc_targets):
             for target in targets:
                 if data['stance'][idx] == 'favor':
                     polarity[idx, target_to_idx[target]] = 1
                 elif data['stance'][idx] == 'against':
                     polarity[idx, target_to_idx[target]] = -1
+                elif data['stance'][idx] == 'neutral':
+                    polarity[idx, target_to_idx[target]] = 0
+                else:
+                    raise ValueError(f"Unknown stance: {data['stance'][idx]}")
         return doc_targets, probs, polarity
     
     def get_target_info(self):
-        return pd.DataFrame({'noun_phrase': self.all_targets})
+        return pl.DataFrame({'noun_phrase': self.all_targets})
 
     
 

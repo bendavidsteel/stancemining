@@ -202,3 +202,14 @@ def test_unsupervised_metrics():
     target_dist = metrics.target_distance(doc_targets, docs)
     assert 0 <= target_dist <= 1
 
+def test_filter_similar_phrases():
+    num_docs = 100
+    docs = [f"doc_{i}" for i in range(num_docs)]
+    sent_a = "sent_a"
+    sent_b = "sent_b"
+    vector = Vector(sent_a, sent_b)
+    vectopic = MockVectorTopic(vector, targets=['dogs', 'cats', 'cows'])
+    stance_targets = [['dogs', 'cats', 'cat']] * num_docs
+    filtered_stance_targets = vectopic._filter_similar_phrases(stance_targets)
+    assert len(filtered_stance_targets) == len(stance_targets)
+

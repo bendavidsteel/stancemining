@@ -23,8 +23,12 @@ Based on the information about the topic above, please create a short label of t
 
 def get_var_and_max_var_target(documents_df, target_info):
     target_info_df = pl.DataFrame(target_info)
-    target_info_df = target_info_df.group_by('noun_phrase')\
-        .agg(pl.col('topic_id'), pl.col('polarity'))
+    if 'topic_id' in target_info_df.columns:
+        target_info_df = target_info_df.group_by('noun_phrase')\
+            .agg(pl.col('topic_id'), pl.col('polarity'))
+    else:
+        target_info_df = target_info_df.group_by('noun_phrase')\
+            .agg(pl.col('polarity'))
     target_info_df = target_info_df.with_columns([
         pl.col('polarity').list.mean().alias('mean'),
         pl.when(pl.col('polarity').list.len() > 1)\
@@ -41,7 +45,8 @@ def get_var_and_max_var_target(documents_df, target_info):
             .with_columns(pl.col('Targets').alias('Target'))\
             .select(['ID', 'Target']),
         on='ID',
-        how='left'
+        how='left',
+        maintain_order='left'
     )
     return documents_df, target_info_df
 
@@ -78,7 +83,7 @@ class VectorTopic:
         self.finetune_kwargs = finetune_kwargs
 
         # lazily load generator if using in between fine-tuned models
-        self.generator = self._get_generator(lazy=llm_method=='finetuned')
+        self.generator = self._get_generator()
 
         self.embedding_model = 'paraphrase-MiniLM-L6-v2'
 
@@ -94,16 +99,29 @@ class VectorTopic:
 
     
     def _ask_llm_stance_target(self, docs: List[str]):
+        num_samples = 3
         if self.llm_method == 'zero-shot':
-            num_samples = 3
             return prompting.ask_llm_zero_shot_stance_target(self.generator, docs, {'num_samples': num_samples})
         elif self.llm_method == 'finetuned':
             model_name = self.finetune_kwargs['model_name'].replace('/', '-')
             topic_extraction_path = f'./models/wiba/{model_name}-topic-extraction-vast-ezstance'
             df = pl.DataFrame({'Text': docs})
-            results = finetune.get_predictions("topic-extraction", df, topic_extraction_path, self.finetune_kwargs)
+            generate_kwargs = {}
+            generate_kwargs['num_beams'] = num_samples * 5
+            generate_kwargs['num_return_sequences'] = num_samples
+            generate_kwargs['num_beam_groups'] = num_samples
+            generate_kwargs['diversity_penalty'] = 0.5
+            generate_kwargs['no_repeat_ngram_size'] = 2
+            generate_kwargs['do_sample'] = False
+            self.generator.unload_model()
+            results = finetune.get_predictions("topic-extraction", df, topic_extraction_path, self.finetune_kwargs, generate_kwargs=generate_kwargs)
+            self.generator.load_model()
             if isinstance(results[0], str):
                 results = [[r] for r in results]
+            # lower case all results
+            results = [[r.lower() for r in res] for res in results]
+            # remove exact duplicates
+            results = [list(set(res)) for res in results]
             return results
 
     def _ask_llm_stance(self, docs, stance_targets):
@@ -113,45 +131,74 @@ class VectorTopic:
             model_name = self.finetune_kwargs['model_name'].replace('/', '-')
             stance_classification_path = f'./models/wiba/{model_name}-stance-classification-vast-ezstance'
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets})
+            self.generator.unload_model()
             results = finetune.get_predictions("stance-classification", data, stance_classification_path, self.finetune_kwargs)
+            self.generator.load_model()
             results = [r.upper() for r in results]
             return results
 
-
-    def _ask_llm_score(self, noun_phrase, docs):
-        text_name = "comment"
-        prompt = f"""Targeted towards {noun_phrase}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
-        return self.generator.get_prompt_response_probs(prompt, docs, self.vector.sent_a, self.vector.sent_b, self.vector.neutral)
-
-    def _ask_llm_class(self, noun_phrase, docs):
-        text_name = "comment"
-        prompt = f"""Targeted towards {noun_phrase}, is the following {text_name} more likely to be {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}? {{doc}}. Output either {self.vector.sent_a}, {self.vector.neutral}, or {self.vector.sent_b}."""
-        classifications = []
-        for doc in docs:
-            prompt = prompt.format(doc=doc)
-            output = self.generator.generate(prompt, max_new_tokens=10, num_samples=1)[0]
-            if self.vector.sent_a in output.lower():
-                classification = self.vector.sent_a
-            elif self.vector.sent_b in output.lower():
-                classification = self.vector.sent_b
-            else:
-                classification = self.vector.neutral
-            classifications.append(classification)
-        return classifications
-
-    def _remove_similar_phrases(self, noun_phrases, embedding_model=None):
-        if len(noun_phrases) < 2:
-            return noun_phrases
-        # use embedding model to remove similar phrases
-        embeddings = self._get_embeddings(noun_phrases, model=embedding_model)
-        # get cosine similarity
-        similarity = np.dot(embeddings, embeddings.T) / (np.linalg.norm(embeddings, axis=1) * np.linalg.norm(embeddings, axis=1)[:, None])
-        similarity = np.triu(similarity, k=1)
-        # get indices of similar phrases
-        indices = np.where(similarity > 0.8)
-        # remove similar phrases
-        noun_phrases = [noun_phrases[i] for i in range(len(noun_phrases)) if i not in indices[0]]
-        return noun_phrases
+    def _filter_similar_phrases(self, phrases_list: List[List[str]], embedding_model=None, similarity_threshold: float = 0.8) -> List[List[str]]:
+        """
+        Filter out similar phrases from a list of lists based on embedding similarity,
+        only comparing phrases within the same sublist.
+        
+        Args:
+            phrases_list: List of lists containing phrases to filter
+            embedding_fn: Function that takes a list of strings and returns numpy array of embeddings
+            similarity_threshold: Threshold above which phrases are considered similar (default: 0.8)
+            
+        Returns:
+            List of lists with similar phrases removed
+        """
+        # If input is empty or has less than 2 items, return as is
+        if not phrases_list or len(sum(phrases_list, [])) < 2:
+            return phrases_list
+            
+        # Flatten list to compute embeddings efficiently
+        flat_phrases = sum(phrases_list, [])
+        
+        # Get embeddings for all phrases at once
+        try:
+            all_embeddings = self._get_embeddings(flat_phrases, model=embedding_model)
+        except Exception as e:
+            raise ValueError(f"Error computing embeddings: {str(e)}")
+        
+        # Keep track of sublist boundaries
+        boundaries = [0]
+        for sublist in phrases_list:
+            boundaries.append(boundaries[-1] + len(sublist))
+        
+        # Process each sublist separately
+        filtered_lists = []
+        for i in range(len(phrases_list)):
+            start, end = boundaries[i], boundaries[i+1]
+            
+            # Skip if sublist has less than 2 items
+            if end - start < 2:
+                filtered_lists.append(phrases_list[i])
+                continue
+                
+            # Get embeddings for current sublist
+            embeddings = all_embeddings[start:end]
+            
+            # Compute cosine similarity matrix for current sublist
+            norms = np.linalg.norm(embeddings, axis=1)
+            similarity = np.dot(embeddings, embeddings.T) / np.outer(norms, norms)
+            
+            # Get upper triangular part to avoid duplicate comparisons
+            similarity = np.triu(similarity, k=1)
+            
+            # Find indices of similar phrases within this sublist
+            similar_indices = set(int(i) for i in np.where(similarity > similarity_threshold)[0])
+            
+            # Filter current sublist
+            filtered_sublist = [
+                phrase for j, phrase in enumerate(phrases_list[i])
+                if j not in similar_indices
+            ]
+            filtered_lists.append(filtered_sublist)
+        
+        return filtered_lists
 
     def _get_base_topic_model(self, bertopic_kwargs):
         return BERTopic(**bertopic_kwargs)
@@ -181,17 +228,47 @@ class VectorTopic:
         # get stance targets for outliers
         outliers_df = document_df.filter(pl.col('Topic') == -1)
         stance_targets = self._ask_llm_stance_target(outliers_df['Document'])
-        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embedding_model)
         outliers_df = outliers_df.with_columns(pl.Series(name='Targets', values=stance_targets))
 
         # get stance targets for non-outliers
         stance_targets = [prompting.ask_llm_multi_doc_targets(self.generator, r['Representative_Docs']) for r in tqdm(topic_info_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
-        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embedding_model)
         topic_info_df = topic_info_df.with_columns(pl.Series(name='Targets', values=stance_targets))
+
+        # get stance targets for hierarchical topics
+        hierarchical_topics_df = pl.from_pandas(topic_model.hierarchical_topics(docs))
+        hierarchical_topics_df = hierarchical_topics_df.explode('Topics')\
+            .join(topic_info_df.select(['Topic', 'Targets']), left_on='Topics', right_on='Topic', how='left')\
+            .group_by(['Parent_ID', 'Parent_Name'])\
+            .agg(pl.col('Targets').flatten().alias('Targets'), pl.col('Topics'))
+        hierarchical_topics_df = hierarchical_topics_df.with_columns(pl.col('Parent_Name').str.split('_').alias('Representation'))
+        stance_targets = [prompting.ask_llm_target_aggregate(self.generator, r['Targets'], r['Representation']) for r in tqdm(hierarchical_topics_df.to_dicts(), desc="Getting hierarchical topic noun phrases")]
+        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embedding_model)
+        hierarchical_topics_df = hierarchical_topics_df.with_columns(pl.Series(name='Parent_Targets', values=stance_targets))
 
         non_outliers_df = document_df.filter(pl.col('Topic') != -1)
         non_outliers_df = non_outliers_df.join(topic_info_df, on='Topic', how='left')
-        document_df = pl.concat([outliers_df, non_outliers_df], how='diagonal_relaxed')
+
+        # add in parent targets
+        non_outliers_df = non_outliers_df.join(hierarchical_topics_df.explode('Topics').select(['Topics', 'Parent_Targets']), left_on='Topic', right_on='Topics', how='left')\
+            .group_by(non_outliers_df.columns)\
+            .agg(pl.col('Parent_Targets').flatten().alias('Parent_Targets'))\
+            .with_columns(pl.col('Parent_Targets').fill_null([]))\
+            .with_columns(pl.concat_list(pl.col('Targets'), pl.col('Parent_Targets')).alias('Targets'))\
+            .drop('Parent_Targets')
+        
+        # drop similar phrases between base targets and parent targets
+        targets = non_outliers_df['Targets'].to_list()
+        targets = self._filter_similar_phrases(targets, embedding_model=embedding_model)
+        non_outliers_df = non_outliers_df.with_columns(pl.Series(name='Targets', values=targets))
+
+        document_df = document_df.join(
+            pl.concat([outliers_df, non_outliers_df], how='diagonal_relaxed'),
+            on='ID',
+            how='left',
+            maintain_order='left'
+        )
 
         # get stances for all targets
         targets_df = document_df.explode('Targets')
@@ -207,20 +284,21 @@ class VectorTopic:
                 .agg(pl.col('Targets'), pl.col('Polarity'))\
                 .rename({'Targets': 'Targets', 'Polarity': 'Polarities'}),
             on='ID',
-            how='left'
+            how='left',
+            maintain_order='left'
         )
 
-        documents_df, target_info_df = get_var_and_max_var_target(documents_df, target_info)
+        document_df, target_info_df = get_var_and_max_var_target(document_df, target_info)
         self.target_info = target_info_df
 
-        return documents
+        return document_df
     
     def _get_base_targets(self, docs, embedding_model):
         target_info = []
         documents_df = pl.DataFrame({"Document": docs, "ID": range(len(docs))})
 
         stance_targets = self._ask_llm_stance_target(documents_df['Document'])
-        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embedding_model)
         documents_df = documents_df.with_columns(pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String)))
         
         noun_phrase_df = documents_df.explode('noun_phrases').rename({'noun_phrases': 'noun_phrase'}).drop_nulls()
@@ -232,7 +310,8 @@ class VectorTopic:
                 .agg(pl.col('noun_phrase'), pl.col('polarity'))\
                 .rename({'noun_phrase': 'Targets', 'polarity': 'Polarities'}),
             on='ID',
-            how='left'
+            how='left',
+            maintain_order='left'
         ).with_columns([
             pl.col('Targets').fill_null([]),
             pl.col('Polarities').fill_null([])
@@ -265,7 +344,7 @@ class VectorTopic:
         topic_info = pl.from_pandas(topic_info)
         no_outliers_df = topic_info.filter(pl.col('Topic') != -1)
         stance_targets = [prompting.ask_llm_target_aggregate(self.generator, r['Representative_Docs'], r['Representation']) for r in tqdm(no_outliers_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
-        stance_targets = [self._remove_similar_phrases(ts, embedding_model=embedding_model) for ts in stance_targets]
+        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embedding_model)
         no_outliers_df = no_outliers_df.with_columns(
             pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String))
         )
@@ -286,7 +365,8 @@ class VectorTopic:
                     .agg(pl.col('noun_phrase'), pl.col('polarity'))\
                     .rename({'noun_phrase': 'NewTargets', 'polarity': 'NewPolarities'}), 
             on='ID', 
-            how='left'
+            how='left',
+            maintain_order='left'
         )
         documents_df = documents_df.with_columns(
             pl.when(pl.col('NewTargets').is_not_null())\
@@ -349,7 +429,7 @@ class VectorTopic:
 
         num_targets = len(self.target_info)
         
-        polarities = np.zeros((len(documents), num_targets))
+        polarities = np.full((len(documents), num_targets), np.nan)
         probs = np.zeros((len(documents), num_targets))
         polarities_dict = documents['Polarities'].to_list()
         for i, doc_data in enumerate(documents.to_dicts()):

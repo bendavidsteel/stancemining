@@ -1,6 +1,12 @@
 
+def parse_generated_targets(outputs):
+    outputs = [o for o in outputs if o != 'none' and o != None and o != '']
+    outputs = list(set(outputs))
+    return outputs
+
 def ask_llm_zero_shot_stance_target(generator, docs, generate_kwargs):
-    all_outputs = []
+    
+    prompts = []
     for doc in docs:
         prompt = [
             "You are an expert at analyzing documents for stance detection. ",
@@ -36,20 +42,23 @@ def ask_llm_zero_shot_stance_target(generator, docs, generate_kwargs):
             """Output:
             Stance target: """
         ]
+        prompts.append(prompt)
 
-        if 'max_new_tokens' not in generate_kwargs:
-            generate_kwargs['max_new_tokens'] = 7
-        if 'num_samples' not in generate_kwargs:
-            generate_kwargs['num_samples'] = 3
+    if 'max_new_tokens' not in generate_kwargs:
+        generate_kwargs['max_new_tokens'] = 7
+    if 'num_samples' not in generate_kwargs:
+        generate_kwargs['num_samples'] = 3
 
-        generate_kwargs['add_generation_prompt'] = False
-        generate_kwargs['continue_final_message'] = True
+    generate_kwargs['add_generation_prompt'] = False
+    generate_kwargs['continue_final_message'] = True
     
-        outputs = generator.generate(prompt, **generate_kwargs)
+    docs_outputs = generator.generate(prompts, **generate_kwargs)
+
+    all_outputs = []
+    for outputs in docs_outputs:
         # remove reasoning and none responses
         outputs = [o.split('Reasoning:')[0].split('\n')[0].strip().lower() for o in outputs]
-        outputs = [o for o in outputs if o != 'none']
-        outputs = list(set(outputs))
+        outputs = parse_generated_targets(outputs)
         all_outputs.append(outputs)
     return all_outputs
 
@@ -117,11 +126,11 @@ def ask_llm_multi_doc_targets(generator, docs):
         Stance target: """
     ]
 
-    outputs = generator.generate(prompt, max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)
+    prompt_outputs = generator.generate([prompt], max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)
+    outputs = prompt_outputs[0]
     # remove reasoning and none responses
     outputs = [o.split('Reasoning:')[0].split('\n')[0].strip().lower() for o in outputs]
-    outputs = [o for o in outputs if o != 'none']
-    outputs = list(set(outputs))
+    outputs = parse_generated_targets(outputs)
     return outputs
 
 def ask_llm_zero_shot_stance(generator, docs, stance_targets):
@@ -183,7 +192,7 @@ def ask_llm_zero_shot_stance(generator, docs, stance_targets):
             """Output:
             Stance: """
         ]
-        outputs = generator.generate(prompt, max_new_tokens=2, num_samples=1, add_generation_prompt=False, continue_final_message=True)
+        outputs = generator.generate([prompt], max_new_tokens=2, num_samples=1, add_generation_prompt=False, continue_final_message=True)[0]
         outputs = [o.split('Reasoning:')[0].split('\n')[0].strip() for o in outputs]
         all_outputs.append(outputs[0])
     return all_outputs
@@ -240,8 +249,7 @@ def ask_llm_target_aggregate(generator, repr_docs, keywords):
         """Output:
         Generalized target: """
     ]
-    outputs = generator.generate(prompt, max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)
+    outputs = generator.generate([prompt], max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)[0]
     outputs = [o.split('Reasoning:')[0].split('\n')[0].strip().lower() for o in outputs]
-    outputs = [o for o in outputs if o != '']
-    outputs = list(set(outputs))
+    outputs = parse_generated_targets(outputs)
     return outputs

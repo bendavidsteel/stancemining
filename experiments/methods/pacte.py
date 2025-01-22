@@ -2,10 +2,12 @@ import collections
 import hashlib
 import os
 import pickle
+import shutil
 import sys
 
 import numpy as np
 import pandas as pd
+import polars as pl
 from sklearn.metrics import accuracy_score, f1_score
 import scipy.sparse as sp
 import torch
@@ -1123,7 +1125,8 @@ class PaCTE:
             min_docs=10, 
             max_docs=10, 
             dim_reduction='tsne',
-            plotting=False
+            plotting=False,
+            use_cache=True
         ):
         return self._run(
             docs,
@@ -1135,7 +1138,8 @@ class PaCTE:
             min_docs=min_docs,
             max_docs=max_docs,
             dim_reduction=dim_reduction,
-            plotting=plotting
+            plotting=plotting,
+            use_cache=use_cache
         )
 
     def _run(
@@ -1155,13 +1159,17 @@ class PaCTE:
             min_docs=10, 
             max_docs=10, 
             dim_reduction='tsne',
-            plotting=False
+            plotting=False,
+            use_cache=True
         ):
         data = docs
 
         hashable_docs = tuple(sorted(docs))
         dataset_hash = hashlib.md5(str(hashable_docs).encode()).hexdigest()
         data_path = f'./data/pacte/{dataset_hash}'
+        if not use_cache:
+            # delete existing cache
+            shutil.rmtree(data_path, ignore_errors=True)
         os.makedirs(data_path, exist_ok=True)
         # https://github.com/zihaohe123/pacte-polarized-topics-detection
         texts_processed_lda, corpus_lda, id2word_lda = preprocessing_lda(data)
@@ -1234,7 +1242,7 @@ class PaCTE:
             docs_df['pred'] = predictions
             doc_targets = []
             probs = np.zeros((len(docs), len(self.target_info)))
-            polarity = np.zeros((len(docs), len(self.target_info)))
+            polarity = np.full((len(docs), len(self.target_info)), np.nan)
             for i, row in docs_df.iterrows():
                 topic_nums = row['idx_topics']
                 topic_probs = row['probs']
@@ -1262,5 +1270,5 @@ class PaCTE:
             return doc_targets, probs, polarity
         
     def get_target_info(self):
-        return self.target_info.rename(columns={'topic_words': 'noun_phrase'})
+        return pl.from_pandas(self.target_info.rename(columns={'topic_words': 'noun_phrase'}))
 
