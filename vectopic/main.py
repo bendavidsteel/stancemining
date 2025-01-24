@@ -294,33 +294,16 @@ class VectorTopic:
         return document_df
     
     def _get_base_targets(self, docs, embedding_model):
-        target_info = []
         documents_df = pl.DataFrame({"Document": docs, "ID": range(len(docs))})
 
         stance_targets = self._ask_llm_stance_target(documents_df['Document'])
         stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embedding_model)
-        documents_df = documents_df.with_columns(pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String)))
-        
-        noun_phrase_df = documents_df.explode('noun_phrases').rename({'noun_phrases': 'noun_phrase'}).drop_nulls()
-        noun_phrase_df = noun_phrase_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(noun_phrase_df['Document'], noun_phrase_df['noun_phrase'])))
-        noun_phrase_df = noun_phrase_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
-        target_info.extend(noun_phrase_df[['noun_phrase', 'polarity']].to_dicts())
-        documents_df = documents_df.drop('noun_phrases').join(
-            noun_phrase_df.group_by('ID')\
-                .agg(pl.col('noun_phrase'), pl.col('polarity'))\
-                .rename({'noun_phrase': 'Targets', 'polarity': 'Polarities'}),
-            on='ID',
-            how='left',
-            maintain_order='left'
-        ).with_columns([
-            pl.col('Targets').fill_null([]),
-            pl.col('Polarities').fill_null([])
-        ])
-        return documents_df, target_info
+        documents_df = documents_df.with_columns(pl.Series(name='Targets', values=stance_targets, dtype=pl.List(pl.String)))
+        return documents_df
 
     def _llm_topic_fit_transform(self, docs, bertopic_kwargs={}):
         embedding_model = self._get_embedding_model()
-        documents_df, target_info = self._get_base_targets(docs, embedding_model)
+        documents_df = self._get_base_targets(docs, embedding_model)
 
         # cluster initial stance targets
         topic_model = self._get_base_topic_model(bertopic_kwargs)
@@ -351,32 +334,44 @@ class VectorTopic:
         topic_info = pl.concat([topic_info.filter(pl.col('Topic') == -1), no_outliers_df], how='diagonal_relaxed')\
             .with_columns(pl.col('noun_phrases').fill_null([]))
 
-        # map documents to new noun phrases, then get stance on new noun phrases
-        targets_df = documents_df.explode('Targets')
-        targets_df = targets_df.join(base_targets_df, on='Targets', how='left')
-        targets_df = targets_df.filter(pl.col('Topic') != -1)
-        targets_df = targets_df.join(topic_info, on='Topic', how='left')
-        noun_phrases_df = targets_df.explode('noun_phrases').rename({'noun_phrases': 'noun_phrase'})
-        noun_phrases_df = noun_phrases_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(noun_phrases_df['Document'], noun_phrases_df['noun_phrase'])))
-        noun_phrases_df = noun_phrases_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
-        target_info.extend(noun_phrases_df.rename({'Topic': 'topic_id'}).select(['noun_phrase', 'polarity', 'topic_id']).to_dicts())
+        # map documents to new noun phrases via topics
+        target_df = documents_df.explode('Targets')
+        target_df = target_df.join(base_targets_df, on='Targets', how='left')
+        target_df = target_df.filter(pl.col('Topic') != -1)
+        target_df = target_df.join(topic_info, on='Topic', how='left')
+
         documents_df = documents_df.join(
-                noun_phrases_df.group_by('ID')\
-                    .agg(pl.col('noun_phrase'), pl.col('polarity'))\
-                    .rename({'noun_phrase': 'NewTargets', 'polarity': 'NewPolarities'}), 
+                target_df.group_by('ID')\
+                    .agg(pl.col('noun_phrases').flatten())\
+                    .rename({'noun_phrases': 'NewTargets'}), 
             on='ID', 
             how='left',
             maintain_order='left'
         )
+        
         documents_df = documents_df.with_columns(
             pl.when(pl.col('NewTargets').is_not_null())\
                 .then(pl.concat_list(pl.col('Targets'), pl.col('NewTargets')))\
                 .otherwise(pl.col('Targets')))
-        documents_df = documents_df.with_columns(
-            pl.when(pl.col('NewPolarities').is_not_null())\
-                .then(pl.concat_list(pl.col('Polarities'), pl.col('NewPolarities')))\
-                .otherwise(pl.col('Polarities')))
-        documents_df = documents_df.drop(['NewTargets', 'NewPolarities'])
+        documents_df = documents_df.drop(['NewTargets'])
+
+        # remove targets that are too similar
+        targets = documents_df['Targets'].to_list()
+        targets = self._filter_similar_phrases(targets, embedding_model=embedding_model)
+        documents_df = documents_df.drop('Targets').with_columns(pl.Series(name='Targets', values=targets))
+
+        target_df = documents_df.explode('Targets').rename({'Targets': 'Target'})
+        target_df = target_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(target_df['Document'], target_df['Target'])))
+        target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
+        target_info = target_df.rename({'Target': 'noun_phrase'}).select(['noun_phrase', 'polarity']).to_dicts()
+
+        documents_df = documents_df.join(
+            target_df.group_by('ID')\
+                .agg(pl.col('Target').alias('Targets'), pl.col('polarity').alias('Polarities')),
+            on='ID',
+            how='left',
+            maintain_order='left'
+        )
 
         documents_df, target_info_df = get_var_and_max_var_target(documents_df, target_info)
         self.target_info = target_info_df
