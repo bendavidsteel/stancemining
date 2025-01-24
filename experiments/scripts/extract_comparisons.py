@@ -1,3 +1,4 @@
+import hashlib
 import itertools
 import os
 
@@ -88,9 +89,10 @@ def main():
 
     pairings = list(itertools.combinations(methods, 2))
 
+    target_df = pl.DataFrame()
+    cluster_df = pl.DataFrame()
     for dataset in dataset_dfs:
         dataset_df = dataset_dfs[dataset]
-        target_df = pl.DataFrame()
         for pairing in pairings:
             for idx in range(num_runs):
                 method1 = pairing[0]
@@ -108,7 +110,6 @@ def main():
                         ])
                 ], how='diagonal_relaxed')
 
-        cluster_df = pl.DataFrame()
         for method in methods:
             for idx in range(num_runs):
                 col = f"Probs_{method}_{idx}"
@@ -124,17 +125,54 @@ def main():
                     cluster_idxs = cluster_idxs[cluster_idxs != i]
                     not_cluster_idxs = np.where(cluster_pairs[i] == 0)[0]
                     not_cluster_idxs = not_cluster_idxs[not_cluster_idxs != i]
-                    triads.append((i, cluster_idxs[np.random.randint(len(cluster_idxs))], not_cluster_idxs[np.random.randint(len(not_cluster_idxs))]))
+                    if len(cluster_idxs) == 0:
+                        different_cluster_docs = not_cluster_idxs[np.random.choice(len(not_cluster_idxs), size=2, replace=False)]
+                        triads.append((i, different_cluster_docs[0], different_cluster_docs[1], 'both_different'))
+                    else:
+                        same_cluster_doc = cluster_idxs[np.random.randint(len(cluster_idxs))]
+                        different_cluster_doc = not_cluster_idxs[np.random.randint(len(not_cluster_idxs))]
+                        triads.append((i, same_cluster_doc, different_cluster_doc, 'same_different'))
 
                 cluster_df = pl.concat([cluster_df, pl.DataFrame({
                     'BaseText': [dataset_df['Text'][int(triad[0])] for triad in triads],
-                    'SameClusterText': [dataset_df['Text'][int(triad[1])] for triad in triads],
-                    'DifferentClusterText': [dataset_df['Text'][int(triad[2])] for triad in triads],
+                    'DocumentA': [dataset_df['Text'][int(triad[1])] for triad in triads],
+                    'DocumentB': [dataset_df['Text'][int(triad[2])] for triad in triads],
+                    'chosen': [triad[3] for triad in triads],
                     'method': [method for _ in triads],
                 })])
 
-        target_df.write_parquet(f"experiments/data/{dataset}_targets.parquet.zstd", compression='zstd')
-        cluster_df.write_parquet(f"experiments/data/{dataset}_clusters.parquet.zstd", compression='zstd')
+    target_df = target_df.sample(n=1000)
+    cluster_df = cluster_df.sample(n=1000)
+
+    method_map = {method: hashlib.shake_128(method.encode()).hexdigest(4) for method in methods}
+    target_df = target_df.with_columns([
+        pl.col('method1').replace_strict(method_map),
+        pl.col('method2').replace_strict(method_map),
+    ])
+    cluster_df = cluster_df.with_columns(pl.col('method').replace_strict(method_map))
+
+    # randomize order of same cluster and different cluster
+    cluster_df = cluster_df.with_columns(pl.lit(np.random.randint(1, 10, size=(len(cluster_df),))).alias('order'))
+    cluster_df = cluster_df.with_columns(
+        pl.when(pl.col('order') % 2 == 0).then(pl.col('DocumentA')).otherwise(pl.col('DocumentB')).alias('DocumentA_new'),
+        pl.when(pl.col('order') % 2 == 0).then(pl.col('DocumentB')).otherwise(pl.col('DocumentA')).alias('DocumentB_new'),
+    ).drop(['DocumentA', 'DocumentB']).rename({'DocumentA_new': 'DocumentA', 'DocumentB_new': 'DocumentB'})
+
+    # hash which were chosen
+    chosen_map = {k: hashlib.shake_128(k.encode()).hexdigest(4) for k in ['same_different', 'both_different']}
+    cluster_df = cluster_df.with_columns(pl.col('chosen').replace_strict(chosen_map))
+
+    target_df = target_df.with_columns([
+        pl.col('noun_phrase1').map_elements(lambda s: ", ".join(f'"{l}"' for l in s.to_list()), pl.String),
+        pl.col('noun_phrase2').map_elements(lambda s: ", ".join(f'"{l}"' for l in s.to_list()), pl.String)
+    ])
+    target_df = target_df.with_columns([
+        pl.when(pl.col('noun_phrase1') == '').then(pl.lit('No stance targets')).otherwise(pl.col('noun_phrase1')).alias('noun_phrase1'),
+        pl.when(pl.col('noun_phrase2') == '').then(pl.lit('No stance targets')).otherwise(pl.col('noun_phrase2')).alias('noun_phrase2'),
+    ])
+
+    target_df.write_csv(f"./data/targets_compare.csv")
+    cluster_df.write_csv(f"./data/clusters_compare.csv")
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,61 @@
+<View>
+    <Header value="Stance Target Evaluation"/>
+    
+    <!-- Documents Section -->
+    <View style="display: flex; flex-direction: column; gap: 15px;">
+      <!-- Document 1 -->
+      <View style="border: 1px solid #ccc; padding: 15px;">
+        <Text name="doc1" value="$doc1"/>
+        <Choices name="doc1_stance" toName="doc1" value="$stance_labels" showInline="true"/>
+        <Choices name="doc1_target" toName="doc1" value="$target_labels" showInline="true"/>
+      </View>
+  
+      <!-- Document 2 -->
+      <View style="border: 1px solid #ccc; padding: 15px;">
+        <Text name="doc2" value="$doc2"/>
+        <Choices name="doc2_stance" toName="doc2" value="$stance_labels" showInline="true"/>
+        <Choices name="doc2_target" toName="doc2" value="$target_labels" showInline="true"/>
+      </View>
+  
+      <!-- Document 3 -->
+      <View style="border: 1px solid #ccc; padding: 15px;">
+        <Text name="doc3" value="$doc3"/>
+        <Choices name="doc3_stance" toName="doc3" value="$stance_labels" showInline="true"/>
+        <Choices name="doc3_target" toName="doc3" value="$target_labels" showInline="true"/>
+      </View>
+  
+      <!-- Document 4 -->
+      <View style="border: 1px solid #ccc; padding: 15px;">
+        <Text name="doc4" value="$doc4"/>
+        <Choices name="doc4_stance" toName="doc4" value="$stance_labels" showInline="true"/>
+        <Choices name="doc4_target" toName="doc4" value="$target_labels" showInline="true"/>
+      </View>
+  
+      <!-- Document 5 -->
+      <View style="border: 1px solid #ccc; padding: 15px;">
+        <Text name="doc5" value="$doc5"/>
+        <Choices name="doc5_stance" toName="doc5" value="$stance_labels" showInline="true"/>
+        <Choices name="doc5_target" toName="doc5" value="$target_labels" showInline="true"/>
+      </View>
+  
+      <!-- Document 6 -->
+      <View style="border: 1px solid #ccc; padding: 15px;">
+        <Text name="doc6" value="$doc6"/>
+        <Choices name="doc6_stance" toName="doc6" value="$stance_labels" showInline="true"/>
+        <Choices name="doc6_target" toName="doc6" value="$target_labels" showInline="true"/>
+      </View>
+    </View>
+  
+    <!-- Validation Questions -->
+    <View style="margin-top: 20px; padding: 15px; background: #f0f0f0;">
+      <Header value="Quality Assessment"/>
+      <Rating name="clarity" toName="doc1" maxRating="5" size="medium" 
+              text="How clear and distinct are the stance targets?"/>
+      <Choices name="coverage" toName="doc1" showInline="true" 
+               text="Do these stance targets adequately cover the main stances in the documents?">
+        <Choice value="yes"/>
+        <Choice value="partially"/>
+        <Choice value="no"/>
+      </Choices>
+    </View>
+  </View>
