@@ -8,7 +8,7 @@ def calculate_pairwise_scores(df: pl.DataFrame):
     methods = set(df['method1'].unique().to_list() + df['method2'].unique().to_list())
     
     # TODO find way to incorporate ties
-    df = df.with_columns(pl.when(pl.col('better_method') == pl.col('method1')).then(pl.col('method2')).otherwise(pl.col('method1')).alias('loser'))
+    df = df.filter(pl.col('better_method').is_not_null()).with_columns(pl.when(pl.col('better_method') == pl.col('method1')).then(pl.col('method2')).otherwise(pl.col('method1')).alias('loser'))
 
     method_map = {method: idx for idx, method in enumerate(methods)}
     df = df.with_columns([
@@ -17,8 +17,9 @@ def calculate_pairwise_scores(df: pl.DataFrame):
     ])
     pairings = df.select(pl.concat_list(['better_method', 'loser'])).to_series().to_list()
 
-    scores = choix.lsr_pairwise(len(methods), pairings)
+    scores = choix.lsr_pairwise(len(methods), pairings, alpha=0.0001)
 
+    scores = {method: scores[method_map[method]] for method in methods}
     return scores
 
 def get_method_stats(df: pl.DataFrame):
@@ -27,7 +28,7 @@ def get_method_stats(df: pl.DataFrame):
         total = df.filter((pl.col('method1') == method) | (pl.col('method2') == method)).height
         failures = df.filter(
             ((pl.col('method1') == method) | (pl.col('method2') == method)) & 
-            pl.col('better_method').is_null()
+            (pl.col('better_method') != method)
         ).height
         
         stats[method] = {
@@ -36,6 +37,20 @@ def get_method_stats(df: pl.DataFrame):
         }
     
     return stats
+
+def get_scores(target_df, cluster_df):
+    # Calculate Elo scores
+    elo_scores = calculate_pairwise_scores(target_df)
+    print(elo_scores)
+    stats = get_method_stats(target_df)
+    print(stats)
+
+    
+
+    cluster_score_df = cluster_df.with_columns(pl.col('agreement').replace_strict({'agree': 1, 'disagree': 0}).alias('score'))\
+        .group_by('method')\
+        .agg((pl.col('score').sum() / pl.col('score').count()).alias('win_rate'))
+    print(cluster_score_df)
 
 def main():
     cluster_df = pl.read_csv('./data/cluster_annotations.csv')
@@ -62,12 +77,6 @@ def main():
             .otherwise(pl.lit(None)).alias('better_method'),
     ])
 
-    # Calculate Elo scores
-    elo_scores = calculate_pairwise_scores(target_df)
-    print(elo_scores)
-    stats = get_method_stats(target_df)
-    print(stats)
-
     # swap documents back to original order
     cluster_df = cluster_df.with_columns([
         pl.when(pl.col('order') % 2 == 0).then(pl.col('DocumentA')).otherwise(pl.col('DocumentB')).alias('DocumentA_new'),
@@ -86,10 +95,9 @@ def main():
             .otherwise(pl.lit(None)).alias('agreement')
     )
 
-    cluster_score_df = cluster_df.with_columns(pl.col('agreement').replace_strict({'agree': 1, 'disagree': 0}).alias('score'))\
-        .group_by('method')\
-        .agg((pl.col('score').sum() / pl.col('score').count()).alias('win_rate'))
-    print(cluster_score_df)
+    for annotator in cluster_df['annotator'].unique().to_list():
+        get_scores(target_df.filter(pl.col('annotator') == annotator), cluster_df.filter(pl.col('annotator') == annotator))
+
 
 if __name__ == '__main__':
     main()

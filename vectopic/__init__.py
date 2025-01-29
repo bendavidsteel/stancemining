@@ -1,1 +1,0 @@
-from vectopic.main import *

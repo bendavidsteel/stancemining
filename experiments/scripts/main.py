@@ -39,10 +39,8 @@ def main(config):
 
     start_time = datetime.datetime.now()
     if method in ['topicllm', 'llmtopic']:
-        import vectopic as vp
-        vector = vp.Vector('favor', 'against')
-        model = vp.VectorTopic(
-            vector, 
+        import stancemining
+        model = stancemining.StanceMining(
             method=method, 
             llm_method=config.model.llm_method,
             model_lib='transformers', 

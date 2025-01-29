@@ -10,7 +10,7 @@ import polars as pl
 import wandb
 
 from experiments import metrics, datasets
-from vectopic import prompting, finetune
+from stancemining import prompting, finetune
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
@@ -20,9 +20,9 @@ def main(config):
     docs_df = datasets.load_dataset(dataset_name)
     docs = docs_df['Text'].to_list()
 
-    import vectopic as vp
+    import stancemining as vp
     vector = vp.Vector('favor', 'against')
-    model = vp.VectorTopic(
+    model = vp.StanceMining(
         vector, 
         method=method, 
         llm_method=config.model.llm_method,

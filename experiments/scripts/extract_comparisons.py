@@ -4,7 +4,6 @@ import os
 
 import numpy as np
 import polars as pl
-import pandas as pd
 import wandb
 
 def get_latest_runs():

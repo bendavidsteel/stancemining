@@ -7,7 +7,7 @@ import pandas as pd
 import polars as pl
 import torch
 
-from vectopic.finetune import get_predictions
+from stancemining.finetune import get_predictions
 
 def argument_detection(data, config, model_path, token):
     if model_path is None:

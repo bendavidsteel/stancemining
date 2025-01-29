@@ -8,8 +8,8 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 import torch
 
-from vectopic import llms, finetune, prompting
-from vectopic.ngram_gen import NGramGeneration
+from stancemining import llms, finetune, prompting
+from stancemining.ngram_gen import NGramGeneration
 
 keyword_prompt = """<|system|>You are a helpful, respectful and honest assistant for labeling topics..</s>
 <|user|>
@@ -51,15 +51,8 @@ def get_var_and_max_var_target(documents_df, target_info):
     return documents_df, target_info_df
 
 
-class Vector:
-    def __init__(self, sent_a, sent_b):
-        self.sent_a = sent_a
-        self.sent_b = sent_b
-        self.neutral = 'neutral'
-
-class VectorTopic:
+class StanceMining:
     def __init__(self, 
-                 vector, 
                  method='llm', 
                  llm_method='zero-shot',
                  num_representative_docs=5,
@@ -69,7 +62,6 @@ class VectorTopic:
                  tokenizer_kwargs={},
                  finetune_kwargs={}
                 ):
-        self.vector = vector
         self.method = method
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
         self.llm_method = llm_method

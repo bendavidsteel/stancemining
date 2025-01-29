@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from scipy.stats import dirichlet as scipy_dirichlet
 
-from vectopic import VectorTopic, Vector
+from stancemining import StanceMining, Vector
 from experiments import metrics
 
 class MockTopicModel:
@@ -44,7 +44,7 @@ class MockGenerator:
         return ["output"] * num_samples
 
 
-class MockVectorTopic(VectorTopic):
+class MockVectorTopic(StanceMining):
     def __init__(self, *args, num_targets=3, targets=[], num_topics=3, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_targets = num_targets

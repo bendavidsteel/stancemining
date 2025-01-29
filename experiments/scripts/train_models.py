@@ -6,7 +6,7 @@ import hydra
 import torch
 import tqdm
 
-from vectopic.finetune import (
+from stancemining.finetune import (
     ModelConfig, 
     DataConfig, 
     TrainingConfig, 

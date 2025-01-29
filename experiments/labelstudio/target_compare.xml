@@ -1,0 +1,25 @@
+<View>
+  <!-- Header explaining the task -->
+  <Header value="Compare the two sets of issues, and choose the set that better summarizes what the document is discussing. If neither sets fit at all, choose neither."/>
+  
+  <!-- Display the text being analyzed -->
+  <Text name="text" value="$Text"/>
+  
+  <!-- Show the two stance targets being compared -->
+  <View style="display: flex; gap: 10px; margin: 15px 0;">
+    <Header value="Stance Target 1"/>
+    <Text name="target1" value="$noun_phrase1"/>
+  </View>
+  
+  <View style="display: flex; gap: 10px; margin: 15px 0;">
+    <Header value="Stance Target 2"/>
+    <Text name="target2" value="$noun_phrase2"/>
+  </View>
+
+  <!-- Simple choice between the two targets -->
+  <Choices name="better_target" toName="text" choice="single" required="true" showInline="true">
+    <Choice value="target1">Target 1 is better</Choice>
+    <Choice value="target2">Target 2 is better</Choice>
+    <Choice value="neither">Neither are applicable</Choice>
+  </Choices>
+</View>

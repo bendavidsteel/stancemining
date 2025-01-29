@@ -1,0 +1,28 @@
+<View>
+  <!-- Header explaining the task -->
+  <Header value="Which document discusses an issue that the base document is also discussing?"/>
+  
+  <!-- Base document -->
+  <Header value="Base Document" />
+  <Text name="base_text" value="$BaseText" />
+  
+  <!-- Documents to compare -->
+  <View style="display: flex; gap: 20px; margin: 15px 0;">
+    <View style="flex: 1;">
+      <Header value="Document A" />
+      <Text name="doc_a" value="$DocumentA" />
+    </View>
+    
+    <View style="flex: 1;">
+      <Header value="Document B" />
+      <Text name="doc_b" value="$DocumentB" />
+    </View>
+  </View>
+
+  <!-- Simple choice between the two documents -->
+  <Choices name="same_cluster" toName="base_text" choice="single" required="true">
+    <Choice value="doc_a">Document A</Choice>
+    <Choice value="doc_b">Document B</Choice>
+    <Choice value="neither">Neither</Choice>
+  </Choices>
+</View>
