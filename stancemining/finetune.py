@@ -723,7 +723,7 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             return batched_completions
             
 
-def get_predictions(task, df, device_map, config, data_name, generate_kwargs={}, hf_token=None):
+def get_predictions(task, df, config, data_name, device_map='auto', generate_kwargs={}, hf_token=None):
     
     output_type = config['classification_method'] if task == "stance-classification" else config['generation_method']
     model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], data_name, output_type)
@@ -758,6 +758,7 @@ def get_predictions(task, df, device_map, config, data_name, generate_kwargs={},
     # model.forward = torch.compile(model.forward, mode='reduce-overhead', fullgraph=True)
 
     if model_config.generation_method == 'beam':
+        num_samples = 3
         generate_kwargs['num_beams'] = num_samples * 2
         generate_kwargs['num_return_sequences'] = num_samples
         generate_kwargs['num_beam_groups'] = num_samples
