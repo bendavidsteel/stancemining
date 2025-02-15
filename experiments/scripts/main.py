@@ -16,7 +16,7 @@ def main(config):
     dataset_name = config['data']['dataset']
     model_name = config['model']['llmmodelname']
     method = config['model']['method']
-    vectopic_method = config['model']['vectopicmethod']
+    # vectopic_method = config['model']['vectopicmethod']
     min_topic_size = config['model']['mintopicsize']
 
     wandb.init(
@@ -28,7 +28,7 @@ def main(config):
             'dataset_name': dataset_name,
             'model_name': model_name,
             'method': method,
-            'vectopic_method': vectopic_method,
+            # 'vectopic_method': vectopic_method,
             'config': omegaconf.OmegaConf.to_object(config)
         }
     )
@@ -130,7 +130,7 @@ def main(config):
         
         # dists, matches = metrics.targets_closest_distance(all_targets, all_gold_targets)
         # TODO extract the f1 scores from the probs, not the given targets 
-        targets_f1, targets_precision, targets_recall = metrics.f1_targets(doc_targets, gold_targets)
+        targets_f1, targets_precision, targets_recall = metrics.bertscore_f1_targets(doc_targets, gold_targets)
         stance_f1, stance_precision, stance_recall  = metrics.f1_stances(all_targets, all_gold_targets, doc_targets, gold_targets, polarity, gold_stances)
     else:
         dists, matches = None, None

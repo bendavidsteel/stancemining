@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 import json
 import os
+import pathlib
 from typing import Optional, Dict, List, Any
 
 import accelerate
@@ -13,17 +14,33 @@ import polars as pl
 import torch
 import tqdm
 import transformers
+import wandb
 
 import experiments.datasets
 
-def load_training_data(dataset_name: str, task: str) -> pl.DataFrame:
-    return experiments.datasets.load_dataset(dataset_name, split="train", group=False, remove_synthetic_neutral=task!="stance-classification")
+def load_training_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
+    return experiments.datasets.load_dataset(
+        dataset_name, 
+        split="train", 
+        group=generation_method=='list', 
+        remove_synthetic_neutral=task!="stance-classification"
+    )
 
-def load_validation_data(dataset_name: str, task: str) -> pl.DataFrame:
-    return experiments.datasets.load_dataset(dataset_name, split="val", group=False, remove_synthetic_neutral=task!="stance-classification")
+def load_validation_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
+    return experiments.datasets.load_dataset(
+        dataset_name, 
+        split="val", 
+        group=generation_method=='list', 
+        remove_synthetic_neutral=task!="stance-classification"
+    )
 
-def load_test_data(dataset_name: str, task: str) -> pl.DataFrame:
-    return experiments.datasets.load_dataset(dataset_name, split="test", group=False, remove_synthetic_neutral=task!="stance-classification")
+def load_test_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
+    return experiments.datasets.load_dataset(
+        dataset_name, 
+        split="test", 
+        group=True, 
+        remove_synthetic_neutral=task!="stance-classification"
+    )
 
 def save_predictions(predictions: List[Any], df: pd.DataFrame, save_path: str) -> None:
     if not os.path.exists(save_path):
@@ -35,7 +52,7 @@ def print_metrics(metrics: Dict[str, float]) -> None:
     for metric, value in metrics.items():
         print(f"{metric}: {value}")
 
-def get_model_save_path(task, model_path_dir, model_name, dataset_name):
+def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_type):
     if task == "stance-classification":
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-stance-classification"
     elif task == "argument-classification":
@@ -45,24 +62,28 @@ def get_model_save_path(task, model_path_dir, model_name, dataset_name):
     else:
         raise ValueError("Task not found")
     if isinstance(dataset_name, str):
-        return model_path_name + f"-{dataset_name}"
+        model_path_name = model_path_name + f"-{dataset_name}"
     elif isinstance(dataset_name, Iterable):
         d_name = '-'.join(dataset_name)
-        return model_path_name + f"-{d_name}"
+        model_path_name = model_path_name + f"-{d_name}"
+    model_path_name += f"-{output_type}"
+
+    return model_path_name
 
 def load_prompt(task: str, prompting_method: str) -> str:
+    top_dir = pathlib.Path(__file__).parent.parent
     if task == "stance-classification" or task == "argument-classification":
         if prompting_method == 'wiba':
-            file_path = './models/wiba/system_message_arg.txt'
-        elif prompting_method == 'vectopic':
-            file_path = './models/vectopic/prompt_stance.txt'
+            file_path = top_dir / 'models/wiba/system_message_arg.txt'
+        elif prompting_method == 'stancemining':
+            file_path = top_dir / 'models/stancemining/prompt_stance.txt'
         else:
             raise ValueError("Prompting method not found")
     elif task == "topic-extraction":
         if prompting_method == 'wiba':
-            file_path = './models/wiba/system_message_cte.txt'
-        elif prompting_method == 'vectopic':
-            file_path = './models/vectopic/prompt_stance_target.txt'
+            file_path = top_dir / 'models/wiba/system_message_cte.txt'
+        elif prompting_method == 'stancemining':
+            file_path = top_dir / 'models/stancemining/prompt_stance_target.txt'
         else:
             raise ValueError("Prompting method not found")
     else:
@@ -182,7 +203,7 @@ class ModelConfig:
     tokenizer: Optional[transformers.PreTrainedTokenizer] = None
     model: Optional[transformers.PreTrainedModel] = None
     classification_method: Optional[str] = "head"
-
+    generation_method: Optional[str] = "beam"
 @dataclass
 class DataConfig:
     dataset_name: str
@@ -193,12 +214,12 @@ class DataProcessor:
         self.model_config = model_config
         self.data_config = data_config
         
-    def process_data(self, df: pd.DataFrame, classification_method: str, train: bool = True) -> datasets.Dataset:
+    def process_data(self, df: pd.DataFrame, classification_method: str, generation_method: str, train: bool = True) -> datasets.Dataset:
         """Process dataframe into a format suitable for model input"""
         if self.model_config.task == "stance-classification":
             df = self._process_stance_classification(df, classification_method)
         elif self.model_config.task == "topic-extraction":
-            df = self._process_topic_extraction(df)
+            df = self._process_topic_extraction(df, generation_method)
         else:
             raise ValueError(f"Unknown task: {self.model_config.task}")
             
@@ -239,7 +260,7 @@ class DataProcessor:
             df = df.rename({"Target": "topic"})
         return df.select(cols)
     
-    def _process_topic_extraction(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _process_topic_extraction(self, df: pl.DataFrame, generation_method: str) -> pl.DataFrame:
         if 'Text' in df.columns and 'text' not in df.columns:
             df = df.rename({"Text": "text"})
         if 'Target' in df.columns and 'topic' not in df.columns:
@@ -247,6 +268,17 @@ class DataProcessor:
         cols = ['text']
         if 'topic' in df.columns:
             cols.append('topic')
+            if generation_method == 'list':
+                # Remove duplicate topics and sort by length
+                df = df.with_row_index()
+                topic_df = df.with_columns(pl.col('topic').list.unique())\
+                    .explode('topic')\
+                    .with_columns(pl.col('topic').str.len_chars().alias('topic_len'))\
+                    .sort(['index', 'topic_len'])\
+                    .group_by('index')\
+                    .agg(pl.col('topic'))\
+                    .with_columns(pl.col('topic').list.join(', '))
+                df = df.select(['index', 'text']).join(topic_df, on='index', how='left').drop('index')
         return df.select(cols)
     
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
@@ -498,6 +530,7 @@ class ModelTrainer:
                 loss = outputs.loss / self.training_config.grad_accum_steps
                 self.accelerator.backward(loss)
 
+                wandb.log({"train/loss": loss.item()})
                 pbar.set_description(f"Training round, loss: {loss.item():.4e}")
                 pbar.update(1)
                 
@@ -519,6 +552,7 @@ class ModelTrainer:
                         for key, val in metrics.items():
                             state_str += f" {key.title()}: {val:.4f},"
                         print(state_str)
+                        wandb.log(metrics)
                         
                         # Save best model
                         if metrics[chosen_metric] > best_eval_metric:
@@ -580,7 +614,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
             model = create_fn(
                 model_path,
                 num_labels=num_labels,
-                torch_dtype=torch.float16,
+                torch_dtype='auto',
                 device_map=device_map,
                 attn_implementation='flash_attention_2',
                 token=hf_token
@@ -592,7 +626,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
                 create_fn = transformers.AutoModelForCausalLM.from_pretrained
             model = create_fn(
                 model_path,
-                torch_dtype=torch.float16,
+                torch_dtype='auto',
                 device_map=device_map,
                 attn_implementation='flash_attention_2',
                 token=hf_token
@@ -606,7 +640,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
             create_fn = transformers.AutoModelForCausalLM.from_pretrained
         model = create_fn(
             model_path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             device_map=device_map,
             attn_implementation='flash_attention_2',
             token=hf_token
@@ -625,7 +659,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
         
     return model, tokenizer
 
-def get_prediction(inputs, task, model, tokenizer, classification_method, generate_kwargs={}):
+def get_prediction(inputs, task, model, tokenizer, classification_method, generation_method, generate_kwargs={}):
     """Get model predictions"""
     if task in ["stance-classification", "argument-classification"]:
         if classification_method == 'head':
@@ -678,20 +712,30 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             output[prompt['input_ids'].shape[1]:],
             skip_special_tokens=True
         ) for output in outputs]
-        if generate_kwargs.get('num_return_sequences', 1) == 1:
+        if generation_method == 'list':
+            completions = [c.split(', ') for c in completions]
             return completions
-        else:
-            return [completions]
+        elif generation_method == 'beam':
+            batched_completions = []
+            num_return_sequences = generate_kwargs.get('num_return_sequences', 1)
+            for i in range(prompt['input_ids'].shape[0]):
+                batched_completions.append(completions[i*num_return_sequences:(i+1)*num_return_sequences])
+            return batched_completions
+            
 
-def get_predictions(task, df, model_path_name, config, generate_kwargs={}, hf_token=None):
+def get_predictions(task, df, device_map, config, data_name, generate_kwargs={}, hf_token=None):
+    
+    output_type = config['classification_method'] if task == "stance-classification" else config['generation_method']
+    model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], data_name, output_type)
     # Setup configurations
     model_config = ModelConfig(
         model_name=None,
         task=task,
         num_labels=2 if task == "argument-classification" else 3,
-        device_map={"": 0},
+        device_map=device_map,
         prompt=load_prompt(task, prompting_method=config['prompting_method']),
-        classification_method=config['classification_method']
+        classification_method=config['classification_method'],
+        generation_method=config['generation_method']
     )
     
     data_config = DataConfig(
@@ -704,15 +748,35 @@ def get_predictions(task, df, model_path_name, config, generate_kwargs={}, hf_to
     )
     
     # Initialize components
-    model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_save_path=model_path_name, hf_token=hf_token)
+    model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_save_path=model_save_path, hf_token=hf_token)
     model_config.model, model_config.tokenizer = model, tokenizer
     processor = DataProcessor(model_config, data_config)
-    test_dataset = processor.process_data(df, model_config.classification_method, train=False)
+    test_dataset = processor.process_data(df, model_config.classification_method, model_config.generation_method, train=False)
     
+    # optimize for inference
+    # model.generation_config.cache_implementation = 'static'
+    # model.forward = torch.compile(model.forward, mode='reduce-overhead', fullgraph=True)
+
+    if model_config.generation_method == 'beam':
+        generate_kwargs['num_beams'] = num_samples * 2
+        generate_kwargs['num_return_sequences'] = num_samples
+        generate_kwargs['num_beam_groups'] = num_samples
+        generate_kwargs['diversity_penalty'] = 10.0
+        generate_kwargs['no_repeat_ngram_size'] = 2
+        generate_kwargs['do_sample'] = False
+
     predictions = []
-    test_loader = processor.get_loader(test_dataset, loader_kwargs={"batch_size": 1})
+    test_loader = processor.get_loader(test_dataset, loader_kwargs={"batch_size": config.get('batch_size', 1)})
     for inputs in tqdm.tqdm(test_loader, desc="Evaluating"):
-        predictions.extend(get_prediction(inputs, task, model, tokenizer, model_config.classification_method, generate_kwargs=generate_kwargs))
+        predictions.extend(get_prediction(
+            inputs, 
+            task, 
+            model, 
+            tokenizer, 
+            model_config.classification_method,
+            model_config.generation_method,
+            generate_kwargs=generate_kwargs
+        ))
     
     if task in ["stance-classification", "argument-classification"]:
         if model_config.classification_method == 'head':

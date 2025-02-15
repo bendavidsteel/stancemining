@@ -1,6 +1,7 @@
 import bert_score
 import numpy as np
 import polars as pl
+from sacrebleu.metrics import BLEU
 import sentence_transformers
 from sklearn.metrics import f1_score
 from sklearn.metrics.pairwise import cosine_similarity
@@ -60,7 +61,7 @@ def multi_label_f1(pred_labels, true_labels):
     return precision, recall, f1
 
 
-def f1_targets(doc_targets, gold_doc_targets):
+def bertscore_f1_targets(doc_targets, gold_doc_targets):
     df = pl.DataFrame({
         'doc_id': list(range(len(doc_targets))),
         'pred': doc_targets,
@@ -163,3 +164,42 @@ def target_distance(doc_targets, docs):
     target_embeddings = np.stack(docs_with_target_df['target_embedding'].to_numpy())
     similarities = np.sum(target_embeddings * doc_embeddings, axis=1) / (np.linalg.norm(target_embeddings, axis=1) * np.linalg.norm(doc_embeddings, axis=1))
     return np.mean(similarities)
+
+def bleu_targets(doc_targets, gold_doc_targets):
+    df = pl.DataFrame({
+        'doc_id': list(range(len(doc_targets))),
+        'pred': doc_targets,
+        'gold': gold_doc_targets
+    })
+    bleu_scores = []
+    bleu = BLEU()
+    
+    for ex in tqdm(df.to_dicts(), desc='Calculating BLEU'):
+        pred_labels = ex['pred']
+        true_labels = ex['gold']
+        
+        if not pred_labels:
+            bleu_score = 0
+        else:
+            # Calculate BLEU score for this example
+            # We treat each target as a separate "reference" translation
+            scores = [bleu.sentence_score(pred_label, true_labels) for pred_label in pred_labels]
+            bleu_score = np.mean([score.score for score in scores])
+        
+        bleu_scores.append(bleu_score)
+    
+    df = df.with_columns([
+        pl.Series(name='BLEU', values=bleu_scores, dtype=pl.Float32)
+    ])
+    avg_bleu = df['BLEU'].mean()
+
+    return avg_bleu
+
+def mean_num_targets(doc_targets):
+    return np.mean([len(t) for t in doc_targets])
+
+def mean_cluster_size_ratio(stance_target_probs):
+    return np.mean((stance_target_probs > 0).sum(0)) / stance_target_probs.shape[0]
+
+def mean_cluster_size_std_ratio(stance_target_probs):
+    return np.std((stance_target_probs > 0).sum(0)) / stance_target_probs.shape[0]

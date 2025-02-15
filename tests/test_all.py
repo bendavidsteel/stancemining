@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from scipy.stats import dirichlet as scipy_dirichlet
 
-from stancemining import StanceMining, Vector
+from stancemining import StanceMining
 from experiments import metrics
 
 class MockTopicModel:
@@ -170,7 +170,7 @@ def test_target_match_and_supervised_metrics(gold_targets, extracted_targets):
     assert len(dists) == len(extracted_targets)
     assert len(matches) == len(extracted_targets)
 
-    targets_f1 = metrics.f1_targets(extracted_targets, gold_targets, doc_targets, gold_stances['Target'].tolist())
+    targets_f1 = metrics.bertscore_f1_targets(extracted_targets, gold_targets, doc_targets, gold_stances['Target'].tolist())
     assert 0 <= targets_f1 <= 1
 
     polarity_f1 = metrics.f1_stances(extracted_targets, gold_targets, doc_targets, gold_stances['Target'].tolist(), polarity, gold_stances['Stance'].tolist())
@@ -205,11 +205,15 @@ def test_unsupervised_metrics():
 def test_filter_similar_phrases():
     num_docs = 100
     docs = [f"doc_{i}" for i in range(num_docs)]
-    sent_a = "sent_a"
-    sent_b = "sent_b"
-    vector = Vector(sent_a, sent_b)
-    vectopic = MockVectorTopic(vector, targets=['dogs', 'cats', 'cows'])
+    vectopic = MockVectorTopic(targets=['dogs', 'cats', 'cows'])
     stance_targets = [['dogs', 'cats', 'cat']] * num_docs
     filtered_stance_targets = vectopic._filter_similar_phrases(stance_targets)
     assert len(filtered_stance_targets) == len(stance_targets)
+
+def test_bleu_targets():
+    num_docs = 100
+    gold_docs = [['dogs', 'cats', 'cow']] * num_docs
+    doc_targets = [['dogs', 'cats', 'cat']] * num_docs
+    bleu_score = metrics.bleu_targets(doc_targets, gold_docs)
+    assert 0 <= bleu_score <= 1
 

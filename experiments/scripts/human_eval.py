@@ -2,6 +2,7 @@ import hashlib
 
 import choix
 import polars as pl
+from statsmodels.stats.inter_rater import fleiss_kappa, aggregate_raters
 
 def calculate_pairwise_scores(df: pl.DataFrame):
     # Initialize ratings
@@ -41,8 +42,10 @@ def get_method_stats(df: pl.DataFrame):
 def get_scores(target_df, cluster_df):
     # Calculate Elo scores
     elo_scores = calculate_pairwise_scores(target_df)
+    print("Target Pairwise Comparison Scores")
     print(elo_scores)
     stats = get_method_stats(target_df)
+    print("Target Method Stats")
     print(stats)
 
     
@@ -50,6 +53,7 @@ def get_scores(target_df, cluster_df):
     cluster_score_df = cluster_df.with_columns(pl.col('agreement').replace_strict({'agree': 1, 'disagree': 0}).alias('score'))\
         .group_by('method')\
         .agg((pl.col('score').sum() / pl.col('score').count()).alias('win_rate'))
+    print("Cluster Scores")
     print(cluster_score_df)
 
 def main():
@@ -95,8 +99,39 @@ def main():
             .otherwise(pl.lit(None)).alias('agreement')
     )
 
-    for annotator in cluster_df['annotator'].unique().to_list():
-        get_scores(target_df.filter(pl.col('annotator') == annotator), cluster_df.filter(pl.col('annotator') == annotator))
+    get_scores(target_df, cluster_df)
+
+    target_annotators_df = None
+    cluster_annotators_df = None
+    annotators = cluster_df['annotator'].unique().to_list()
+    for annotator in annotators:
+        print(f"Annotator: {annotator}")
+        annotator_target_df = target_df.filter(pl.col('annotator') == annotator)
+        annotator_cluster_df = cluster_df.filter(pl.col('annotator') == annotator)
+        get_scores(annotator_target_df, annotator_cluster_df)
+
+        annotator_target_df = annotator_target_df.with_columns(pl.col('better_target').alias('better_target_' + str(annotator)))
+        annotator_cluster_df = annotator_cluster_df.with_columns(pl.col('same_cluster').alias('same_cluster_' + str(annotator)))
+
+        if target_annotators_df is None:
+            target_annotators_df = annotator_target_df
+        else:
+            target_annotators_df = target_annotators_df.join(annotator_target_df, on='Text', how='outer')
+
+        if cluster_annotators_df is None:
+            cluster_annotators_df = annotator_cluster_df
+        else:
+            cluster_annotators_df = cluster_annotators_df.join(annotator_cluster_df, on='BaseText', how='inner')
+
+    # check for inter-annotator agreement using fleiss' kappa
+    target_ratings = target_annotators_df.select([pl.col(f'better_target_{annotator}') for annotator in annotators]).drop_nulls().to_numpy()
+    cluster_ratings = cluster_annotators_df.select([pl.col(f'same_cluster_{annotator}') for annotator in annotators]).drop_nulls().to_numpy()
+    target_rating_aggregates = aggregate_raters(target_ratings)[0]
+    cluster_rating_aggregates = aggregate_raters(cluster_ratings)[0]
+    target_stats = fleiss_kappa(target_rating_aggregates)
+    cluster_stats = fleiss_kappa(cluster_rating_aggregates)
+    print(f"Target Fleiss' Kappa: {target_stats}")
+    print(f"Cluster Fleiss' Kappa: {cluster_stats}")
 
 
 if __name__ == '__main__':

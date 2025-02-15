@@ -1,3 +1,4 @@
+import os
 from typing import List
 
 from bertopic import BERTopic
@@ -53,14 +54,15 @@ def get_var_and_max_var_target(documents_df, target_info):
 
 class StanceMining:
     def __init__(self, 
-                 method='llm', 
-                 llm_method='zero-shot',
+                 method='llmtopic', 
+                 llm_method='finetuned',
                  num_representative_docs=5,
                  model_lib='transformers', 
                  model_name='microsoft/Phi-3.5-mini-instruct', 
                  model_kwargs={}, 
                  tokenizer_kwargs={},
-                 finetune_kwargs={}
+                 finetune_kwargs={},
+                 load_generator=True
                 ):
         self.method = method
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
@@ -74,8 +76,10 @@ class StanceMining:
         self.tokenizer_kwargs = tokenizer_kwargs
         self.finetune_kwargs = finetune_kwargs
 
-        # lazily load generator if using in between fine-tuned models
-        self.generator = self._get_generator()
+        if load_generator:
+            self.generator = self._get_generator()
+        else:
+            self.generator = None
 
         self.embedding_model = 'paraphrase-MiniLM-L6-v2'
 
@@ -95,19 +99,14 @@ class StanceMining:
         if self.llm_method == 'zero-shot':
             return prompting.ask_llm_zero_shot_stance_target(self.generator, docs, {'num_samples': num_samples})
         elif self.llm_method == 'finetuned':
-            model_name = self.finetune_kwargs['model_name'].replace('/', '-')
-            topic_extraction_path = f'./models/wiba/{model_name}-topic-extraction-vast-ezstance'
+            data_name = 'vast-ezstance'
             df = pl.DataFrame({'Text': docs})
-            generate_kwargs = {}
-            generate_kwargs['num_beams'] = num_samples * 5
-            generate_kwargs['num_return_sequences'] = num_samples
-            generate_kwargs['num_beam_groups'] = num_samples
-            generate_kwargs['diversity_penalty'] = 0.5
-            generate_kwargs['no_repeat_ngram_size'] = 2
-            generate_kwargs['do_sample'] = False
-            self.generator.unload_model()
-            results = finetune.get_predictions("topic-extraction", df, topic_extraction_path, self.finetune_kwargs, generate_kwargs=generate_kwargs)
-            self.generator.load_model()
+            
+            if self.generator:
+                self.generator.unload_model()
+            results = finetune.get_predictions("topic-extraction", df, self.model_kwargs['device_map'], self.finetune_kwargs, data_name)
+            if self.generator:
+                self.generator.load_model()
             if isinstance(results[0], str):
                 results = [[r] for r in results]
             # lower case all results
@@ -285,7 +284,10 @@ class StanceMining:
 
         return document_df
     
-    def _get_base_targets(self, docs, embedding_model):
+    def get_base_targets(self, docs, embedding_model=None):
+        if embedding_model is None:
+            embedding_model = self._get_embedding_model()
+
         documents_df = pl.DataFrame({"Document": docs, "ID": range(len(docs))})
 
         stance_targets = self._ask_llm_stance_target(documents_df['Document'])
@@ -295,7 +297,7 @@ class StanceMining:
 
     def _llm_topic_fit_transform(self, docs, bertopic_kwargs={}):
         embedding_model = self._get_embedding_model()
-        documents_df = self._get_base_targets(docs, embedding_model)
+        documents_df = self.get_base_targets(docs, embedding_model=embedding_model)
 
         # cluster initial stance targets
         topic_model = self._get_base_topic_model(bertopic_kwargs)
@@ -446,9 +448,6 @@ class StanceMining:
         
         return self._get_targets_probs_polarity(documents)
 
-    def get_topic_info(self):
-        return self.topic_info
-
     def get_target_info(self):
         return self.target_info
 
@@ -458,11 +457,5 @@ class StanceMining:
         else:
             raise ValueError(f"LLM library '{self.model_lib}' not implemented")
         
-    def _get_vector_probs(self, noun_phrase, vector, topic_docs, model, tokenizer):
-        # for each noun_phrase, get probability of doc along vector
-        prompt = "{text}. Targeted towards {noun_phrase}, is the preceeding text more likely to be {sent_a} or {sent_b}?".format(text="{text}", noun_phrase=noun_phrase, sent_a=vector.sent_a, sent_b=vector.sent_b)
-        # get probability of doc along vector
-        probs = self.generator.get_prompt_response_probs(prompt, topic_docs, model, tokenizer, vector.sent_a, vector.sent_b)
-        return probs
 
                 

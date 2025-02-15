@@ -81,7 +81,7 @@ def get_metric(run, metric):
     dataset_df = dataset_df.sort('Text')
     
     if metric in ['targets_f1', 'targets_precision', 'targets_recall']:
-        f1, p, r = metrics.f1_targets(output_df['noun_phrase'].to_list(), dataset_df['Target'].to_list())
+        f1, p, r = metrics.bertscore_f1_targets(output_df['noun_phrase'].to_list(), dataset_df['Target'].to_list())
         run.new_metrics['targets_f1'] = f1
         run.new_metrics['targets_precision'] = p
         run.new_metrics['targets_recall'] = r
@@ -96,7 +96,7 @@ def get_metric(run, metric):
         dataset_df = dataset_df.join(
             dataset_df.explode('Stance')\
                 .with_columns([
-                    pl.col('Stance').replace_strict({'favor': 1, 'against': -1, 'none': 0}).alias('Polarity')
+                    pl.col('Stance').replace_strict({'favor': 1, 'against': -1, 'neutral': 0}).alias('Polarity')
                 ])\
                 .group_by('index')\
                 .agg(pl.col('Polarity')),
@@ -126,6 +126,12 @@ def get_metric(run, metric):
         return metrics.target_distance(output_df['noun_phrase'], output_df['Text'])
     elif metric == 'stance_variance':
         return metrics.stance_variance(output_df['Polarity'])
+    elif metric == 'mean_num_targets':
+        return metrics.mean_num_targets(output_df['noun_phrase'])
+    elif metric == 'cluster_size':
+        return metrics.mean_cluster_size_ratio(output_df['Probs'].to_numpy())
+    elif metric == 'cluster_size_std':
+        return metrics.mean_cluster_size_std_ratio(output_df['Probs'].to_numpy())
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
@@ -155,12 +161,13 @@ def generate_latex_tables(runs_data):
         'normalized_targets_distance',
         'document_distance',
         'hard_inclusion',
-        'target_distance',
         'stance_variance',
+        'cluster_size',
+        'cluster_size_std',
         'wall_time'
     ]
 
-    remeasure_metrics = supervised_metrics + ['stance_variance', 'target_distance']
+    remeasure_metrics = supervised_metrics + ['stance_variance', 'cluster_size', 'cluster_size_std']
 
     # TODO extract the f1 scores from the probs, not the given targets 
 
@@ -178,12 +185,12 @@ def generate_latex_tables(runs_data):
 
     # Column headers for unsupervised metrics
     unsupervised_header = [
-        "\\begin{tabular}{l|cccc|c|c}",
+        "\\begin{tabular}{l|cccccc|c}",
         "\\toprule",
         "\\textbf{Method} & \\textbf{Normalized} & \\textbf{Document} & \\textbf{Hard} & "
-        "\\textbf{Target} & \\textbf{Stance} & \\textbf{Wall}\\\\",
+        "\\textbf{Stance} & \\textbf{Cluster} & \\textbf{Cluster} & \\textbf{Wall}\\\\",
         "& \\textbf{Target Dist. } & \\textbf{Distance } & \\textbf{Inclusion ↑} & "
-        "\\textbf{Distance ↓} & \\textbf{Variance ↑} & \\textbf{Time ↓}\\\\",
+        "\\textbf{Variance ↑} & \\textbf{Size ↑} & \\textbf{Size Std ↓} & \\textbf{Time ↓}\\\\",
         "\\midrule"
     ]
         
@@ -232,27 +239,28 @@ def generate_latex_tables(runs_data):
         
         return latex_table
     
-    # Generate supervised table
-    supervised_table = generate_table_content(supervised_header, supervised_metrics, runs_data)
-    
-    
     # Generate unsupervised table
     unsupervised_table = generate_table_content(unsupervised_header, unsupervised_metrics, runs_data)
-    
-    
-    return "\n".join(supervised_table), "\n".join(unsupervised_table)
 
-def main():
-    latest_runs = get_latest_runs()
-    supervised_table, unsupervised_table = generate_latex_tables(latest_runs)
-    
-    # Write supervised metrics table
-    with open(os.path.join('.', 'data', 'supervised_metrics_table.tex'), 'w') as f:
-        f.write(supervised_table)
-    
+    unsupervised_table = "\n".join(unsupervised_table)
+
     # Write unsupervised metrics table
     with open(os.path.join('.', 'data', 'unsupervised_metrics_table.tex'), 'w') as f:
         f.write(unsupervised_table)
+
+    # Generate supervised table
+    supervised_table = generate_table_content(supervised_header, supervised_metrics, runs_data)
+
+    supervised_table = "\n".join(supervised_table)
+
+    # Write supervised metrics table
+    with open(os.path.join('.', 'data', 'supervised_metrics_table.tex'), 'w') as f:
+        f.write(supervised_table)
+
+def main():
+    latest_runs = get_latest_runs()
+    generate_latex_tables(latest_runs)
+
 
 if __name__ == '__main__':
     main()
