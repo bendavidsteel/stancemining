@@ -1,0 +1,40 @@
+device_id: 1
+
+data:
+  dataset: semeval
+
+model:
+  llmmodelname: meta-llama/Llama-3.2-1B-Instruct
+  method: pacte
+  annotatorname: david
+  stancemethod: llm
+  mintopicsize: 3
+  llm_method: finetuned
+
+finetune:
+  task: stance-classification
+  model_name: HuggingFaceTB/SmolLM2-360M-Instruct
+  add_system_message: True
+  do_train: False
+  do_eval: True
+  num_epochs: 2
+  save_model_path: ./models/stancemining/
+  eval_steps: 100
+  prompting_method: stancemining
+  classification_method: generation
+  generation_method: list
+  batch_size: 1
+
+wiba:
+  task: stance-classification
+  model_name: meta-llama/Llama-3.2-1B-Instruct
+  add_system_message: True
+  do_train: False
+  do_eval: True
+  num_epochs: 2
+  save_model_path: ./models/wiba/
+  eval_steps: 100
+  prompting_method: wiba
+  classification_method: head
+  generation_method: beam
+  batch_size: 1

@@ -5,4 +5,8 @@ polars
 bertopic
 transformers
 accelerate
+datasets
+evaluate
 tqdm
+hydra
+wandb
