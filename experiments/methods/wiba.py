@@ -32,9 +32,12 @@ def target_extraction(df, config, model_path, token):
 
     print(f"Extracting topics using model: {model_path}")
     data_name = 'vast-ezstance'
-    results = get_predictions("topic-extraction", df, config, data_name, hf_token=token)
+    generate_kwargs = {'num_return_sequences': 1}
+    results = get_predictions("topic-extraction", df, config, data_name, hf_token=token, generate_kwargs=generate_kwargs)
 
     df = df.with_columns(pl.Series(name='topic', values=results))
+    if df.schema['topic'] == pl.List(pl.String):
+        df = df.with_columns(pl.col('topic').list.get(0))
     return df
 
 def stance_detection(df, config, model_path, token):

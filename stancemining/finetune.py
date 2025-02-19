@@ -758,13 +758,13 @@ def get_predictions(task, df, config, data_name, device_map='auto', generate_kwa
     # model.forward = torch.compile(model.forward, mode='reduce-overhead', fullgraph=True)
 
     if model_config.generation_method == 'beam':
-        num_samples = 3
-        generate_kwargs['num_beams'] = num_samples * 2
-        generate_kwargs['num_return_sequences'] = num_samples
-        generate_kwargs['num_beam_groups'] = num_samples
-        generate_kwargs['diversity_penalty'] = 10.0
-        generate_kwargs['no_repeat_ngram_size'] = 2
-        generate_kwargs['do_sample'] = False
+        num_samples = generate_kwargs.get('num_return_sequences', 3)
+        if num_samples > 1:
+            generate_kwargs['num_beams'] = num_samples * 2
+            generate_kwargs['num_beam_groups'] = num_samples
+            generate_kwargs['diversity_penalty'] = 10.0
+            generate_kwargs['no_repeat_ngram_size'] = 2
+            generate_kwargs['do_sample'] = False
 
     predictions = []
     test_loader = processor.get_loader(test_dataset, loader_kwargs={"batch_size": config.get('batch_size', 1)})

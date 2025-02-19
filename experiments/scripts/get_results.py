@@ -35,7 +35,7 @@ def get_latest_runs():
                 latest_by_dataset[dataset][method].append(run)
 
     # get last 3 runs for each method
-    num_last = 3
+    num_last = 5
     for dataset in latest_by_dataset:
         for method in latest_by_dataset[dataset]:
             latest_by_dataset[dataset][method] = sorted(latest_by_dataset[dataset][method], key=lambda x: x.created_at, reverse=True)[:num_last]
@@ -171,7 +171,7 @@ def generate_latex_tables(runs_data):
 
     # TODO extract the f1 scores from the probs, not the given targets 
 
-    num_runs = 3
+    num_runs = 5
     
     # Column headers for supervised metrics
     supervised_header = [

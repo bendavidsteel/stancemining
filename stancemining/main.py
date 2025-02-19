@@ -104,7 +104,7 @@ class StanceMining:
             
             if self.generator:
                 self.generator.unload_model()
-            results = finetune.get_predictions("topic-extraction", df, self.model_kwargs['device_map'], self.finetune_kwargs, data_name)
+            results = finetune.get_predictions("topic-extraction", df, self.finetune_kwargs, data_name, device_map=self.model_kwargs['device_map'])
             if self.generator:
                 self.generator.load_model()
             if isinstance(results[0], str):
@@ -120,10 +120,10 @@ class StanceMining:
             return prompting.ask_llm_zero_shot_stance(self.generator, docs, stance_targets)
         elif self.llm_method == 'finetuned':
             model_name = self.finetune_kwargs['model_name'].replace('/', '-')
-            stance_classification_path = f'./models/wiba/{model_name}-stance-classification-vast-ezstance'
+            data_name = 'vast-ezstance'
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets})
             self.generator.unload_model()
-            results = finetune.get_predictions("stance-classification", data, stance_classification_path, self.finetune_kwargs)
+            results = finetune.get_predictions("stance-classification", data, self.finetune_kwargs, data_name, device_map=self.model_kwargs['device_map'])
             self.generator.load_model()
             results = [r.upper() for r in results]
             return results
