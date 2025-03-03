@@ -582,25 +582,12 @@ class ModelTrainer:
                     self.model_config.generation_method
                 )
                 all_preds.extend(preds)
-                
-                if self.model_config.task in ["stance-classification", "argument-classification"]:
-                    if self.model_config.classification_method == 'head':
-                        all_labels.extend(batch["labels"].cpu().numpy())
-                    elif self.model_config.classification_method == 'generation':
-                        labels = batch['labels'].clone()
-                        labels[labels == -100] = self.model_config.tokenizer.bos_token_id
-                        all_labels.extend(self.model_config.tokenizer.batch_decode(
-                            labels,
-                            skip_special_tokens=True
-                        ))
-                        all_labels = [l.strip('\n') for l in all_labels]
-                else:
-                    labels = batch['labels'].clone()
-                    labels[labels == -100] = self.model_config.tokenizer.bos_token_id
-                    all_labels.extend(self.model_config.tokenizer.batch_decode(
-                        labels,
-                        skip_special_tokens=True
-                    ))
+        pbar.close()
+
+        if self.model_config.task in ["stance-classification", "argument-classification"]:
+            all_labels = eval_dataset['class']
+        else:
+            all_labels = eval_dataset['topic']
         
         return evaluator.evaluate(all_preds, all_labels)
 
@@ -676,8 +663,8 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             return predicted_class.cpu().tolist()
         elif classification_method == 'generation':
             if 'labels' in inputs:
-                labels = inputs['labels'].clone()
-                inputs['input_ids'][labels]
+                # does not work with batch size > 1
+                assert inputs['input_ids'].shape[0] == 1, "Batch size must be 1"
                 prompt = {
                     "input_ids": inputs["input_ids"][inputs['labels'] == -100].unsqueeze(0),
                     "attention_mask": inputs["attention_mask"][inputs['labels'] == -100].unsqueeze(0),
