@@ -200,17 +200,21 @@ def ask_llm_zero_shot_stance(generator, docs, stance_targets):
 
 def ask_llm_target_aggregate(generator, repr_docs, keywords):
     # Stance Target Topic Generalization Prompt
+    repr_docs_s = ', '.join(f'"{d}"' for d in repr_docs)
+    keywords_s = ', '.join(f'"{k}"' for k in keywords)
     prompt = [
         "You are an expert at analyzing and categorizing topics.",
         """Your task is to generate a generalized stance target that best represents a cluster of related specific stance targets.
 
         Instructions:
-        1. Review the provided stance targets and keywords that characterize the topic cluster
-        2. Identify the common theme or broader issue these targets relate to
+        1. Review the provided stance targets and keywords that characterize the stance target cluster
+        2. Identify the common stance target or broader issue these targets relate to
         3. Generate a concise noun phrase that:
-        - Captures the core concept shared across the targets
+        - Captures the core issue shared across the targets
         - Is general enough to encompass the specific instances
         - Is specific enough to be meaningful for stance analysis
+
+        The noun phrase should be max 5 words, and contain only one concept (no 'and', 'or', etc.).
 
         Input:
         Representative stance targets: [list of stance targets]
@@ -226,7 +230,7 @@ def ask_llm_target_aggregate(generator, repr_docs, keywords):
         Representative stance targets: ["vaccine mandates", "mandatory covid shots", "required immunization for schools"]
         Top keywords: ["mandatory", "requirement", "public health", "immunization", "vaccination"]""",
         """Output:
-        Generalized target: vaccination requirements
+        Generalized target: vaccination mandates
         Reasoning: This captures the common theme of mandatory immunization policies while being broad enough to cover various contexts (workplace, school, public spaces).
         """,
         """Input:
@@ -243,13 +247,20 @@ def ask_llm_target_aggregate(generator, repr_docs, keywords):
         Generalized target: social media content control
         Reasoning: This captures the broader issue of managing online content while remaining neutral on the specific approach or implementation.
         """,
-        f"""---
-        Representative stance targets: {repr_docs}
-        Top keywords: {keywords}""",
+        f"""Input:
+        Representative stance targets: [{repr_docs_s}]
+        Top keywords: [{keywords_s}]""",
         """Output:
         Generalized target: """
     ]
-    outputs = generator.generate([prompt], max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)[0]
-    outputs = [o.split('Reasoning:')[0].split('\n')[0].strip().lower() for o in outputs]
+    raw_outputs = generator.generate([prompt], max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)[0]
+    def parse_output(o):
+        if '\n' not in o:
+            # incomplete generation
+            return None
+        o = o.split('Reasoning:')[0].split('\n')[0].strip('\n').strip().lower()
+        return o
+    outputs = [parse_output(o) for o in raw_outputs]
+    outputs = [o for o in outputs if o != None and o != '']
     outputs = parse_generated_targets(outputs)
     return outputs

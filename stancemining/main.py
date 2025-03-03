@@ -62,7 +62,8 @@ class StanceMining:
                  model_kwargs={}, 
                  tokenizer_kwargs={},
                  finetune_kwargs={},
-                 load_generator=True
+                 load_generator=True,
+                 get_stance=True
                 ):
         self.method = method
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
@@ -75,6 +76,7 @@ class StanceMining:
         self.model_kwargs = model_kwargs
         self.tokenizer_kwargs = tokenizer_kwargs
         self.finetune_kwargs = finetune_kwargs
+        self.get_stance = get_stance
 
         if load_generator:
             self.generator = self._get_generator()
@@ -296,20 +298,34 @@ class StanceMining:
         return documents_df
 
     def _llm_topic_fit_transform(self, docs, bertopic_kwargs={}):
-        embedding_model = self._get_embedding_model()
-        documents_df = self.get_base_targets(docs, embedding_model=embedding_model)
+        
+        if isinstance(docs, list):
+            document_df = pl.DataFrame({"Document": docs}).with_row_index(name='ID')
+        elif isinstance(docs, pl.DataFrame):
+            document_df = docs
+            assert 'Document' in document_df.columns, "docs must have a 'Document' column"
+            if 'ID' not in document_df.columns:
+                document_df = document_df.with_row_index(name='ID')
+        
+        embed_model = self._get_embedding_model()
+        if 'Targets' not in document_df.columns:
+            document_df = self.get_base_targets(docs, embedding_model=embed_model)
 
-        # cluster initial stance targets
+            # cluster initial stance targets
+            base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls()[['Targets']]
+        else:
+            assert isinstance(document_df.schema['Targets'], pl.List), "Targets column must be a list of strings"
+            base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls('Targets')[['Targets']]
+        
         topic_model = self._get_base_topic_model(bertopic_kwargs)
-        base_targets_df = documents_df.explode('Targets').unique('Targets').drop_nulls()[['Targets']]
-        topics, probs = topic_model.fit_transform(base_targets_df['Targets'].to_list())
-        base_targets_df = base_targets_df.with_columns([
+        topics, probs = topic_model.fit_transform(base_target_df['Targets'].to_list())
+        base_target_df = base_target_df.with_columns([
             pl.Series(name='Topic', values=topics),
             pl.col('Targets').alias('Document')
         ]).with_row_index(name='ID')
         repr_docs, _, _, _ = topic_model._extract_representative_docs(
             topic_model.c_tf_idf_,
-            base_targets_df.to_pandas(),
+            base_target_df.to_pandas(),
             topic_model.topic_representations_,
             nr_samples=500,
             nr_repr_docs=self.num_representative_docs,
@@ -321,7 +337,7 @@ class StanceMining:
         topic_info = pl.from_pandas(topic_info)
         no_outliers_df = topic_info.filter(pl.col('Topic') != -1)
         stance_targets = [prompting.ask_llm_target_aggregate(self.generator, r['Representative_Docs'], r['Representation']) for r in tqdm(no_outliers_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
-        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embedding_model)
+        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embed_model)
         no_outliers_df = no_outliers_df.with_columns(
             pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String))
         )
@@ -329,12 +345,12 @@ class StanceMining:
             .with_columns(pl.col('noun_phrases').fill_null([]))
 
         # map documents to new noun phrases via topics
-        target_df = documents_df.explode('Targets')
-        target_df = target_df.join(base_targets_df, on='Targets', how='left')
+        target_df = document_df.explode('Targets')
+        target_df = target_df.join(base_target_df, on='Targets', how='left')
         target_df = target_df.filter(pl.col('Topic') != -1)
         target_df = target_df.join(topic_info, on='Topic', how='left')
 
-        documents_df = documents_df.join(
+        document_df = document_df.join(
                 target_df.group_by('ID')\
                     .agg(pl.col('noun_phrases').flatten())\
                     .rename({'noun_phrases': 'NewTargets'}), 
@@ -343,34 +359,38 @@ class StanceMining:
             maintain_order='left'
         )
         
-        documents_df = documents_df.with_columns(
+        document_df = document_df.with_columns(
             pl.when(pl.col('NewTargets').is_not_null())\
                 .then(pl.concat_list(pl.col('Targets'), pl.col('NewTargets')))\
                 .otherwise(pl.col('Targets')))
-        documents_df = documents_df.drop(['NewTargets'])
+        document_df = document_df.drop(['NewTargets'])
 
         # remove targets that are too similar
-        targets = documents_df['Targets'].to_list()
-        targets = self._filter_similar_phrases(targets, embedding_model=embedding_model)
-        documents_df = documents_df.drop('Targets').with_columns(pl.Series(name='Targets', values=targets))
+        targets = document_df['Targets'].to_list()
+        targets = self._filter_similar_phrases(targets, embedding_model=embed_model)
+        document_df = document_df.drop('Targets').with_columns(pl.Series(name='Targets', values=targets))
 
-        target_df = documents_df.explode('Targets').rename({'Targets': 'Target'})
-        target_df = target_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(target_df['Document'], target_df['Target'])))
-        target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
-        target_info = target_df.rename({'Target': 'noun_phrase'}).select(['noun_phrase', 'polarity']).to_dicts()
+        if self.get_stance:
+            target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
+            target_df = target_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(target_df['Document'], target_df['Target'])))
+            target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
+            target_info = target_df.rename({'Target': 'noun_phrase'}).select(['noun_phrase', 'polarity']).to_dicts()
 
-        documents_df = documents_df.join(
-            target_df.group_by('ID')\
-                .agg(pl.col('Target').alias('Targets'), pl.col('polarity').alias('Polarities')),
-            on='ID',
-            how='left',
-            maintain_order='left'
-        )
+            document_df = document_df.join(
+                target_df.group_by('ID')\
+                    .agg(pl.col('Target').alias('Targets'), pl.col('polarity').alias('Polarities')),
+                on='ID',
+                how='left',
+                maintain_order='left'
+            )
 
-        documents_df, target_info_df = get_var_and_max_var_target(documents_df, target_info)
-        self.target_info = target_info_df
+            document_df, target_info_df = get_var_and_max_var_target(document_df, target_info)
+            self.target_info = target_info_df
+        else:
+            target_info_df = pl.DataFrame(target_info)
+            self.target_info = target_info_df.unique('noun_phrase')
 
-        return documents_df
+        return document_df
     
     def _embedding_fit_transform():
         raise NotImplementedError("Method 'steeringvectors' not implemented")
@@ -420,7 +440,6 @@ class StanceMining:
         
         polarities = np.full((len(documents), num_targets), np.nan)
         probs = np.zeros((len(documents), num_targets))
-        polarities_dict = documents['Polarities'].to_list()
         for i, doc_data in enumerate(documents.to_dicts()):
             doc_num_targets = len(doc_data['Targets'])
             for doc_target, doc_polarity in zip(doc_data['Targets'], doc_data['Polarities']):
@@ -428,7 +447,7 @@ class StanceMining:
                 polarities[i, idx] = doc_polarity
                 probs[i, idx] = 1/doc_num_targets
 
-        return doc_targets, probs, polarities
+        return documents, probs, polarities
 
     def fit_transform(self, docs, embeddings=None, bertopic_kwargs={}):
         # could also compute generalized stance (i.e. sentiment), then find vector
@@ -446,7 +465,10 @@ class StanceMining:
         else:
             raise ValueError(f"Method '{self.method}' not implemented")
         
-        return self._get_targets_probs_polarity(documents)
+        if self.get_stance:
+            return self._get_targets_probs_polarity(documents)
+        else:
+            return documents
 
     def get_target_info(self):
         return self.target_info

@@ -50,7 +50,6 @@ def main(config):
         )
 
         doc_targets, probs, polarity = model.fit_transform(docs, bertopic_kwargs={'min_topic_size': min_topic_size})
-        # topic_info = model.get_topic_info()
         target_info = model.get_target_info()
     elif method == 'polar':
         from experiments.methods import polar

@@ -18,29 +18,22 @@ import wandb
 
 import experiments.datasets
 
-def load_training_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
+def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
     return experiments.datasets.load_dataset(
         dataset_name, 
-        split="train", 
-        group=generation_method=='list', 
+        split=split, 
+        group=(generation_method=='list') and (task=='topic-extraction'), 
         remove_synthetic_neutral=task!="stance-classification"
     )
+
+def load_training_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
+    return load_split_data(dataset_name, "train", task, generation_method)
 
 def load_validation_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
-    return experiments.datasets.load_dataset(
-        dataset_name, 
-        split="val", 
-        group=generation_method=='list', 
-        remove_synthetic_neutral=task!="stance-classification"
-    )
+    return load_split_data(dataset_name, "val", task, generation_method)
 
 def load_test_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
-    return experiments.datasets.load_dataset(
-        dataset_name, 
-        split="test", 
-        group=True, 
-        remove_synthetic_neutral=task!="stance-classification"
-    )
+    return load_split_data(dataset_name, "test", task, generation_method)
 
 def save_predictions(predictions: List[Any], df: pd.DataFrame, save_path: str) -> None:
     if not os.path.exists(save_path):
@@ -468,7 +461,7 @@ class ModelTrainer:
             shuffle=True
         )
         eval_loader = torch.utils.data.DataLoader(
-            eval_dataset.select_columns(['input_ids', 'attention_mask', 'labels']),
+            eval_dataset.select_columns(['input_ids', 'attention_mask']),
             batch_size=self.training_config.batch_size
         )
         
@@ -490,6 +483,7 @@ class ModelTrainer:
         self._training_loop(
             train_loader,
             eval_loader,
+            eval_dataset,
             optimizer,
             scheduler,
             evaluator,
@@ -500,6 +494,7 @@ class ModelTrainer:
         self,
         train_loader,
         eval_loader,
+        eval_dataset,
         optimizer,
         scheduler,
         evaluator,
@@ -547,7 +542,7 @@ class ModelTrainer:
                             self.accelerator,
                             neftune_hook
                         )
-                        metrics = self._validation_step(eval_loader, evaluator)
+                        metrics = self._validation_step(eval_loader, eval_dataset, evaluator)
                         state_str = f"Step {step},"
                         for key, val in metrics.items():
                             state_str += f" {key.title()}: {val:.4f},"
@@ -568,7 +563,7 @@ class ModelTrainer:
 
                         pbar = tqdm.tqdm(total=self.training_config.eval_steps * self.training_config.grad_accum_steps, desc=f"Training round, loss: {loss:.4f}")
 
-    def _validation_step(self, eval_loader, evaluator):
+    def _validation_step(self, eval_loader, eval_dataset, evaluator):
         """Run validation step"""
         self.model_config.model.eval()
         all_preds = []
@@ -578,20 +573,32 @@ class ModelTrainer:
         with torch.no_grad():
             for batch in eval_loader:
                 pbar.update(1)
-                preds = get_prediction(batch, self.model_config.task, self.model_config.model, self.model_config.tokenizer, self.model_config.classification_method)
+                preds = get_prediction(
+                    batch, 
+                    self.model_config.task, 
+                    self.model_config.model, 
+                    self.model_config.tokenizer, 
+                    self.model_config.classification_method,
+                    self.model_config.generation_method
+                )
                 all_preds.extend(preds)
                 
                 if self.model_config.task in ["stance-classification", "argument-classification"]:
                     if self.model_config.classification_method == 'head':
                         all_labels.extend(batch["labels"].cpu().numpy())
                     elif self.model_config.classification_method == 'generation':
+                        labels = batch['labels'].clone()
+                        labels[labels == -100] = self.model_config.tokenizer.bos_token_id
                         all_labels.extend(self.model_config.tokenizer.batch_decode(
-                            batch["labels"][batch['labels'] != -100].unsqueeze(0),
+                            labels,
                             skip_special_tokens=True
                         ))
+                        all_labels = [l.strip('\n') for l in all_labels]
                 else:
+                    labels = batch['labels'].clone()
+                    labels[labels == -100] = self.model_config.tokenizer.bos_token_id
                     all_labels.extend(self.model_config.tokenizer.batch_decode(
-                        batch["labels"][batch['labels'] != -100].unsqueeze(0),
+                        labels,
                         skip_special_tokens=True
                     ))
         
@@ -669,6 +676,8 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             return predicted_class.cpu().tolist()
         elif classification_method == 'generation':
             if 'labels' in inputs:
+                labels = inputs['labels'].clone()
+                inputs['input_ids'][labels]
                 prompt = {
                     "input_ids": inputs["input_ids"][inputs['labels'] == -100].unsqueeze(0),
                     "attention_mask": inputs["attention_mask"][inputs['labels'] == -100].unsqueeze(0),
@@ -689,9 +698,9 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             def get_label(c):
                 for label in ['neutral', 'favor', 'against']:
                     if label in c.lower():
-                        return [label]
+                        return label
                 else:
-                    return ['neutral']
+                    return 'neutral'
             return [get_label(c) for c in completions]
     else:
         if 'labels' in inputs:

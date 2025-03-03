@@ -74,6 +74,7 @@ def _main(config, args):
         num_epochs=args.num_epochs,
         eval_steps=args.eval_steps,
         batch_size=args.batch_size,
+        grad_accum_steps=args.grad_accum_steps,
     )
 
     # Initialize components
@@ -100,7 +101,7 @@ def _main(config, args):
         train_data = load_training_data(data_config.dataset_name, model_config.task, model_config.generation_method)
         train_dataset = processor.process_data(train_data, model_config.classification_method, model_config.generation_method)
         val_data = load_validation_data(data_config.dataset_name, model_config.task, model_config.generation_method)
-        val_dataset = processor.process_data(val_data, model_config.classification_method, model_config.generation_method)
+        val_dataset = processor.process_data(val_data, model_config.classification_method, model_config.generation_method, train=False)
         
         # Train model
         trainer.train(train_dataset, val_dataset, model_save_path, evaluator)
