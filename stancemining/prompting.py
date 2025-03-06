@@ -1,10 +1,11 @@
+from .llms import Transformers
 
 def parse_generated_targets(outputs):
     outputs = [o for o in outputs if o != 'none' and o != None and o != '']
     outputs = list(set(outputs))
     return outputs
 
-def ask_llm_zero_shot_stance_target(generator, docs, generate_kwargs):
+def ask_llm_zero_shot_stance_target(generator: Transformers, docs, generate_kwargs):
     
     prompts = []
     for doc in docs:
@@ -198,7 +199,7 @@ def ask_llm_zero_shot_stance(generator, docs, stance_targets):
     return all_outputs
 
 
-def ask_llm_target_aggregate(generator, repr_docs, keywords):
+def ask_llm_target_aggregate(generator: Transformers, repr_docs, keywords):
     # Stance Target Topic Generalization Prompt
     repr_docs_s = ', '.join(f'"{d}"' for d in repr_docs)
     keywords_s = ', '.join(f'"{k}"' for k in keywords)
@@ -230,8 +231,8 @@ def ask_llm_target_aggregate(generator, repr_docs, keywords):
         Representative stance targets: ["vaccine mandates", "mandatory covid shots", "required immunization for schools"]
         Top keywords: ["mandatory", "requirement", "public health", "immunization", "vaccination"]""",
         """Output:
-        Generalized target: vaccination mandates
-        Reasoning: This captures the common theme of mandatory immunization policies while being broad enough to cover various contexts (workplace, school, public spaces).
+        Generalized target: vaccination mandates, bodily autonomy
+        Reasoning: This captures the common stance target of mandatory immunization policies while being broad enough to cover various contexts (workplace, school, public spaces).
         """,
         """Input:
         Representative stance targets: ["EVs in cities", "gas car phase-out", "zero emission zones"]
@@ -244,8 +245,8 @@ def ask_llm_target_aggregate(generator, repr_docs, keywords):
         Representative stance targets: ["content moderation", "online censorship", "platform guidelines"]
         Top keywords: ["social media", "guidelines", "content", "moderation", "posts"]""",
         """Output:
-        Generalized target: social media content control
-        Reasoning: This captures the broader issue of managing online content while remaining neutral on the specific approach or implementation.
+        Generalized target: social media content control, free speech
+        Reasoning: This captures the broader stance target of managing online content while remaining neutral on the specific approach or implementation.
         """,
         f"""Input:
         Representative stance targets: [{repr_docs_s}]
@@ -253,14 +254,14 @@ def ask_llm_target_aggregate(generator, repr_docs, keywords):
         """Output:
         Generalized target: """
     ]
-    raw_outputs = generator.generate([prompt], max_new_tokens=7, num_samples=3, add_generation_prompt=False, continue_final_message=True)[0]
+    raw_outputs = generator.generate([prompt], max_new_tokens=20, num_samples=1, add_generation_prompt=False, continue_final_message=True)[0]
     def parse_output(o):
-        if '\n' not in o:
+        if ('\n' not in o) and (', ' not in o):  # incomplete generation
             # incomplete generation
-            return None
-        o = o.split('Reasoning:')[0].split('\n')[0].strip('\n').strip().lower()
+            return []
+        o = o.split('Reasoning:')[0].split('\n')[0].strip('\n').strip().lower().split(', ')
         return o
-    outputs = [parse_output(o) for o in raw_outputs]
+    outputs = parse_output(raw_outputs[0])
     outputs = [o for o in outputs if o != None and o != '']
     outputs = parse_generated_targets(outputs)
     return outputs
