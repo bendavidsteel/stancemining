@@ -10,3 +10,6 @@ evaluate
 tqdm
 hydra
 wandb
+bert_score
+sacrebleu
+scipy
