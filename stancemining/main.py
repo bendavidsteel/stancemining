@@ -189,7 +189,8 @@ class StanceMining:
         Returns:
             List of lists with similar phrases removed
         """
-        df = phrases_list.to_frame()
+        col_name = phrases_list.name
+        df = phrases_list.rename('Targets').to_frame()
 
         df = df.with_columns(pl.col('Targets').list.len().alias('target_len'))
 
@@ -216,44 +217,7 @@ class StanceMining:
             .alias('targets')
         )
 
-        return df['targets']
-
-        # # Keep track of sublist boundaries
-        # boundaries = [0]
-        # for sublist in phrases_list:
-        #     boundaries.append(boundaries[-1] + len(sublist))
-        
-        # # Process each sublist separately
-        # filtered_lists = []
-        # for i in tqdm(range(len(phrases_list)), desc="Filtering similar phrases"):
-        #     start, end = boundaries[i], boundaries[i+1]
-            
-        #     # Skip if sublist has less than 2 items
-        #     if end - start < 2:
-        #         filtered_lists.append(phrases_list[i])
-        #         continue
-                
-        #     # Get embeddings for current sublist
-        #     embeddings = all_embeddings[start:end]
-            
-        #     # Compute cosine similarity matrix for current sublist
-        #     norms = np.linalg.norm(embeddings, axis=1)
-        #     similarity = np.dot(embeddings, embeddings.T) / np.outer(norms, norms)
-            
-        #     # Get upper triangular part to avoid duplicate comparisons
-        #     similarity = np.triu(similarity, k=1)
-            
-        #     # Find indices of similar phrases within this sublist
-        #     similar_indices = set(int(i) for i in np.where(similarity > similarity_threshold)[0])
-            
-        #     # Filter current sublist
-        #     filtered_sublist = [
-        #         phrase for j, phrase in enumerate(phrases_list[i])
-        #         if j not in similar_indices
-        #     ]
-        #     filtered_lists.append(filtered_sublist)
-        
-        # return filtered_lists
+        return df['targets'].rename(col_name) 
 
     def _get_base_topic_model(self, bertopic_kwargs):
         return BERTopic(**bertopic_kwargs)
@@ -446,7 +410,7 @@ class StanceMining:
 
         logger.info("Removing similar stance targets")
         # remove targets that are too similar
-        document_df = document_df.with_columns(self._filter_similar_phrases_fast(pl.col('Targets'), embedding_model=embed_model))
+        document_df = document_df.with_columns(self._filter_similar_phrases_fast(document_df['Targets'], embedding_model=embed_model))
 
         if self.get_stance:
             logger.info("Getting stance classifications for targets")
