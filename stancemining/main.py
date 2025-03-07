@@ -39,9 +39,14 @@ class StanceMining:
         self.model_lib = model_lib
         self.model_name = model_name
         self.model_kwargs = model_kwargs
+        if 'device_map' not in self.model_kwargs:
+            self.model_kwargs['device_map'] = 'auto'
+        if 'torch_dtype' not in self.model_kwargs:
+            self.model_kwargs['torch_dtype'] = 'auto'
+
         self.tokenizer_kwargs = tokenizer_kwargs
         self.finetune_kwargs = finetune_kwargs
-        self.get_stance = get_stance
+        self._get_stance = get_stance
         self.verbose = verbose
         if self.verbose:
             logger.set_level("DEBUG")
@@ -49,7 +54,7 @@ class StanceMining:
             logger.set_level("WARNING")
 
         if load_generator:
-            self.generator = self._get_generator()
+            self.generator = self._get_generator(lazy=True)
         else:
             self.generator = None
 
@@ -92,11 +97,7 @@ class StanceMining:
             data_name = 'vast-ezstance'
             df = pl.DataFrame({'Text': docs})
             
-            if self.generator:
-                self.generator.unload_model()
-            results = finetune.get_predictions("topic-extraction", df, self.finetune_kwargs, data_name, device_map=self.model_kwargs['device_map'])
-            if self.generator:
-                self.generator.load_model()
+            results = finetune.get_predictions("topic-extraction", df, self.finetune_kwargs, data_name, model_kwargs=self.model_kwargs)
             if isinstance(results[0], str):
                 targets = [[r] for r in results]
         target_df = pl.DataFrame({'Targets': targets})
@@ -110,9 +111,7 @@ class StanceMining:
             model_name = self.finetune_kwargs['model_name'].replace('/', '-')
             data_name = 'vast-ezstance'
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets})
-            self.generator.unload_model()
-            results = finetune.get_predictions("stance-classification", data, self.finetune_kwargs, data_name, device_map=self.model_kwargs['device_map'])
-            self.generator.load_model()
+            results = finetune.get_predictions("stance-classification", data, self.finetune_kwargs, data_name, model_kwargs=self.model_kwargs)
             results = [r.upper() for r in results]
             return results
 
@@ -412,22 +411,11 @@ class StanceMining:
         # remove targets that are too similar
         document_df = document_df.with_columns(self._filter_similar_phrases_fast(document_df['Targets'], embedding_model=embed_model))
 
-        if self.get_stance:
+        if self._get_stance:
             logger.info("Getting stance classifications for targets")
-            target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
-            target_df = target_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(target_df['Document'], target_df['Target'])))
-            target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
-            target_info = target_df.rename({'Target': 'noun_phrase'}).select(['noun_phrase', 'polarity'])
+            document_df, target_info_df = self.get_stance(document_df)
 
-            document_df = document_df.join(
-                target_df.group_by('ID')\
-                    .agg(pl.col('Target').alias('Targets'), pl.col('polarity').alias('Polarities')),
-                on='ID',
-                how='left',
-                maintain_order='left'
-            )
-
-            document_df, target_info_df = utils.get_var_and_max_var_target(document_df, target_info)
+            document_df, target_info_df = utils.get_var_and_max_var_target(document_df, target_info_df)
             self.target_info = target_info_df
         else:
             logger.info("Getting target info")
@@ -436,6 +424,21 @@ class StanceMining:
 
         logger.info("Done")
         return document_df
+    
+    def get_stance(self, document_df: pl.DataFrame) -> pl.DataFrame:
+        target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
+        target_df = target_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(target_df['Document'], target_df['Target'])))
+        target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
+        target_info_df = target_df.rename({'Target': 'noun_phrase'}).select(['noun_phrase', 'polarity'])
+
+        document_df = document_df.join(
+            target_df.group_by('ID')\
+                .agg(pl.col('Target').alias('Targets'), pl.col('polarity').alias('Polarities')),
+            on='ID',
+            how='left',
+            maintain_order='left'
+        )
+        return document_df, target_info_df
     
     def _embedding_fit_transform():
         raise NotImplementedError("Method 'steeringvectors' not implemented")

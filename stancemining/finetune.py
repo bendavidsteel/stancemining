@@ -591,12 +591,15 @@ class ModelTrainer:
         
         return evaluator.evaluate(all_preds, all_labels)
 
-def setup_model_and_tokenizer(task, classification_method, num_labels, device_map, model_save_path=None, model_name=None, hf_token=None):
+def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwargs={}, model_save_path=None, model_name=None):
     """Initialize model and tokenizer based on config"""
     model_path = model_save_path if model_save_path else model_name
+    tokenizer_kwargs = {}
+    if 'hf_token' in model_kwargs:
+        tokenizer_kwargs['hf_token'] = model_kwargs['hf_token']
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_path, 
-        token=hf_token
+        **tokenizer_kwargs
     )
     
     if task in ["stance-classification", "argument-classification"]:
@@ -608,10 +611,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
             model = create_fn(
                 model_path,
                 num_labels=num_labels,
-                torch_dtype='auto',
-                device_map=device_map,
-                attn_implementation='flash_attention_2',
-                token=hf_token
+                **model_kwargs
             )
         elif classification_method == 'generation':
             if model_save_path:
@@ -620,10 +620,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
                 create_fn = transformers.AutoModelForCausalLM.from_pretrained
             model = create_fn(
                 model_path,
-                torch_dtype='auto',
-                device_map=device_map,
-                attn_implementation='flash_attention_2',
-                token=hf_token
+                **model_kwargs
             )
         else:
             raise ValueError("Classification method not found")
@@ -634,10 +631,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, device_ma
             create_fn = transformers.AutoModelForCausalLM.from_pretrained
         model = create_fn(
             model_path,
-            torch_dtype=torch.bfloat16,
-            device_map=device_map,
-            attn_implementation='flash_attention_2',
-            token=hf_token
+            **model_kwargs
         )
     
     tokenizer.padding_side = 'left'
@@ -719,7 +713,7 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             return batched_completions
             
 
-def get_predictions(task, df, config, data_name, device_map='auto', generate_kwargs={}, hf_token=None):
+def get_predictions(task, df, config, data_name, model_kwargs={}, generate_kwargs={}):
     
     output_type = config['classification_method'] if task == "stance-classification" else config['generation_method']
     model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], data_name, output_type)
@@ -728,7 +722,7 @@ def get_predictions(task, df, config, data_name, device_map='auto', generate_kwa
         model_name=None,
         task=task,
         num_labels=2 if task == "argument-classification" else 3,
-        device_map=device_map,
+        device_map=model_kwargs['device_map'],
         prompt=load_prompt(task, prompting_method=config['prompting_method']),
         classification_method=config['classification_method'],
         generation_method=config['generation_method']
@@ -744,7 +738,7 @@ def get_predictions(task, df, config, data_name, device_map='auto', generate_kwa
     )
     
     # Initialize components
-    model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_save_path=model_save_path, hf_token=hf_token)
+    model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_save_path=model_save_path)
     model_config.model, model_config.tokenizer = model, tokenizer
     processor = DataProcessor(model_config, data_config)
     test_dataset = processor.process_data(df, model_config.classification_method, model_config.generation_method, train=False)
