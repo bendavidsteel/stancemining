@@ -670,7 +670,7 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
                 }
             prompt = {k: v.to(model.device) for k, v in prompt.items()}
             if 'max_new_tokens' not in generate_kwargs:
-                generate_kwargs['max_new_tokens'] = 2
+                generate_kwargs['max_new_tokens'] = 1
             outputs = model.generate(**prompt, **generate_kwargs)
             completions = [tokenizer.decode(
                 output[prompt['input_ids'].shape[1]:],
@@ -681,6 +681,8 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
                     if label in c.lower():
                         return label
                 else:
+                    if c == 'f' and generate_kwargs['max_new_tokens'] == 1:
+                        return 'favor'
                     return 'neutral'
             return [get_label(c) for c in completions]
     else:
