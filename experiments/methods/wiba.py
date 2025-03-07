@@ -16,7 +16,7 @@ def argument_detection(data, config, model_path, token):
 
         huggingface_hub.snapshot_download(repo_id=hf_repo_url,local_dir=local_directory)
 
-    results = get_predictions("argument-classification", data, model_path, config, hf_token=token)
+    results = get_predictions("argument-classification", data, model_path, config, model_kwargs={'hf_token': token})
 
     model.to('cpu')
     del model
@@ -33,7 +33,7 @@ def target_extraction(df, config, model_path, token):
     print(f"Extracting topics using model: {model_path}")
     data_name = 'vast-ezstance'
     generate_kwargs = {'num_return_sequences': 1}
-    results = get_predictions("topic-extraction", df, config, data_name, hf_token=token, generate_kwargs=generate_kwargs)
+    results = get_predictions("topic-extraction", df, config, data_name, model_kwargs={'hf_token': token}, generate_kwargs=generate_kwargs)
 
     df = df.with_columns(pl.Series(name='topic', values=results))
     if df.schema['topic'] == pl.List(pl.String):
@@ -50,7 +50,7 @@ def stance_detection(df, config, model_path, token):
 
     print(f"Detecting stance using model: {model_path}")
     data_name = 'vast-ezstance'
-    results = get_predictions("stance-classification", df, config, data_name, hf_token=token)
+    results = get_predictions("stance-classification", df, config, data_name, model_kwargs={'hf_token': token})
     df = df.with_columns(pl.Series(name='stance', values=results))
 
     return df
