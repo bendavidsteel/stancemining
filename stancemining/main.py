@@ -211,8 +211,9 @@ class StanceMining:
 
         df = df.with_columns(
             pl.when(pl.col('target_len') > 1)
-                .then(pl.col('target_embeds').map_elements(utils.filter_phrases, return_dtype=pl.List(pl.String), skip_nulls=False))\
-                .otherwise(pl.col('target_embeds').alias('targets'))
+                .then(pl.col('target_embeds').map_elements(utils.filter_phrases, return_dtype=pl.List(pl.String)))\
+                .otherwise(pl.col('target_embeds'))\
+            .alias('targets')
         )
 
         return df['targets']

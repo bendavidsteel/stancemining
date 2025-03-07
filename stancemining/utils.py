@@ -44,8 +44,8 @@ def filter_stance_targets(all_targets: pl.Series) -> pl.Series:
 
 def filter_phrases(target_embeds, similarity_threshold=0.9):
     # Compute cosine similarity matrix for current sublist
-    embeddings = np.array(target_embeds)
-    phrases_list = target_embeds
+    embeddings = target_embeds.struct.field('embeddings').to_numpy()
+    phrases_list = target_embeds.struct.field('Targets').to_list()
     norms = np.linalg.norm(embeddings, axis=1)
     similarity = np.dot(embeddings, embeddings.T) / np.outer(norms, norms)
     
@@ -55,6 +55,9 @@ def filter_phrases(target_embeds, similarity_threshold=0.9):
     # Find indices of similar phrases within this sublist
     similar_indices = set(int(i) for i in np.where(similarity > similarity_threshold)[0])
     
+    if not similar_indices:
+        return phrases_list
+
     # Filter current sublist
     filtered_sublist = [
         phrase for j, phrase in enumerate(phrases_list)
