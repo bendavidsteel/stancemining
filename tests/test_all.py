@@ -2,7 +2,7 @@ import itertools
 import random
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 from scipy.stats import dirichlet as scipy_dirichlet
 
@@ -24,7 +24,7 @@ class MockTopicModel:
         return topics, probs[:,1:] / probs[:,1:].sum(axis=1)[:,None]
     
     def get_topic_info(self):
-        return pd.DataFrame({
+        return pl.DataFrame({
             "Topic": list(range(self.num_topics)),
             "Representative_Docs": [["doc"] * self.nr_repr_docs] * self.num_topics,
             "Representation": [['keyword'] * 5] * self.num_topics
@@ -32,7 +32,7 @@ class MockTopicModel:
     
     def _extract_representative_docs(self, tf_idf, documents, topic_reps, nr_samples=5, nr_repr_docs=5):
         self.nr_repr_docs = nr_repr_docs
-        return pd.DataFrame({
+        return pl.DataFrame({
             "Document": ["doc1", "doc2", "doc3", "doc4", "doc5"]
         }), None, None, None
 
@@ -44,7 +44,7 @@ class MockGenerator:
         return ["output"] * num_samples
 
 
-class MockVectorTopic(StanceMining):
+class MockStanceMining(StanceMining):
     def __init__(self, *args, num_targets=3, targets=[], num_topics=3, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_targets = num_targets
@@ -73,11 +73,8 @@ class MockVectorTopic(StanceMining):
 def test_topic_llm_fit_transform():
     num_docs = 10
     docs = [f"doc_{i}" for i in range(num_docs)]
-    sent_a = "sent_a"
-    sent_b = "sent_b"
-    vector = Vector(sent_a, sent_b)
     num_targets = 3
-    vectopic = MockVectorTopic(vector, num_targets=3)
+    vectopic = MockStanceMining()
     documents = vectopic._topic_llm_fit_transform(docs)
     assert hasattr(vectopic, "topic_info")
     assert hasattr(vectopic, "target_info")
@@ -87,26 +84,28 @@ def test_topic_llm_fit_transform():
 def test_llm_topic_fit_transform():
     num_docs = 10
     docs = [f"doc_{i}" for i in range(num_docs)]
-    sent_a = "sent_a"
-    sent_b = "sent_b"
-    vector = Vector(sent_a, sent_b)
     num_targets = 3
-    vectopic = MockVectorTopic(vector, num_targets=3)
+    vectopic = MockStanceMining()
     documents = vectopic._llm_topic_fit_transform(docs)
     assert hasattr(vectopic, "topic_info")
     assert hasattr(vectopic, "target_info")
     assert len(vectopic.target_info) == num_targets
     assert len(documents) == len(docs)
 
+def test_filter_targets():
+    num_docs = 10
+    targets = [[f'target_{j}' for j in range(3)] for i in range(num_docs)]
+    df = pl.DataFrame({'Targets': targets})
+    miner = MockStanceMining()
+    df = df.with_columns(miner._filter_similar_phrases_fast(df['Targets']))
+    assert len(df) == len(targets)
+
+
 def test_get_targets_probs_polarity():
     num_topics = 3
     num_docs = 10
     docs = [f"doc_{i}" for i in range(num_docs)]
-    sent_a = "sent_a"
-    sent_b = "sent_b"
-    num_targets = 4
-    vector = Vector(sent_a, sent_b)
-    vectopic = MockVectorTopic(vector, num_targets=num_targets, num_topics=num_topics)
+    vectopic = MockStanceMining(vector, num_targets=num_targets, num_topics=num_topics)
     documents = vectopic._topic_llm_fit_transform(docs)
     targets, probs, polarity = vectopic._get_targets_probs_polarity(documents)
     assert len(targets) == len(documents)
@@ -182,7 +181,7 @@ def test_unsupervised_metrics():
     sent_a = "sent_a"
     sent_b = "sent_b"
     vector = Vector(sent_a, sent_b)
-    vectopic = MockVectorTopic(vector, targets=['dogs', 'cats', 'cows'])
+    vectopic = MockStanceMining(vector, targets=['dogs', 'cats', 'cows'])
     doc_targets, probs, polarity = vectopic.fit_transform(docs)
 
     target_info = vectopic.get_target_info()
@@ -205,7 +204,7 @@ def test_unsupervised_metrics():
 def test_filter_similar_phrases():
     num_docs = 100
     docs = [f"doc_{i}" for i in range(num_docs)]
-    vectopic = MockVectorTopic(targets=['dogs', 'cats', 'cows'])
+    vectopic = MockStanceMining(targets=['dogs', 'cats', 'cows'])
     stance_targets = [['dogs', 'cats', 'cat']] * num_docs
     filtered_stance_targets = vectopic._filter_similar_phrases(stance_targets)
     assert len(filtered_stance_targets) == len(stance_targets)

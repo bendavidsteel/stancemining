@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import Any, List, Union
 
 from bertopic import BERTopic
 import numpy as np
@@ -60,13 +60,16 @@ class StanceMining:
         model = SentenceTransformer(self.embedding_model)
         return model
 
-    def _get_embeddings(self, docs, model=None):
+    def _get_embeddings(self, docs: Union[List[str], pl.Series], model=None) -> np.ndarray:
         if model is None:
             model = self._get_embedding_model()
         # check for cached embeddings
-        document_df = pl.DataFrame({'text': docs})
+        if isinstance(docs, pl.Series):
+            document_df = docs.rename('text').to_frame()
+        else:
+            document_df = pl.DataFrame({'text': docs})
         document_df = document_df.join(self.embedding_cache_df, on='text', how='left', maintain_order='left')
-        missing_docs = document_df.filter(pl.col('embedding').is_null())
+        missing_docs = document_df.unique('text').filter(pl.col('embedding').is_null())
         if len(missing_docs) > 0:
             new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose)
             missing_docs = missing_docs.with_columns(pl.Series(name='embedding', values=new_embeddings))
@@ -172,6 +175,84 @@ class StanceMining:
             filtered_lists.append(filtered_sublist)
         
         return filtered_lists
+    
+    def _filter_similar_phrases_fast(self, phrases_list: pl.Series, embedding_model=None, similarity_threshold: float = 0.8) -> pl.Series:
+        """
+        Filter out similar phrases from a list of lists based on embedding similarity,
+        only comparing phrases within the same sublist.
+        
+        Args:
+            phrases_list: List of lists containing phrases to filter
+            embedding_fn: Function that takes a list of strings and returns numpy array of embeddings
+            similarity_threshold: Threshold above which phrases are considered similar (default: 0.8)
+            
+        Returns:
+            List of lists with similar phrases removed
+        """
+        df = phrases_list.to_frame()
+
+        df = df.with_columns(pl.col('Targets').list.len().alias('target_len'))
+
+        # If input has less than 2 items, return as is
+        if df['target_len'].min() < 2:
+            return phrases_list
+        
+        df = df.with_row_index()
+            
+        # Flatten list to compute embeddings efficiently
+        target_df = df.explode('Targets')
+        
+        # Get embeddings for all phrases at once
+        all_embeddings = self._get_embeddings(target_df['Targets'], model=embedding_model)
+        
+        target_df = target_df.with_columns(pl.Series(name='embeddings', values=all_embeddings))
+        target_df = target_df.select(['index', pl.struct(['Targets', 'embeddings']).alias('target_embeds')])
+        df = target_df.group_by('index').agg(pl.col('target_embeds')).with_columns(pl.col('target_embeds').list.len().alias('target_len'))
+
+        df = df.with_columns(
+            pl.when(pl.col('target_len') > 1)
+                .then(pl.col('target_embeds').map_elements(utils.filter_phrases, return_dtype=pl.List(pl.String), skip_nulls=False))\
+                .otherwise(pl.col('target_embeds').alias('targets'))
+        )
+
+        return df['targets']
+
+        # # Keep track of sublist boundaries
+        # boundaries = [0]
+        # for sublist in phrases_list:
+        #     boundaries.append(boundaries[-1] + len(sublist))
+        
+        # # Process each sublist separately
+        # filtered_lists = []
+        # for i in tqdm(range(len(phrases_list)), desc="Filtering similar phrases"):
+        #     start, end = boundaries[i], boundaries[i+1]
+            
+        #     # Skip if sublist has less than 2 items
+        #     if end - start < 2:
+        #         filtered_lists.append(phrases_list[i])
+        #         continue
+                
+        #     # Get embeddings for current sublist
+        #     embeddings = all_embeddings[start:end]
+            
+        #     # Compute cosine similarity matrix for current sublist
+        #     norms = np.linalg.norm(embeddings, axis=1)
+        #     similarity = np.dot(embeddings, embeddings.T) / np.outer(norms, norms)
+            
+        #     # Get upper triangular part to avoid duplicate comparisons
+        #     similarity = np.triu(similarity, k=1)
+            
+        #     # Find indices of similar phrases within this sublist
+        #     similar_indices = set(int(i) for i in np.where(similarity > similarity_threshold)[0])
+            
+        #     # Filter current sublist
+        #     filtered_sublist = [
+        #         phrase for j, phrase in enumerate(phrases_list[i])
+        #         if j not in similar_indices
+        #     ]
+        #     filtered_lists.append(filtered_sublist)
+        
+        # return filtered_lists
 
     def _get_base_topic_model(self, bertopic_kwargs):
         return BERTopic(**bertopic_kwargs)
@@ -330,10 +411,11 @@ class StanceMining:
         no_outliers_df = topic_info.filter(pl.col('Topic') != -1)
         logger.info("Getting higher level stance targets")
         stance_targets = [prompting.ask_llm_target_aggregate(self.generator, r['Representative_Docs'], r['Representation']) for r in tqdm(no_outliers_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
-        stance_targets = self._filter_similar_phrases(stance_targets, embedding_model=embed_model)
         no_outliers_df = no_outliers_df.with_columns(
             pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String))
         )
+        no_outliers_df = no_outliers_df.with_columns(self._filter_similar_phrases_fast(no_outliers_df['noun_phrases'], embedding_model=embed_model))
+        
         topic_info = pl.concat([topic_info.filter(pl.col('Topic') == -1), no_outliers_df], how='diagonal_relaxed')\
             .with_columns(pl.col('noun_phrases').fill_null([]))
 
@@ -363,9 +445,7 @@ class StanceMining:
 
         logger.info("Removing similar stance targets")
         # remove targets that are too similar
-        targets = document_df['Targets'].to_list()
-        targets = self._filter_similar_phrases(targets, embedding_model=embed_model)
-        document_df = document_df.drop('Targets').with_columns(pl.Series(name='Targets', values=targets))
+        document_df = document_df.with_columns(self._filter_similar_phrases_fast(pl.col('Targets'), embedding_model=embed_model))
 
         if self.get_stance:
             logger.info("Getting stance classifications for targets")

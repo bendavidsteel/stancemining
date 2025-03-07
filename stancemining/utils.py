@@ -1,5 +1,6 @@
 import logging
 
+import numpy as np
 import polars as pl
 
 
@@ -40,6 +41,26 @@ def filter_stance_targets(all_targets: pl.Series) -> pl.Series:
     # remove exact duplicates
     all_targets = all_targets.list.unique()
     return all_targets
+
+def filter_phrases(target_embeds, similarity_threshold=0.9):
+    # Compute cosine similarity matrix for current sublist
+    embeddings = np.array(target_embeds)
+    phrases_list = target_embeds
+    norms = np.linalg.norm(embeddings, axis=1)
+    similarity = np.dot(embeddings, embeddings.T) / np.outer(norms, norms)
+    
+    # Get upper triangular part to avoid duplicate comparisons
+    similarity = np.triu(similarity, k=1)
+    
+    # Find indices of similar phrases within this sublist
+    similar_indices = set(int(i) for i in np.where(similarity > similarity_threshold)[0])
+    
+    # Filter current sublist
+    filtered_sublist = [
+        phrase for j, phrase in enumerate(phrases_list)
+        if j not in similar_indices
+    ]
+    return filtered_sublist
 
 class MyLogger:
     def __init__(self, level):
