@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 import json
+import multiprocessing
 import os
 import pathlib
 from typing import Optional, Dict, List, Any
@@ -134,7 +135,10 @@ class ChatTemplateTokenizer:
         self.tokenizer = tokenizer
 
     def create_input_sequence_for_generation(self, sample):
-        messages = to_message_format(sample['text'], None)
+        if isinstance(sample['text'], str):
+            messages = to_message_format(sample['text'], None)
+        elif isinstance(sample['text'], list):
+            messages = [to_message_format(text, None) for text in sample['text']]
         inputs = self.tokenizer.apply_chat_template(
             messages, 
             add_generation_prompt=True,
@@ -275,12 +279,12 @@ class DataProcessor:
         return df.select(cols)
     
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
+        prompt = self.model_config.prompt
         if self.model_config.task == "stance-classification":
             return dataset.map(
                 lambda examples: {
                     "text": [
-                        self.model_config.prompt.format(target=topic, text=text)
-                        for topic, text in zip(examples['topic'], examples['text'])
+                        prompt.format(target=topic, text=text) for topic, text in zip(examples['topic'], examples['text'])
                     ]
                 },
                 batched=True
@@ -289,10 +293,10 @@ class DataProcessor:
             return dataset.map(
                 lambda examples: {
                     "text": [
-                        self.model_config.prompt.format(text=prompt)
-                        for prompt in examples['text']
+                        prompt.format(text=prompt) for prompt in examples['text']
                     ]
-                }, batched=True)
+                }, batched=True
+            )
         else:
             raise ValueError("Task not found")
         
@@ -307,14 +311,14 @@ class DataProcessor:
                 elif classification_method == 'generation':
                     dataset = dataset.map(tokenizer.create_input_sequence_for_training)
             else:
-                dataset = dataset.map(tokenizer.create_input_sequence_for_generation)
+                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=multiprocessing.cpu_count() // 2)
             
         elif self.model_config.task == "topic-extraction":
             if train:
                 dataset = dataset.rename_column("topic", "labels")
                 dataset = dataset.map(tokenizer.create_input_sequence_for_training)
             else:
-                dataset = dataset.map(tokenizer.create_input_sequence_for_generation)
+                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=multiprocessing.cpu_count() // 2)
         return dataset
 
 class ModelEvaluator:
