@@ -4,7 +4,7 @@ import json
 import multiprocessing
 import os
 import pathlib
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 
 import accelerate
 import datasets
@@ -86,6 +86,42 @@ def load_prompt(task: str, prompting_method: str) -> str:
         system_message = file.read()
     return system_message
 
+def load_parent_prompt(task: str, prompting_method: str) -> str:
+    top_dir = pathlib.Path(__file__).parent.parent
+    if task == "stance-classification" or task == "argument-classification":
+        if prompting_method == 'wiba':
+            return ''
+        elif prompting_method == 'stancemining':
+            file_path = top_dir / 'models/stancemining/prompt_parent_stance.txt'
+        else:
+            raise ValueError("Prompting method not found")
+    elif task == "topic-extraction":
+        if prompting_method == 'wiba':
+            return ''
+        elif prompting_method == 'stancemining':
+            raise NotImplementedError("Prompting method not implemented")
+        else:
+            raise ValueError("Prompting method not found")
+    else:
+        raise ValueError("Task not found")
+    with open(file_path, 'r') as file:
+        system_message = file.read()
+    return system_message
+
+def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str, examples):
+    prompts = []
+    for i in range(len(examples['text'])):
+        text = examples['text'][i]
+        topic = examples['topic'][i]
+        parenttext = examples['parenttext'][i]
+        if parenttext:
+            prompt = parent_prompt_template.format(target=topic, parent_text=parenttext, text=text)
+            prompts.append(prompt)
+        else:
+            prompt = prompt_template.format(target=topic, text=text)
+            prompts.append(prompt)
+    return prompts
+
 def to_message_format(text, label):
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -131,24 +167,38 @@ def deactivate_neftune(model, accelerator, neftune_hook_handle):
     del embeddings.neftune_noise_alpha, unwrapped_model
 
 class ChatTemplateTokenizer:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, task):
         self.tokenizer = tokenizer
+        if self.tokenizer.chat_template is None:
+            if task == 'stance-classification':
+                self.base_continuation_prompt = '. Stance: The stance is '
+            else:
+                raise NotImplementedError()
+        else:
+            self.base_continuation_prompt = None
 
     def create_input_sequence_for_generation(self, sample):
-        if isinstance(sample['text'], str):
-            messages = to_message_format(sample['text'], None)
-        elif isinstance(sample['text'], list):
-            messages = [to_message_format(text, None) for text in sample['text']]
-        inputs = self.tokenizer.apply_chat_template(
-            messages, 
-            add_generation_prompt=True,
-            truncation=True,
-            max_length=2048,
-            padding='max_length',
-            return_token_type_ids=False, 
-            return_tensors='pt',
-            return_dict=True
-        )
+        if self.tokenizer.chat_template is not None:
+            if isinstance(sample['text'], str):
+                messages = to_message_format(sample['text'], None)
+            elif isinstance(sample['text'], list):
+                messages = [to_message_format(text, None) for text in sample['text']]
+            inputs = self.tokenizer.apply_chat_template(
+                messages, 
+                add_generation_prompt=True,
+                truncation=True,
+                max_length=2048,
+                padding='max_length',
+                return_token_type_ids=False, 
+                return_tensors='pt',
+                return_dict=True
+            )
+        else:
+            if isinstance(sample['text'], str):
+                texts = sample['text'] + self.base_continuation_prompt
+            elif isinstance(sample['text'], list):
+                texts = [text + self.base_continuation_prompt for text in sample['text']]
+            inputs = self.tokenizer(texts, truncation=True, max_length=2048, padding='max_length', return_tensors='pt')
         inputs['input_ids'] = inputs['input_ids'].squeeze(0)
         inputs['attention_mask'] = inputs['attention_mask'].squeeze(0)
         return inputs
@@ -156,23 +206,33 @@ class ChatTemplateTokenizer:
     def create_input_sequence_for_training(self, sample):
         text = sample['text']
         label = sample['labels'].strip()
-        messages = to_message_format(text, label)
-    
-        inputs = self.tokenizer.apply_chat_template(
-            messages,
-            truncation=True,
-            max_length=2048,
-            padding='max_length',
-            return_tensors="pt",
-            return_dict=True
-        )
+        if self.tokenizer.chat_template is not None:
+            messages = to_message_format(text, label)
+        
+            inputs = self.tokenizer.apply_chat_template(
+                messages,
+                truncation=True,
+                max_length=2048,
+                padding='max_length',
+                return_tensors="pt",
+                return_dict=True
+            )
+        else:
+            texts = text + self.base_continuation_prompt + label
+            inputs = self.tokenizer(
+                texts,
+                truncation=True,
+                max_length=2048,
+                padding='max_length',
+                return_tensors='pt'
+            )
         
         inputs['input_ids'] = inputs['input_ids'].squeeze(0)
         inputs['attention_mask'] = inputs['attention_mask'].squeeze(0)
         
         # Get the chat template format without the response
         # Find the assistant's response start
-        response_tokens = self.tokenizer.encode(label, add_special_tokens=False)
+        response_tokens = self.tokenizer.encode(f" {label}", add_special_tokens=False)
         response_start = None
         # Find where the assistant's response starts in the tokenized input
         for i in range(len(inputs['input_ids']) - len(response_tokens), 0, -1):
@@ -197,10 +257,15 @@ class ModelConfig:
     num_labels: Optional[int]
     device_map: Dict[str, int]
     prompt: str
+    parent_prompt: str
     tokenizer: Optional[transformers.PreTrainedTokenizer] = None
     model: Optional[transformers.PreTrainedModel] = None
     classification_method: Optional[str] = "head"
     generation_method: Optional[str] = "beam"
+    attn_implementation: Optional[str] = "flash_attention_2"
+    torch_dtype: Optional[Union[str, torch.dtype]] = torch.bfloat16
+    quantization: Optional[str] = None
+
 @dataclass
 class DataConfig:
     dataset_name: str
@@ -253,6 +318,9 @@ class DataProcessor:
             
         if 'Text' in df.columns and 'text' not in df.columns:
             df = df.rename({"Text": "text"})
+        if 'ParentText' in df.columns and 'parenttext' not in df.columns:
+            df = df.rename({'ParentText': 'parenttext'})
+            cols.append('parenttext')
         if 'Target' in df.columns and 'topic' not in df.columns:
             df = df.rename({"Target": "topic"})
         return df.select(cols)
@@ -277,15 +345,14 @@ class DataProcessor:
                     .with_columns(pl.col('topic').list.join(', '))
                 df = df.select(['index', 'text']).join(topic_df, on='index', how='left').drop('index')
         return df.select(cols)
-    
+
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
         prompt = self.model_config.prompt
+        parent_prompt = self.model_config.parent_prompt
         if self.model_config.task == "stance-classification":
             return dataset.map(
                 lambda examples: {
-                    "text": [
-                        prompt.format(target=topic, text=text) for topic, text in zip(examples['topic'], examples['text'])
-                    ]
+                    "text": stance_examples_to_prompt(prompt, parent_prompt, examples)
                 },
                 batched=True
             )
@@ -293,7 +360,7 @@ class DataProcessor:
             return dataset.map(
                 lambda examples: {
                     "text": [
-                        prompt.format(text=prompt) for prompt in examples['text']
+                        prompt.format(text=text) for text in examples['text']
                     ]
                 }, batched=True
             )
@@ -302,23 +369,27 @@ class DataProcessor:
         
             
     def _tokenize_dataset(self, dataset: datasets.Dataset, classification_method: str, train: bool = True) -> datasets.Dataset:
-        tokenizer = ChatTemplateTokenizer(self.model_config.tokenizer)
+        tokenizer = ChatTemplateTokenizer(self.model_config.tokenizer, self.model_config.task)
+        if len(dataset) > 10000:
+            num_proc = multiprocessing.cpu_count() // 2
+        else:
+            num_proc = 1
         if self.model_config.task in ["stance-classification", "argument-classification"]:
             if train:
                 dataset = dataset.rename_column("class", "labels")
                 if classification_method == 'head':
-                    dataset = dataset.map(tokenizer.create_input_sequence_for_generation)
+                    dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=num_proc)
                 elif classification_method == 'generation':
-                    dataset = dataset.map(tokenizer.create_input_sequence_for_training)
+                    dataset = dataset.map(tokenizer.create_input_sequence_for_training, num_proc=num_proc)
             else:
-                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=multiprocessing.cpu_count() // 2)
+                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=num_proc)
             
         elif self.model_config.task == "topic-extraction":
             if train:
                 dataset = dataset.rename_column("topic", "labels")
-                dataset = dataset.map(tokenizer.create_input_sequence_for_training)
+                dataset = dataset.map(tokenizer.create_input_sequence_for_training, num_proc=num_proc)
             else:
-                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=multiprocessing.cpu_count() // 2)
+                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=num_proc)
         return dataset
 
 class ModelEvaluator:
@@ -369,9 +440,8 @@ class ModelEvaluator:
 @dataclass
 class TrainingConfig:
     num_epochs: int
-    learning_rate: float = 3e-5
-    weight_decay: float = 0.1
-    max_grad_norm: float = 0.3
+    learning_rate: float = 1e-3
+    weight_decay: float = 0.01
     grad_accum_steps: int = 8
     batch_size: int = 1
     eval_steps: int = 100
@@ -386,8 +456,16 @@ class ModelTrainer:
     ):
         self.model_config = model_config
         self.training_config = training_config
+        
+        if self.model_config.torch_dtype == torch.bfloat16:
+            mixed_precision = 'bf16'
+        elif self.model_config.torch_dtype == torch.float16:
+            mixed_precision = 'fp16'
+        else:
+            mixed_precision = 'no'
+        
         self.accelerator = accelerate.Accelerator(
-            mixed_precision='fp16',
+            mixed_precision=mixed_precision,
             gradient_accumulation_steps=training_config.grad_accum_steps
         )
 
@@ -398,11 +476,13 @@ class ModelTrainer:
 
     def prepare_for_training(self) -> None:
         """Prepare model for training with LoRA"""
-        self.model_config.model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
-        
-        if self.model_config.task in ["stance-classification", "argument-classification"] and self.model_config.classification_method == 'head':
+        if self.training_config.grad_accum_steps > 1:
+            self.model_config.model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            
+        if (self.model_config.task in ["stance-classification", "argument-classification"] and self.model_config.classification_method == 'head' and self.training_config.grad_accum_steps > 1) \
+            or (self.model_config.quantization is not None):
             self.model_config.model = peft.prepare_model_for_kbit_training(self.model_config.model)
         
         # Setup LoRA
@@ -417,14 +497,24 @@ class ModelTrainer:
         elif self.model_config.task == "topic-extraction":
             lora_kwargs['task_type'] = "CAUSAL_LM"
 
-        lora_config = peft.LoraConfig(
-            r=8,
-            lora_alpha=32,
-            target_modules=modules,
-            lora_dropout=0.05,
-            bias="none",
-            **lora_kwargs
-        )
+        if self.model_config.quantization is None:
+            lora_config = peft.LoraConfig(
+                r=8,
+                lora_alpha=32,
+                target_modules=modules,
+                lora_dropout=0.05,
+                bias="none",
+                **lora_kwargs
+            )
+        elif self.model_config.quantization is not None:
+            lora_config = peft.LoraConfig(
+                r=16,
+                lora_alpha=8,
+                target_modules=modules,
+                lora_dropout=0.05,
+                bias="none",
+                **lora_kwargs
+            )
         
         self.model_config.model = peft.get_peft_model(self.model_config.model, lora_config)
 
@@ -470,19 +560,20 @@ class ModelTrainer:
         )
         
         # Prepare training components
-        (
-            self.model_config.model,
-            optimizer,
-            train_loader,
-            eval_loader,
-            scheduler
-        ) = self.accelerator.prepare(
-            self.model_config.model,
-            optimizer,
-            train_loader,
-            eval_loader,
-            scheduler
-        )
+        if self.model_config.quantization is None:
+            (
+                self.model_config.model,
+                optimizer,
+                train_loader,
+                eval_loader,
+                scheduler
+            ) = self.accelerator.prepare(
+                self.model_config.model,
+                optimizer,
+                train_loader,
+                eval_loader,
+                scheduler
+            )
         
         self._training_loop(
             train_loader,
@@ -551,7 +642,8 @@ class ModelTrainer:
                         for key, val in metrics.items():
                             state_str += f" {key.title()}: {val:.4f},"
                         print(state_str)
-                        wandb.log(metrics)
+                        eval_metrics = {f"eval/{key}": val for key, val in metrics.items()}
+                        wandb.log(eval_metrics)
                         
                         # Save best model
                         if metrics[chosen_metric] > best_eval_metric:

@@ -28,7 +28,8 @@ class StanceMining:
                  embedding_model='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
                  load_generator=True,
                  get_stance=True,
-                 verbose=False
+                 verbose=False,
+                 lazy=True
                 ):
         self.method = method
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
@@ -54,7 +55,7 @@ class StanceMining:
             logger.set_level("WARNING")
 
         if load_generator:
-            self.generator = self._get_generator(lazy=True)
+            self.generator = self._get_generator(lazy=lazy)
         else:
             self.generator = None
 
@@ -100,6 +101,10 @@ class StanceMining:
             results = finetune.get_predictions("topic-extraction", df, self.finetune_kwargs, data_name, model_kwargs=self.model_kwargs)
             if isinstance(results[0], str):
                 targets = [[r] for r in results]
+            else:
+                targets = results
+        else:
+            raise ValueError(f"Unrecognised self.llm_method value: {self.llm_method}")
         target_df = pl.DataFrame({'Targets': targets})
         target_df = target_df.with_columns(utils.filter_stance_targets(target_df['Targets']))
         return target_df['Targets'].to_list()
@@ -109,7 +114,7 @@ class StanceMining:
             return prompting.ask_llm_zero_shot_stance(self.generator, docs, stance_targets)
         elif self.llm_method == 'finetuned':
             model_name = self.finetune_kwargs['model_name'].replace('/', '-')
-            data_name = 'vast-ezstance'
+            data_name = 'vast-ezstance-ezstance_claim-pstance-semeval'
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets})
             results = finetune.get_predictions("stance-classification", data, self.finetune_kwargs, data_name, model_kwargs=self.model_kwargs)
             results = [r.upper() for r in results]
@@ -352,23 +357,23 @@ class StanceMining:
             base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls('Targets')[['Targets']]
         
         logger.info("Fitting BERTopic model")
-        topic_model = self._get_base_topic_model(bertopic_kwargs)
+        self.topic_model = self._get_base_topic_model(bertopic_kwargs)
         targets = base_target_df['Targets'].to_list()
         embeddings = self._get_embeddings(targets, model=embed_model)
-        topics, probs = topic_model.fit_transform(targets, embeddings=embeddings)
+        topics, probs = self.topic_model.fit_transform(targets, embeddings=embeddings)
         base_target_df = base_target_df.with_columns([
             pl.Series(name='Topic', values=topics),
             pl.col('Targets').alias('Document')
         ]).with_row_index(name='ID')
-        repr_docs, _, _, _ = topic_model._extract_representative_docs(
-            topic_model.c_tf_idf_,
+        repr_docs, _, _, _ = self.topic_model._extract_representative_docs(
+            self.topic_model.c_tf_idf_,
             base_target_df.to_pandas(),
-            topic_model.topic_representations_,
+            self.topic_model.topic_representations_,
             nr_samples=500,
             nr_repr_docs=self.num_representative_docs,
         )
-        topic_model.representative_docs_ = repr_docs
-        topic_info = topic_model.get_topic_info()
+        self.topic_model.representative_docs_ = repr_docs
+        topic_info = self.topic_model.get_topic_info()
 
         # get higher level stance targets for each topic
         topic_info = pl.from_pandas(topic_info)
@@ -426,6 +431,9 @@ class StanceMining:
         return document_df
     
     def get_stance(self, document_df: pl.DataFrame) -> pl.DataFrame:
+        if 'ID' not in document_df.columns:
+            document_df = document_df.with_row_index(name='ID')
+
         target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
         target_df = target_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(target_df['Document'], target_df['Target'])))
         target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
@@ -481,7 +489,7 @@ class StanceMining:
     def _get_targets_probs_polarity(self, documents):
         all_targets = self.target_info['noun_phrase'].to_list()
         target_to_idx = {target: idx for idx, target in enumerate(all_targets)}
-        doc_targets = documents['Target'].to_list()
+        doc_targets = documents['Targets'].to_list()
         doc_targets = [[t] if t is not None else [] for t in doc_targets]
 
         num_targets = len(self.target_info)
@@ -516,13 +524,16 @@ class StanceMining:
         else:
             raise ValueError(f"Method '{self.method}' not implemented")
         
-        if self.get_stance:
+        if self._get_stance:
             return self._get_targets_probs_polarity(documents)
         else:
             return documents
 
     def get_target_info(self):
         return self.target_info
+    
+    def get_topic_model(self):
+        return self.topic_model
 
     def _get_generator(self, lazy=False):
         if self.model_lib == 'transformers':

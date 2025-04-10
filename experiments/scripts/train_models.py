@@ -4,7 +4,7 @@ import os
 import dotenv
 import hydra
 import omegaconf
-import torch
+import transformers
 import tqdm
 import wandb
 
@@ -16,6 +16,7 @@ from stancemining.finetune import (
     DataProcessor, 
     ModelEvaluator, 
     load_prompt,
+    load_parent_prompt,
     load_training_data,
     load_validation_data,
     load_test_data,
@@ -53,12 +54,14 @@ def _main(config, args):
     # Setup configurations
     model_config = ModelConfig(
         model_name=args.model_name,
+        quantization=args.quantization if args.quantization in ['8bit', '4bit'] else None,
         task=args.task,
         num_labels=2 if args.task == "argument-classification" else 3,
         classification_method=args.classification_method,
         generation_method=args.generation_method,
         device_map={"": config.device_id},
-        prompt=load_prompt(args.task, args.prompting_method)
+        prompt=load_prompt(args.task, args.prompting_method),
+        parent_prompt=load_parent_prompt(args.task, args.prompting_method)
     )
     
     data_config = DataConfig(
@@ -90,24 +93,48 @@ def _main(config, args):
     output_type = model_config.classification_method if model_config.task == "stance-classification" else model_config.generation_method
     model_save_path = get_model_save_path(args.task, args.save_model_path, args.model_name, data_config.dataset_name, output_type)
 
-    if args.do_train:
-        # Setup model and tokenizer
-        model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_name=model_config.model_name, hf_token=hf_token)
-        trainer.set_model_and_tokenizer(model, tokenizer)
+    model_kwargs = {
+        'device_map': model_config.device_map,
+        'token': hf_token,
+        'attn_implementation': model_config.attn_implementation,
+        'torch_dtype': model_config.torch_dtype
+    }
 
-        trainer.prepare_for_training()
-        
+    if model_config.quantization is not None:
+        if model_config.quantization == '8bit':
+            quant_config = transformers.BitsAndBytesConfig(
+                load_in_8bit=True
+            )
+        elif model_config.quantization == '4bit':
+            quant_config = transformers.BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=model_config.torch_dtype,
+            )
+        else:
+            raise ValueError(f"Unknown quantization type: {model_config.quantization}")
+        model_kwargs['quantization_config'] = quant_config
+
+    if args.do_train:
         # Process training data
         train_data = load_training_data(data_config.dataset_name, model_config.task, model_config.generation_method)
-        train_dataset = processor.process_data(train_data, model_config.classification_method, model_config.generation_method)
         val_data = load_validation_data(data_config.dataset_name, model_config.task, model_config.generation_method)
+
+        # Setup model and tokenizer
+        model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_name=model_config.model_name)
+        trainer.set_model_and_tokenizer(model, tokenizer)
+
+        train_dataset = processor.process_data(train_data, model_config.classification_method, model_config.generation_method)
         val_dataset = processor.process_data(val_data, model_config.classification_method, model_config.generation_method, train=False)
+
+        trainer.prepare_for_training()
         
         # Train model
         trainer.train(train_dataset, val_dataset, model_save_path, evaluator)
     
     if args.do_eval:
-        model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_config.device_map, model_save_path=model_save_path, hf_token=hf_token)
+        model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_save_path=model_save_path)
         trainer.set_model_and_tokenizer(model, tokenizer)
 
         test_data = load_test_data(data_config.dataset_name, model_config.task, model_config.generation_method)
@@ -155,7 +182,8 @@ def _main(config, args):
             }
         
         print_metrics(metrics)
-        wandb.run.summary.update(metrics)
+        test_metrics = {f"test/{k}": v for k, v in metrics.items()}
+        wandb.run.summary.update(test_metrics)
     wandb.finish()
 
 if __name__ == "__main__":
