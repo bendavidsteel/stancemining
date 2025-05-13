@@ -1,8 +1,32 @@
 import logging
 
+from nltk.corpus import stopwords
 import numpy as np
 import polars as pl
 
+def remove_bad_targets(target_df: pl.DataFrame):
+    phrases = [
+        'the primary stance target of the piece of text is',
+        'the primary stance target of this text is',
+        'the primary stance target in the given text is',
+        'the primary stance target of the text is',
+        'the primary stance target is the noun phrase', 
+        'the primary stance target of the given text is',
+        'the primary stance target is',
+        'stance target: 1.',
+        'stance target:',
+        'stance target'
+    ]
+    for phrase in phrases:
+        target_df = target_df.with_columns(pl.col('Target').str.replace(phrase, ''))
+    exclude_phrases = ['', 'url', 'rt', 'rt @', '@rt']
+    target_df = target_df.with_columns(pl.col('Target').str.strip_chars('"').str.strip_chars(':').str.strip_chars())
+    target_df = target_df.filter(~(pl.col('Target').str.contains('rt @\w+'))\
+                              .or_(pl.col('Target').str.contains('rt \w+'))\
+                              .or_(pl.col('Target').str.contains(r'^[\U0001F000-\U0001FFFF\u2600-\u26FF\u2700-\u27BF]+$'))\
+                              .or_(pl.col('Target').is_in(stopwords.words('english') + stopwords.words('french')))\
+                              .or_(pl.col('Target').str.to_lowercase().is_in(exclude_phrases)))
+    return target_df
 
 def get_var_and_max_var_target(documents_df: pl.DataFrame, target_info_df: pl.DataFrame) -> pl.DataFrame:
     if 'topic_id' in target_info_df.columns:

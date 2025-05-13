@@ -39,8 +39,8 @@ def main(config):
 
     start_time = datetime.datetime.now()
     if method in ['topicllm', 'llmtopic']:
-        import stancemining
-        model = stancemining.StanceMining(
+        from stancemining.main import StanceMining
+        model = StanceMining(
             method=method, 
             llm_method=config.model.llm_method,
             model_lib='transformers', 
@@ -105,7 +105,7 @@ def main(config):
 
     # create unique directory
     cur_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-    working_dir = f'./data/{cur_time}'
+    working_dir = f'./data/{cur_time}/runs'
     # update wandb config with working directory
     wandb.config.update({'working_dir': working_dir})
     os.makedirs(working_dir, exist_ok=True)
