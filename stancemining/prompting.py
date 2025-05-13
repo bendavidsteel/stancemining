@@ -244,6 +244,14 @@ def ask_llm_target_aggregate(generator: Transformers, repr_docs, keywords):
         Reasoning: These targets identify specific urban policy approaches across different cities and implementation contexts without committing to exact timeframes.
 
         Input:
+        Representative stance targets: ["o canada", "canada #canada", "2/3 of canadians", "canada 🍁", "canada canadians"]
+        Top keywords: ["canadians", "canada", "canadas", "canadian", "canadianpolling", "screwed", "uscanada", "canadaus", "broken", "canadianace001"]
+
+        Output:
+        Generalized target: ["canada"]
+        Reasoning: The inputs are all basically just the stance target canada, so just output that. 
+
+        Input:
         Representative stance targets: ["content moderation", "online censorship", "platform guidelines"]
         Top keywords: ["social media", "guidelines", "content", "moderation", "posts"]
 

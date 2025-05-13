@@ -99,7 +99,7 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
         if prompting_method == 'wiba':
             return ''
         elif prompting_method == 'stancemining':
-            raise NotImplementedError("Prompting method not implemented")
+            file_path = top_dir / 'models/stancemining/prompt_parent_stance_target.txt'
         else:
             raise ValueError("Prompting method not found")
     else:
@@ -113,7 +113,10 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
     for i in range(len(examples['text'])):
         text = examples['text'][i]
         topic = examples['topic'][i]
-        parenttext = examples['parenttext'][i]
+        if 'parenttext' in examples:
+            parenttext = examples['parenttext'][i]
+        else:
+            parenttext = None
         if parenttext:
             prompt = parent_prompt_template.format(target=topic, parent_text=parenttext, text=text)
             prompts.append(prompt)
@@ -257,7 +260,7 @@ class ModelConfig:
     num_labels: Optional[int]
     device_map: Dict[str, int]
     prompt: str
-    parent_prompt: str
+    parent_prompt: Optional[str] = None
     tokenizer: Optional[transformers.PreTrainedTokenizer] = None
     model: Optional[transformers.PreTrainedModel] = None
     classification_method: Optional[str] = "head"
@@ -552,11 +555,15 @@ class ModelTrainer:
         train_loader = torch.utils.data.DataLoader(
             train_dataset.select_columns(['input_ids', 'attention_mask', 'labels']),
             batch_size=self.training_config.batch_size,
-            shuffle=True
+            shuffle=True,
+            # pin_memory=True,
+            # pin_memory_device=self.model_config.model.device
         )
         eval_loader = torch.utils.data.DataLoader(
             eval_dataset.select_columns(['input_ids', 'attention_mask']),
-            batch_size=self.training_config.batch_size
+            batch_size=self.training_config.batch_size,
+            # pin_memory=True,
+            # pin_memory_device=self.model_config.model.device
         )
         
         # Prepare training components
@@ -572,7 +579,8 @@ class ModelTrainer:
                 optimizer,
                 train_loader,
                 eval_loader,
-                scheduler
+                scheduler,
+                device_placement=[False] * 5
             )
         
         self._training_loop(
@@ -616,6 +624,7 @@ class ModelTrainer:
         for epoch in range(self.training_config.num_epochs):
             self.model_config.model.train()
             for step, batch in enumerate(train_loader):
+                batch = {k: v.to(self.model_config.model.device) for k, v in batch.items()}
                 outputs = self.model_config.model(**batch)
                 loss = outputs.loss / self.training_config.grad_accum_steps
                 self.accelerator.backward(loss)

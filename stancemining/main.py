@@ -439,13 +439,14 @@ class StanceMining:
         target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
         target_info_df = target_df.rename({'Target': 'noun_phrase'}).select(['noun_phrase', 'polarity'])
 
-        document_df = document_df.join(
-            target_df.group_by('ID')\
-                .agg(pl.col('Target').alias('Targets'), pl.col('polarity').alias('Polarities')),
-            on='ID',
-            how='left',
-            maintain_order='left'
-        )
+        document_df = document_df.drop('Targets')\
+            .join(
+                target_df.group_by('ID')\
+                    .agg(pl.col('Target').alias('Targets'), pl.col('polarity').alias('Polarities')),
+                on='ID',
+                how='left',
+                maintain_order='left'
+            )
         return document_df, target_info_df
     
     def _embedding_fit_transform():
@@ -501,7 +502,7 @@ class StanceMining:
             for doc_target, doc_polarity in zip(doc_data['Targets'], doc_data['Polarities']):
                 idx = target_to_idx[doc_target]
                 polarities[i, idx] = doc_polarity
-                probs[i, idx] = 1/doc_num_targets
+                probs[i, idx] = 1
 
         return documents, probs, polarities
 

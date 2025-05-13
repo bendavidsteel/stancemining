@@ -39,8 +39,8 @@ def main(config):
 
     start_time = datetime.datetime.now()
     if method in ['topicllm', 'llmtopic']:
-        import stancemining
-        model = stancemining.StanceMining(
+        from stancemining.main import StanceMining
+        model = StanceMining(
             method=method, 
             llm_method=config.model.llm_method,
             model_lib='transformers', 

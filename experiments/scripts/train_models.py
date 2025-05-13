@@ -78,6 +78,7 @@ def _main(config, args):
         eval_steps=args.eval_steps,
         batch_size=args.batch_size,
         grad_accum_steps=args.grad_accum_steps,
+        learning_rate=args.learning_rate
     )
 
     # Initialize components
