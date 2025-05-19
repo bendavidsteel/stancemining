@@ -10,7 +10,8 @@ from experiments import metrics, datasets
 
 def get_latest_runs():
     api = wandb.Api()
-    runs = api.runs("benjamin-steel-projects/stance-target-topics")
+    project_name = os.environ['PROJECT_NAME']
+    runs = api.runs(project_name)
     
     dataset_name_map = {
         'vast/vast_test.csv': 'vast',

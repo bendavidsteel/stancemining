@@ -8,7 +8,8 @@ import wandb
 
 def get_latest_runs():
     api = wandb.Api()
-    runs = api.runs("benjamin-steel-projects/stance-target-topics")
+    project_name = os.environ['PROJECT_NAME']
+    runs = api.runs(project_name)
     
     dataset_name_map = {
         'vast/vast_test.csv': 'vast',
@@ -61,9 +62,10 @@ def main():
                     continue
                 dataset = run.config.get('dataset_name')
                 method = run.config.get('method')
-                target_df = pl.read_parquet(os.path.join(working_dir, f"{dataset}_{method}_targets.parquet.zstd"))
+                working_dir_name = os.path.basename(working_dir)
+                target_df = pl.read_parquet(os.path.join('data', 'runs', working_dir_name, f"{dataset}_{method}_targets.parquet.zstd"))
                 target_df = target_df.with_row_index()
-                output_df = pl.read_parquet(os.path.join(working_dir, f"{dataset}_{method}_output.parquet.zstd"))
+                output_df = pl.read_parquet(os.path.join('data', 'runs', working_dir_name, f"{dataset}_{method}_output.parquet.zstd"))
                 output_df = output_df.join(
                     output_df.explode('Probs')\
                         .with_columns([
