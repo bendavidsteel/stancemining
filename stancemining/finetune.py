@@ -9,9 +9,12 @@ from typing import Optional, Dict, List, Any, Union
 import accelerate
 import datasets
 import evaluate
+import numpy as np
 import pandas as pd
 import peft
 import polars as pl
+from sklearn.metrics import confusion_matrix
+from sklearn.utils.class_weight import compute_class_weight
 import torch
 import tqdm
 import transformers
@@ -113,12 +116,19 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
     for i in range(len(examples['text'])):
         text = examples['text'][i]
         topic = examples['topic'][i]
-        if 'parenttext' in examples:
-            parenttext = examples['parenttext'][i]
+        if 'parenttexts' in examples:
+            parenttexts = examples['parenttexts'][i]
         else:
-            parenttext = None
-        if parenttext:
-            prompt = parent_prompt_template.format(target=topic, parent_text=parenttext, text=text)
+            parenttexts = None
+        if parenttexts:
+            parent_chain = ''
+            for i, p_text in enumerate(parenttexts):
+                if i == 0:
+                    parent_chain += f"1. [Original Post]: '{p_text}'\n"
+                else:
+                    parent_chain += f"{i+1}. [Reply to {i}]: '{p_text}'\n"
+
+            prompt = parent_prompt_template.format(target=topic, parent_chain=parent_chain, text=text)
             prompts.append(prompt)
         else:
             prompt = prompt_template.format(target=topic, text=text)
@@ -170,7 +180,7 @@ def deactivate_neftune(model, accelerator, neftune_hook_handle):
     del embeddings.neftune_noise_alpha, unwrapped_model
 
 class ChatTemplateTokenizer:
-    def __init__(self, tokenizer, task):
+    def __init__(self, tokenizer: transformers.PreTrainedTokenizer, task: str):
         self.tokenizer = tokenizer
         if self.tokenizer.chat_template is None:
             if task == 'stance-classification':
@@ -194,7 +204,8 @@ class ChatTemplateTokenizer:
                 padding='max_length',
                 return_token_type_ids=False, 
                 return_tensors='pt',
-                return_dict=True
+                return_dict=True,
+                enable_thinking=False
             )
         else:
             if isinstance(sample['text'], str):
@@ -311,7 +322,8 @@ class DataProcessor:
         )
     
     def _process_stance_classification(self, df: pl.DataFrame, classification_method: str) -> pl.DataFrame:
-        cols = ['text', 'topic']
+        cols = ['text', 'topic', 'dataset']
+        df = df.rename({'Dataset': 'dataset'})
         if 'Stance' in df.columns and 'class' not in df.columns:
             df = df.rename({"Stance": "class"})
         if 'class' in df.columns:
@@ -321,9 +333,9 @@ class DataProcessor:
             
         if 'Text' in df.columns and 'text' not in df.columns:
             df = df.rename({"Text": "text"})
-        if 'ParentText' in df.columns and 'parenttext' not in df.columns:
-            df = df.rename({'ParentText': 'parenttext'})
-            cols.append('parenttext')
+        if 'ParentTexts' in df.columns and 'parenttexts' not in df.columns:
+            df = df.rename({'ParentTexts': 'parenttexts'})
+            cols.append('parenttexts')
         if 'Target' in df.columns and 'topic' not in df.columns:
             df = df.rename({"Target": "topic"})
         return df.select(cols)
@@ -333,7 +345,8 @@ class DataProcessor:
             df = df.rename({"Text": "text"})
         if 'Target' in df.columns and 'topic' not in df.columns:
             df = df.rename({"Target": "topic"})
-        cols = ['text']
+        cols = ['text', 'dataset']
+        df = df.rename({'Dataset': 'dataset'})
         if 'topic' in df.columns:
             cols.append('topic')
             if generation_method == 'list':
@@ -416,22 +429,39 @@ class ModelEvaluator:
             }
         raise ValueError(f"Unknown task: {self.model_config.task}")
     
-    def evaluate(self, predictions: List[Any], references: List[Any]) -> Dict[str, float]:
+    def evaluate(self, predictions: List[Any], references: List[Any], datasets: List[Any]) -> Dict[str, float]:
         if self.model_config.task in ["stance-classification", "argument-classification"]:
             if isinstance(predictions[0], str):
                 predictions = [self.data_config.labels2id[p] for p in predictions]
                 references = [self.data_config.labels2id[r] for r in references]
-            return self._evaluate_classification(predictions, references)
-        return self._evaluate_generation(predictions, references)
+            return self._evaluate_classification(predictions, references, datasets)
+        else:
+            return self._evaluate_generation(predictions, references)
     
-    def _evaluate_classification(self, predictions: List[Any], references: List[Any]) -> Dict[str, float]:
-        return {
+    def _evaluate_classification(self, predictions: List[Any], references: List[Any], datasets: List[Any]) -> Dict[str, float]:
+        metrics = {
             'accuracy': self.metrics['accuracy'].compute(predictions=predictions, references=references)['accuracy'],
             'f1_macro': self.metrics['f1'].compute(predictions=predictions, references=references, average='macro')['f1'],
             'precision': self.metrics['precision'].compute(predictions=predictions, references=references, average='macro')['precision'],
             'recall': self.metrics['recall'].compute(predictions=predictions, references=references, average='macro')['recall']
         }
-    
+
+        metrics['confusion_matrix'] = confusion_matrix(references, predictions)
+
+        df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
+        for key, dataset_df in df.partition_by('dataset', as_dict=True).items():
+            dataset = key[0]
+            d_predictions = dataset_df['prediction'].to_numpy()
+            d_references = dataset_df['reference'].to_numpy()
+            metrics[dataset] = {
+                'accuracy': self.metrics['accuracy'].compute(predictions=d_predictions, references=d_references)['accuracy'],
+                'f1_macro': self.metrics['f1'].compute(predictions=d_predictions, references=d_references, average='macro')['f1'],
+                'precision': self.metrics['precision'].compute(predictions=d_predictions, references=d_references, average='macro')['precision'],
+                'recall': self.metrics['recall'].compute(predictions=d_predictions, references=d_references, average='macro')['recall']
+            }
+
+        return metrics
+
     def _evaluate_generation(self, predictions: List[Any], references: List[Any]) -> Dict[str, float]:
         bertscore_results = self.metrics['bertscore'].compute(predictions=predictions, references=references, lang="en")
         bleu = self.metrics['bleu'].compute(predictions=predictions, references=[[ref] for ref in references])
@@ -586,6 +616,7 @@ class ModelTrainer:
         self._training_loop(
             train_loader,
             eval_loader,
+            train_dataset,
             eval_dataset,
             optimizer,
             scheduler,
@@ -597,6 +628,7 @@ class ModelTrainer:
         self,
         train_loader,
         eval_loader,
+        train_dataset,
         eval_dataset,
         optimizer,
         scheduler,
@@ -605,10 +637,18 @@ class ModelTrainer:
     ):
         """Main training loop"""
         best_eval_metric = -float('inf')
-        chosen_metric = "f1_macro" if self.model_config.task in [
-            "stance-classification",
-            "argument-classification"
-        ] else "bertscore_f1"
+        if self.model_config.task == 'stance-classification':
+            chosen_metric = 'f1_macro'
+            batch_keys = ['input_ids', 'attention_mask']
+            train_labels = np.array(train_dataset['class'])
+            class_wts = compute_class_weight('balanced', np.unique(train_labels), train_labels)
+            loss_func = torch.nn.CrossEntropyLoss(weight=class_wts)
+        elif self.model_config.task == 'topic-extraction':
+            chosen_metric = 'bertscore_f1'
+            batch_keys = ['input_ids', 'attention_mask', 'labels']
+            loss_func = None
+        else:
+            raise NotImplementedError("Task settings not implemented.")
 
         assert len(train_loader) >= self.training_config.eval_steps * self.training_config.grad_accum_steps, \
             "Not enough steps to evaluate"
@@ -624,9 +664,13 @@ class ModelTrainer:
         for epoch in range(self.training_config.num_epochs):
             self.model_config.model.train()
             for step, batch in enumerate(train_loader):
-                batch = {k: v.to(self.model_config.model.device) for k, v in batch.items()}
-                outputs = self.model_config.model(**batch)
-                loss = outputs.loss / self.training_config.grad_accum_steps
+                model_batch = {k: batch[k].to(self.model_config.model.device) for k in batch_keys}
+                outputs = self.model_config.model(**model_batch)
+                if loss_func is not None:
+                    labels = batch['labels'].to(self.model_config.model.device)
+                    loss = loss_func(outputs.logits, labels) / self.training_config.grad_accum_steps
+                else:
+                    loss = outputs.loss / self.training_config.grad_accum_steps
                 self.accelerator.backward(loss)
 
                 wandb.log({"train/loss": loss.item()})
@@ -831,6 +875,7 @@ def get_predictions(task, df, config, data_name, model_kwargs={}, generate_kwarg
         num_labels=2 if task == "argument-classification" else 3,
         device_map=model_kwargs['device_map'],
         prompt=load_prompt(task, prompting_method=config['prompting_method']),
+        parent_prompt=load_parent_prompt(task, prompting_method=config['prompting_method']),
         classification_method=config['classification_method'],
         generation_method=config['generation_method']
     )

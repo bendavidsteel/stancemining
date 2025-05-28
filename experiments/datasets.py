@@ -100,7 +100,12 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
             'against': 'against',
             'none': 'neutral'
         }
-        df = df.rename({'text_0': 'Text', 'text_-1': 'ParentText', 'stance': 'Stance'})
+        df = df.with_columns(
+            pl.concat_list(
+                sorted([col for col in df.columns if 'text_' in col and col != 'text_0'], reverse=True)
+            ).list.drop_nulls().alias('ParentTexts')
+        )
+        df = df.rename({'text_0': 'Text', 'stance': 'Stance'})
 
     else:
         raise ValueError(f'Unknown dataset: {name}')
@@ -109,9 +114,11 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
     if group:
         df = df.group_by('Text').agg([pl.col('Target'), pl.col('Stance')])
 
-    cols = ['Text', 'Target', 'Stance']
-    if 'ParentText' in df.columns:
-        cols.append('ParentText')
+    df = df.with_columns(pl.lit(name).alias('Dataset'))
+
+    cols = ['Text', 'Target', 'Stance', 'Dataset']
+    if 'ParentTexts' in df.columns:
+        cols.append('ParentTexts')
     df = df.select(cols)
 
     return df

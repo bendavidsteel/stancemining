@@ -167,9 +167,11 @@ def _main(config, args):
         
         if model_config.task in ["argument-classification", "stance-classification"]:
             references = test_dataset['class']
+            datasets = test_dataset['dataset']
             metrics = evaluator.evaluate(
                 predictions,
-                references
+                references,
+                datasets
             )
         else:
             references = test_data['Target'].to_list()

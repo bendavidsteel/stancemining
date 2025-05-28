@@ -109,13 +109,13 @@ class StanceMining:
         target_df = target_df.with_columns(utils.filter_stance_targets(target_df['Targets']))
         return target_df['Targets'].to_list()
 
-    def _ask_llm_stance(self, docs, stance_targets):
+    def _ask_llm_stance(self, docs, stance_targets, parent_docs=None):
         if self.llm_method == 'zero-shot':
             return prompting.ask_llm_zero_shot_stance(self.generator, docs, stance_targets)
         elif self.llm_method == 'finetuned':
             model_name = self.finetune_kwargs['model_name'].replace('/', '-')
-            data_name = 'vast-ezstance-ezstance_claim-pstance-semeval'
-            data = pl.DataFrame({'Text': docs, 'Target': stance_targets})
+            data_name = 'vast-ezstance-ezstance_claim-pstance-semeval-mtcsd'
+            data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentText': parent_docs})
             results = finetune.get_predictions("stance-classification", data, self.finetune_kwargs, data_name, model_kwargs=self.model_kwargs)
             results = [r.upper() for r in results]
             return results
@@ -435,7 +435,9 @@ class StanceMining:
             document_df = document_df.with_row_index(name='ID')
 
         target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
-        target_df = target_df.with_columns(pl.Series(name='stance', values=self._ask_llm_stance(target_df['Document'], target_df['Target'])))
+        parent_docs = target_df['ParentDocument'] if 'ParentDocument' in target_df.columns else None
+        target_stance = self._ask_llm_stance(target_df['Document'], target_df['Target'], parent_docs=parent_docs)
+        target_df = target_df.with_columns(pl.Series(name='stance', values=target_stance))
         target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('polarity'))
         target_info_df = target_df.rename({'Target': 'noun_phrase'}).select(['noun_phrase', 'polarity'])
 
