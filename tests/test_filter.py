@@ -7,7 +7,7 @@ import pytest
 from scipy.stats import dirichlet as scipy_dirichlet
 
 from stancemining import StanceMining
-from experiments import metrics
+from stancemining import metrics
 
 from test_all import MockStanceMining
 

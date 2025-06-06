@@ -6,7 +6,8 @@ import polars as pl
 from tqdm import tqdm
 import wandb
 
-from experiments import metrics, datasets
+from experiments import datasets
+from stancemining import metrics
 
 def get_latest_runs():
     api = wandb.Api()

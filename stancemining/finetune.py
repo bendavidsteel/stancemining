@@ -4,6 +4,7 @@ import json
 import multiprocessing
 import os
 import pathlib
+import re
 from typing import Optional, Dict, List, Any, Union
 
 import accelerate
@@ -21,6 +22,7 @@ import transformers
 import wandb
 
 import experiments.datasets
+from stancemining import metrics
 
 def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
     return experiments.datasets.load_dataset(
@@ -67,7 +69,7 @@ def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_t
 
     return model_path_name
 
-def load_prompt(task: str, prompting_method: str) -> str:
+def load_prompt(task: str, prompting_method: str, generation_method: str) -> str:
     top_dir = pathlib.Path(__file__).parent.parent
     if task == "stance-classification" or task == "argument-classification":
         if prompting_method == 'wiba':
@@ -80,7 +82,12 @@ def load_prompt(task: str, prompting_method: str) -> str:
         if prompting_method == 'wiba':
             file_path = top_dir / 'models/wiba/system_message_cte.txt'
         elif prompting_method == 'stancemining':
-            file_path = top_dir / 'models/stancemining/prompt_stance_target.txt'
+            if generation_method == 'beam':
+                file_path = top_dir / 'models/stancemining/prompt_stance_target.txt'
+            elif generation_method == 'list':
+                file_path = top_dir / 'models/stancemining/prompt_stance_target_list.txt'
+            else:
+                raise ValueError("Generation method not found")
         else:
             raise ValueError("Prompting method not found")
     else:
@@ -121,18 +128,32 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
         else:
             parenttexts = None
         if parenttexts:
-            parent_chain = ''
+            parent_chain = []
             for i, p_text in enumerate(parenttexts):
                 if i == 0:
-                    parent_chain += f"1. [Original Post]: '{p_text}'\n"
+                    parent_chain.append(f"1. [Original Post]: '{p_text}'")
                 else:
-                    parent_chain += f"{i+1}. [Reply to {i}]: '{p_text}'\n"
+                    parent_chain.append(f"{i+1}. [Reply to {i}]: '{p_text}'")
 
+            parent_chain = '\n'.join(parent_chain)
             prompt = parent_prompt_template.format(target=topic, parent_chain=parent_chain, text=text)
             prompts.append(prompt)
         else:
             prompt = prompt_template.format(target=topic, text=text)
             prompts.append(prompt)
+    return prompts
+
+def convert_list_to_quoted_str(topic):
+    topic = sorted(topic, key=lambda t: len(t))
+    topic = [f'"{t}"' for t in topic]
+    return ', '.join(topic)
+
+def stance_target_examples_to_prompt(prompt_template: str, examples):
+    prompts = []
+    for i in range(len(examples['text'])):
+        text = examples['text'][i]
+        prompt = prompt_template.format(text=text)
+        prompts.append(prompt)
     return prompts
 
 def to_message_format(text, label):
@@ -179,11 +200,29 @@ def deactivate_neftune(model, accelerator, neftune_hook_handle):
     neftune_hook_handle.remove()
     del embeddings.neftune_noise_alpha, unwrapped_model
 
+@dataclass
+class ModelConfig:
+    model_name: str
+    task: str
+    num_labels: Optional[int]
+    device_map: Dict[str, int]
+    prompt: str
+    parent_prompt: Optional[str] = None
+    tokenizer: Optional[transformers.PreTrainedTokenizer] = None
+    model: Optional[transformers.PreTrainedModel] = None
+    classification_method: Optional[str] = "head"
+    generation_method: Optional[str] = "beam"
+    attn_implementation: Optional[str] = "flash_attention_2"
+    torch_dtype: Optional[Union[str, torch.dtype]] = torch.bfloat16
+    quantization: Optional[str] = None
+
 class ChatTemplateTokenizer:
-    def __init__(self, tokenizer: transformers.PreTrainedTokenizer, task: str):
-        self.tokenizer = tokenizer
+    def __init__(self, model_config: ModelConfig):
+        self.tokenizer = model_config.tokenizer
+        self.generation_method = model_config.generation_method
+        self.task = model_config.task
         if self.tokenizer.chat_template is None:
-            if task == 'stance-classification':
+            if model_config.task == 'stance-classification':
                 self.base_continuation_prompt = '. Stance: The stance is '
             else:
                 raise NotImplementedError()
@@ -219,7 +258,13 @@ class ChatTemplateTokenizer:
     
     def create_input_sequence_for_training(self, sample):
         text = sample['text']
-        label = sample['labels'].strip()
+        if self.task == 'stance-classification' or (self.task == 'topic-extraction' and self.generation_method == 'beam'):
+            label = sample['labels'].strip()
+        elif self.task == 'topic-extraction' and self.generation_method == 'list':
+            label = convert_list_to_quoted_str(sample['topic'])
+        else:
+            raise ValueError()
+
         if self.tokenizer.chat_template is not None:
             messages = to_message_format(text, label)
         
@@ -231,6 +276,7 @@ class ChatTemplateTokenizer:
                 return_tensors="pt",
                 return_dict=True
             )
+            response_tokens = self.tokenizer.encode(label, add_special_tokens=False)
         else:
             texts = text + self.base_continuation_prompt + label
             inputs = self.tokenizer(
@@ -240,13 +286,14 @@ class ChatTemplateTokenizer:
                 padding='max_length',
                 return_tensors='pt'
             )
+            response_tokens = self.tokenizer.encode(f" {label}", add_special_tokens=False)
         
         inputs['input_ids'] = inputs['input_ids'].squeeze(0)
         inputs['attention_mask'] = inputs['attention_mask'].squeeze(0)
         
         # Get the chat template format without the response
         # Find the assistant's response start
-        response_tokens = self.tokenizer.encode(f" {label}", add_special_tokens=False)
+        
         response_start = None
         # Find where the assistant's response starts in the tokenized input
         for i in range(len(inputs['input_ids']) - len(response_tokens), 0, -1):
@@ -263,22 +310,6 @@ class ChatTemplateTokenizer:
             "attention_mask": inputs['attention_mask'],
             "labels": labels
         }
-
-@dataclass
-class ModelConfig:
-    model_name: str
-    task: str
-    num_labels: Optional[int]
-    device_map: Dict[str, int]
-    prompt: str
-    parent_prompt: Optional[str] = None
-    tokenizer: Optional[transformers.PreTrainedTokenizer] = None
-    model: Optional[transformers.PreTrainedModel] = None
-    classification_method: Optional[str] = "head"
-    generation_method: Optional[str] = "beam"
-    attn_implementation: Optional[str] = "flash_attention_2"
-    torch_dtype: Optional[Union[str, torch.dtype]] = torch.bfloat16
-    quantization: Optional[str] = None
 
 @dataclass
 class DataConfig:
@@ -345,21 +376,13 @@ class DataProcessor:
             df = df.rename({"Text": "text"})
         if 'Target' in df.columns and 'topic' not in df.columns:
             df = df.rename({"Target": "topic"})
-        cols = ['text', 'dataset']
-        df = df.rename({'Dataset': 'dataset'})
+        if 'Dataset' in df.columns and 'dataset' not in df.columns:
+            df = df.rename({'Dataset': 'dataset'})
+        cols = ['text']
+        if 'dataset' in df.columns:
+            cols.append('dataset')
         if 'topic' in df.columns:
             cols.append('topic')
-            if generation_method == 'list':
-                # Remove duplicate topics and sort by length
-                df = df.with_row_index()
-                topic_df = df.with_columns(pl.col('topic').list.unique())\
-                    .explode('topic')\
-                    .with_columns(pl.col('topic').str.len_chars().alias('topic_len'))\
-                    .sort(['index', 'topic_len'])\
-                    .group_by('index')\
-                    .agg(pl.col('topic'))\
-                    .with_columns(pl.col('topic').list.join(', '))
-                df = df.select(['index', 'text']).join(topic_df, on='index', how='left').drop('index')
         return df.select(cols)
 
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
@@ -375,9 +398,7 @@ class DataProcessor:
         elif self.model_config.task == "topic-extraction":
             return dataset.map(
                 lambda examples: {
-                    "text": [
-                        prompt.format(text=text) for text in examples['text']
-                    ]
+                    "text": stance_target_examples_to_prompt(prompt, examples)
                 }, batched=True
             )
         else:
@@ -385,7 +406,7 @@ class DataProcessor:
         
             
     def _tokenize_dataset(self, dataset: datasets.Dataset, classification_method: str, train: bool = True) -> datasets.Dataset:
-        tokenizer = ChatTemplateTokenizer(self.model_config.tokenizer, self.model_config.task)
+        tokenizer = ChatTemplateTokenizer(self.model_config)
         if len(dataset) > 10000:
             num_proc = multiprocessing.cpu_count() // 2
         else:
@@ -402,10 +423,9 @@ class DataProcessor:
             
         elif self.model_config.task == "topic-extraction":
             if train:
-                dataset = dataset.rename_column("topic", "labels")
                 dataset = dataset.map(tokenizer.create_input_sequence_for_training, num_proc=num_proc)
             else:
-                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=num_proc)
+                dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=len(dataset) > 1, num_proc=num_proc)
         return dataset
 
 class ModelEvaluator:
@@ -436,39 +456,62 @@ class ModelEvaluator:
                 references = [self.data_config.labels2id[r] for r in references]
             return self._evaluate_classification(predictions, references, datasets)
         else:
-            return self._evaluate_generation(predictions, references)
+            return self._evaluate_generation(predictions, references, datasets)
     
     def _evaluate_classification(self, predictions: List[Any], references: List[Any], datasets: List[Any]) -> Dict[str, float]:
-        metrics = {
+        pred_metrics = {
             'accuracy': self.metrics['accuracy'].compute(predictions=predictions, references=references)['accuracy'],
             'f1_macro': self.metrics['f1'].compute(predictions=predictions, references=references, average='macro')['f1'],
             'precision': self.metrics['precision'].compute(predictions=predictions, references=references, average='macro')['precision'],
             'recall': self.metrics['recall'].compute(predictions=predictions, references=references, average='macro')['recall']
         }
 
-        metrics['confusion_matrix'] = confusion_matrix(references, predictions)
+        pred_metrics['confusion_matrix'] = confusion_matrix(references, predictions)
 
         df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
         for key, dataset_df in df.partition_by('dataset', as_dict=True).items():
             dataset = key[0]
             d_predictions = dataset_df['prediction'].to_numpy()
             d_references = dataset_df['reference'].to_numpy()
-            metrics[dataset] = {
+            pred_metrics[dataset] = {
                 'accuracy': self.metrics['accuracy'].compute(predictions=d_predictions, references=d_references)['accuracy'],
                 'f1_macro': self.metrics['f1'].compute(predictions=d_predictions, references=d_references, average='macro')['f1'],
                 'precision': self.metrics['precision'].compute(predictions=d_predictions, references=d_references, average='macro')['precision'],
                 'recall': self.metrics['recall'].compute(predictions=d_predictions, references=d_references, average='macro')['recall']
             }
 
-        return metrics
+        return pred_metrics
 
-    def _evaluate_generation(self, predictions: List[Any], references: List[Any]) -> Dict[str, float]:
-        bertscore_results = self.metrics['bertscore'].compute(predictions=predictions, references=references, lang="en")
-        bleu = self.metrics['bleu'].compute(predictions=predictions, references=[[ref] for ref in references])
-        return {
-            'bertscore_f1': sum(bertscore_results['f1']) / len(bertscore_results['f1']),
-            'bleu': bleu['bleu']
+    def _evaluate_generation(self, predictions: List[Any], references: List[Any], datasets: List[str]) -> Dict[str, float]:
+        bertscore_f1, bertscore_p, bertscore_r = metrics.bertscore_f1_targets(predictions, references)
+        bleu_f1, bleu_p, bleu_r = metrics.bleu_targets(predictions, references)
+        pred_metrics = {
+            'bertscore_f1': bertscore_f1,
+            'bertscore_p': bertscore_p,
+            'bertscore_r': bertscore_r,
+            'bleu_f1': bleu_f1,
+            'bleu_p': bleu_p,
+            'bleu_r': bleu_r
         }
+
+        df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
+        for key, dataset_df in df.partition_by('dataset', as_dict=True).items():
+            dataset = key[0]
+            d_predictions = dataset_df['prediction'].to_list()
+            d_references = dataset_df['reference'].to_list()
+    
+            d_bertscore_f1, d_bertscore_p, d_bertscore_r = metrics.bertscore_f1_targets(d_predictions, d_references)
+            d_bleu_f1, d_bleu_p, d_bleu_r = metrics.bleu_targets(d_predictions, d_references)
+            pred_metrics[dataset] = {
+                'bertscore_f1': d_bertscore_f1,
+                'bertscore_p': d_bertscore_p,
+                'bertscore_r': d_bertscore_r,
+                'bleu_f1': d_bleu_f1,
+                'bleu_p': d_bleu_p,
+                'bleu_r': d_bleu_r
+            }
+        return pred_metrics
+
 
 @dataclass
 class TrainingConfig:
@@ -637,18 +680,22 @@ class ModelTrainer:
     ):
         """Main training loop"""
         best_eval_metric = -float('inf')
-        if self.model_config.task == 'stance-classification':
-            chosen_metric = 'f1_macro'
+
+        chosen_metric = 'f1_macro' if self.model_config.task == 'stance-classification' else 'bertscore_f1'
+
+        if self.model_config.task == 'stance-classification' and self.model_config.classification_method == 'head':
             batch_keys = ['input_ids', 'attention_mask']
-            train_labels = np.array(train_dataset['class'])
-            class_wts = compute_class_weight('balanced', np.unique(train_labels), train_labels)
-            loss_func = torch.nn.CrossEntropyLoss(weight=class_wts)
-        elif self.model_config.task == 'topic-extraction':
-            chosen_metric = 'bertscore_f1'
+            train_labels = np.array(train_dataset['labels'])
+            class_wts = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
+            loss_func = torch.nn.CrossEntropyLoss(
+                weight=torch.tensor(
+                    class_wts, 
+                    dtype=torch.float32,
+                    device=self.model_config.model.device)
+            )
+        else:
             batch_keys = ['input_ids', 'attention_mask', 'labels']
             loss_func = None
-        else:
-            raise NotImplementedError("Task settings not implemented.")
 
         assert len(train_loader) >= self.training_config.eval_steps * self.training_config.grad_accum_steps, \
             "Not enough steps to evaluate"
@@ -692,7 +739,12 @@ class ModelTrainer:
                         )
                         metrics = self._validation_step(eval_loader, eval_dataset, evaluator)
                         state_str = f"Step {step},"
-                        for key, val in metrics.items():
+                        if self.model_config.task == 'stance-classification':
+                            report_keys = ['f1_macro', 'precision', 'recall']
+                        elif self.model_config.task == 'topic-extraction':
+                            report_keys = ['bertscore_f1', 'bleu_f1']
+                        for key in report_keys:
+                            val = metrics[key]
                             state_str += f" {key.title()}: {val:.4f},"
                         print(state_str)
                         eval_metrics = {f"eval/{key}": val for key, val in metrics.items()}
@@ -712,7 +764,7 @@ class ModelTrainer:
 
                         pbar = tqdm.tqdm(total=self.training_config.eval_steps * self.training_config.grad_accum_steps, desc=f"Training round, loss: {loss:.4f}")
 
-    def _validation_step(self, eval_loader, eval_dataset, evaluator):
+    def _validation_step(self, eval_loader, eval_dataset, evaluator: ModelEvaluator):
         """Run validation step"""
         self.model_config.model.eval()
         all_preds = []
@@ -737,8 +789,9 @@ class ModelTrainer:
             all_labels = eval_dataset['class']
         else:
             all_labels = eval_dataset['topic']
+        datasets = eval_dataset['dataset']
         
-        return evaluator.evaluate(all_preds, all_labels)
+        return evaluator.evaluate(all_preds, all_labels, datasets)
 
 def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwargs={}, model_save_path=None, model_name=None):
     """Initialize model and tokenizer based on config"""
@@ -854,7 +907,7 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             skip_special_tokens=True
         ) for output in outputs]
         if generation_method == 'list':
-            completions = [c.split(', ') for c in completions]
+            completions = [re.findall('"(.*?)"', c) for c in completions] 
             return completions
         elif generation_method == 'beam':
             batched_completions = []
@@ -862,19 +915,25 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             for i in range(prompt['input_ids'].shape[0]):
                 batched_completions.append(completions[i*num_return_sequences:(i+1)*num_return_sequences])
             return batched_completions
+        else:
+            raise NotImplementedError("Generation method not found.")
             
 
-def get_predictions(task, df, config, data_name, model_kwargs={}, generate_kwargs={}):
+def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
     
     output_type = config['classification_method'] if task == "stance-classification" else config['generation_method']
-    model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], data_name, output_type)
+    if 'hf_model' in config:
+        model_save_path = config['hf_model']
+    else:
+        model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], config['data_name'], output_type)
+    
     # Setup configurations
     model_config = ModelConfig(
         model_name=None,
         task=task,
         num_labels=2 if task == "argument-classification" else 3,
         device_map=model_kwargs['device_map'],
-        prompt=load_prompt(task, prompting_method=config['prompting_method']),
+        prompt=load_prompt(task, config['prompting_method'], config['generation_method']),
         parent_prompt=load_parent_prompt(task, prompting_method=config['prompting_method']),
         classification_method=config['classification_method'],
         generation_method=config['generation_method']

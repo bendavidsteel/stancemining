@@ -106,13 +106,55 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
             ).list.drop_nulls().alias('ParentTexts')
         )
         df = df.rename({'text_0': 'Text', 'stance': 'Stance'})
+    elif name == 'ctsdt':
+        ctsdt_path = os.path.join(datasets_path, 'CTSDT', 'labeled_data.csv')
+        df = pl.read_csv(ctsdt_path)
 
+        df = df.sample(fraction=1, shuffle=True)
+        train_split = 0.8
+        val_split = 0.1
+        if split == 'train':
+            df = df.slice(0, int(len(df) * train_split))
+        elif split == 'val':
+            df = df.slice(int(len(df) * train_split), int(len(df) * (train_split + val_split)))
+        elif split == 'test':
+            df = df.slice(int(len(df) * (train_split + val_split)), len(df))
+        else:
+            raise ValueError(f'Unknown split: {split}')
+
+        df = df.with_columns(pl.col('sub_branch').str.strip_chars('[]').str.split(', ').list.eval(pl.first().str.strip_chars("'")))
+        
+        chain_df = df.explode('sub_branch')\
+            .with_columns(pl.col('sub_branch').fill_null(pl.col('id')).cast(pl.Int64))\
+            .with_columns((1-pl.col('sub_branch').rank('dense', descending=True).over('id').cast(pl.Int32)).alias('idx'))\
+            .with_columns(pl.when(pl.col('idx').is_null()).then(pl.lit(0)).otherwise(pl.col('idx')).alias('idx'))\
+            .filter(pl.col('idx') >= -5) # drop threads that are too deep
+        df = chain_df.drop('text')\
+            .join(df.select(['id', 'text']), left_on='sub_branch', right_on='id', how='left')\
+            .pivot(index=['id', 'label'], columns='idx', values='text')
+        df = df.with_columns(
+            pl.concat_list(
+                sorted([col for col in df.columns if col not in ['id', 'label', '0']], reverse=True)
+            ).list.drop_nulls().alias('ParentTexts')
+        )
+        df = df.rename({'0': 'Text', 'label': 'Stance'})
+        df = df.with_columns(pl.lit('COVID-19 vaccination').alias('Target'))
+        mapping = {
+            'FAVOR': 'favor',
+            'AGAINST': 'against',
+            'NEITHER': 'neutral'
+        }
     else:
         raise ValueError(f'Unknown dataset: {name}')
     
     df = df.with_columns(pl.col('Stance').replace_strict(mapping))
     if group:
-        df = df.group_by('Text').agg([pl.col('Target'), pl.col('Stance')])
+        if 'ParentTexts' in df.columns:
+            df = df.unique(['ParentTexts', 'Text', 'Target'])
+            df = df.group_by(['ParentTexts', 'Text']).agg([pl.col('Target'), pl.col('Stance')])
+        else:
+            df = df.unique(['Text', 'Target'])
+            df = df.group_by('Text').agg([pl.col('Target'), pl.col('Stance')])
 
     df = df.with_columns(pl.lit(name).alias('Dataset'))
 

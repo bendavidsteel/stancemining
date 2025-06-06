@@ -6,8 +6,8 @@ import polars as pl
 import pytest
 from scipy.stats import dirichlet as scipy_dirichlet
 
-from stancemining import StanceMining
-from experiments import metrics
+from stancemining.main import StanceMining
+from stancemining import metrics
 
 class MockTopicModel:
     def __init__(self, num_topics, **kwargs):
