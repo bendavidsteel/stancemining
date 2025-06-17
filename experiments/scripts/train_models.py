@@ -25,7 +25,7 @@ from stancemining.finetune import (
     get_prediction,
     setup_model_and_tokenizer
 )
-from experiments.metrics import bertscore_f1_targets, bleu_targets
+from stancemining.metrics import bertscore_f1_targets, bleu_targets
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
@@ -60,7 +60,7 @@ def _main(config, args):
         classification_method=args.classification_method,
         generation_method=args.generation_method,
         device_map={"": config.device_id},
-        prompt=load_prompt(args.task, args.prompting_method),
+        prompt=load_prompt(args.task, args.prompting_method, args.generation_method),
         parent_prompt=load_parent_prompt(args.task, args.prompting_method)
     )
     
@@ -167,9 +167,11 @@ def _main(config, args):
         
         if model_config.task in ["argument-classification", "stance-classification"]:
             references = test_dataset['class']
+            datasets = test_dataset['dataset']
             metrics = evaluator.evaluate(
                 predictions,
-                references
+                references,
+                datasets
             )
         else:
             references = test_data['Target'].to_list()

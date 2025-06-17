@@ -9,7 +9,8 @@ import omegaconf
 import polars as pl
 import wandb
 
-from experiments import metrics, datasets
+from experiments import datasets
+from stancemining import metrics
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):

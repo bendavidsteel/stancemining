@@ -1,3 +1,5 @@
+from typing import List
+
 import bert_score
 import numpy as np
 import polars as pl
@@ -61,7 +63,7 @@ def multi_label_f1(pred_labels, true_labels):
     return precision, recall, f1
 
 
-def bertscore_f1_targets(doc_targets, gold_doc_targets):
+def bertscore_f1_targets(doc_targets: List[List[str]], gold_doc_targets: List[List[str]]):
     df = pl.DataFrame({
         'doc_id': list(range(len(doc_targets))),
         'pred': doc_targets,
@@ -171,29 +173,27 @@ def bleu_targets(doc_targets, gold_doc_targets):
         'pred': doc_targets,
         'gold': gold_doc_targets
     })
-    bleu_scores = []
-    bleu = BLEU()
+    f1s, precisions, recalls = [], [], []
+    bleu = BLEU(effective_order=True)
     
     for ex in tqdm(df.to_dicts(), desc='Calculating BLEU'):
         pred_labels = ex['pred']
         true_labels = ex['gold']
         
         if not pred_labels:
-            bleu_score = 0
+            f1, precision, recall = 0, 0, 0
         else:
             # Calculate BLEU score for this example
             # We treat each target as a separate "reference" translation
-            scores = [bleu.sentence_score(pred_label, true_labels) for pred_label in pred_labels]
-            bleu_score = np.mean([score.score for score in scores])
+            precision = np.mean([bleu.sentence_score(pred_label, true_labels).score for pred_label in pred_labels])
+            recall = np.mean([bleu.sentence_score(true_label, pred_labels).score for true_label in true_labels])
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
         
-        bleu_scores.append(bleu_score)
+        f1s.append(f1)
+        precisions.append(precision)
+        recalls.append(recall)
     
-    df = df.with_columns([
-        pl.Series(name='BLEU', values=bleu_scores, dtype=pl.Float32)
-    ])
-    avg_bleu = df['BLEU'].mean()
-
-    return avg_bleu
+    return np.mean(f1), np.mean(precisions), np.mean(recalls)
 
 def mean_num_targets(doc_targets):
     return np.mean([len(t) for t in doc_targets])

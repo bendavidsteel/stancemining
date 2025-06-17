@@ -1,8 +1,27 @@
 import logging
 
+from cuml import DBSCAN
 from nltk.corpus import stopwords
 import numpy as np
 import polars as pl
+import sklearn.preprocessing
+
+def deduplicate_target_embeddings(embeddings):
+    normalized_embeddings = sklearn.preprocessing.normalize(embeddings, axis=1, norm='l2')
+    max_distance = 0.2
+    embed_clusters = DBSCAN(eps=max_distance, metric='euclidean', algorithm='rbc', min_samples=2).fit_predict(normalized_embeddings)
+    return embed_clusters
+
+def get_similar_target_mapper(embeddings: np.ndarray, target_df: pl.DataFrame):
+    assert 'count' in target_df.columns, "target_df must contain 'count' column"
+    assert 'Target' in target_df.columns, "target_df must contain 'Target' column"
+    assert embeddings.shape[0] == target_df.shape[0], "embeddings must match the number of targets in target_df"
+
+    embed_clusters = deduplicate_target_embeddings(embeddings)
+    target_df = target_df.with_columns(pl.Series(name='cluster', values=embed_clusters))
+    primary_target_df = target_df.sort('count', descending=True).unique('cluster', keep='first').rename({'Target': 'top_target', 'count': 'top_count'})
+    target_df = target_df.filter(pl.col('cluster') != -1).join(primary_target_df, on='cluster', how='inner').filter(pl.col('top_target') != pl.col('Target'))
+    return {k: v for k, v in target_df.select(['Target', 'top_target']).rows()}
 
 def remove_bad_targets(target_df: pl.DataFrame):
     phrases = [
