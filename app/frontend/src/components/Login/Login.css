@@ -1,0 +1,140 @@
+.login-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    background-color: #f9f9f9;
+  }
+  
+  .login-form-container {
+    background-color: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    padding: 30px;
+    width: 100%;
+    max-width: 400px;
+  }
+  
+  .login-form-container h1 {
+    color: #333;
+    font-size: 1.7rem;
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  
+  .login-form-container h2 {
+    color: #4a6fc2;
+    margin-bottom: 20px;
+    font-size: 1.5rem;
+    text-align: center;
+  }
+  
+  .login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  
+  .form-group label {
+    font-weight: 500;
+    color: #555;
+  }
+  
+  .form-group input {
+    padding: 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+    transition: border-color 0.3s;
+  }
+  
+  .form-group input:focus {
+    border-color: #4a6fc2;
+    outline: none;
+  }
+  
+  .login-button {
+    background-color: #4a6fc2;
+    color: white;
+    padding: 12px;
+    border: none;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background-color 0.3s;
+    margin-top: 10px;
+  }
+  
+  .login-button:hover {
+    background-color: #3a5ba5;
+  }
+  
+  .login-button:disabled {
+    background-color: #a0b0d8;
+    cursor: not-allowed;
+  }
+  
+  .error-message {
+    background-color: #fdf3f2;
+    color: #e74c3c;
+    padding: 10px;
+    border-radius: 4px;
+    margin-bottom: 15px;
+    text-align: center;
+  }
+  
+  .login-footer {
+    margin-top: 20px;
+    text-align: center;
+    color: #666;
+  }
+  
+  .login-footer a {
+    color: #4a6fc2;
+    text-decoration: none;
+  }
+  
+  .login-footer a:hover {
+    text-decoration: underline;
+  }
+  
+  .demo-credentials {
+    margin-top: 20px;
+    padding-top: 15px;
+    border-top: 1px solid #eee;
+    text-align: left;
+  }
+  
+  .demo-credentials p {
+    font-weight: 500;
+    margin-bottom: 5px;
+  }
+  
+  .demo-credentials ul {
+    padding-left: 20px;
+    margin: 0;
+  }
+  
+  .demo-credentials li {
+    font-size: 0.9rem;
+  }
+  
+  .credentials-note {
+    font-size: 0.8rem;
+    font-style: italic;
+    color: #666;
+    margin-top: 0;
+  }
+  
+  @media (max-width: 480px) {
+    .login-form-container {
+      padding: 20px;
+      margin: 0 15px;
+    }
+  }

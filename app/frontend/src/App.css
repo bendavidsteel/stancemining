@@ -1,0 +1,134 @@
+.App {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.App-header {
+  text-align: center;
+  margin-bottom: 30px;
+  border-bottom: 1px solid #eaeaea;
+  padding-bottom: 15px;
+}
+
+.App-header h1 {
+  color: #333;
+  margin: 0;
+  font-size: 2rem;
+}
+
+.App-navbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 0;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #eaeaea;
+}
+
+.navbar-logo {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #333;
+}
+
+.navbar-tabs {
+  display: flex;
+  gap: 10px;
+}
+
+.navbar-tab {
+  padding: 8px 16px;
+  border-radius: 4px;
+  text-decoration: none;
+  color: #555;
+  transition: all 0.2s;
+}
+
+.navbar-tab:hover {
+  background-color: #f0f0f0;
+}
+
+.navbar-tab.active {
+  background-color: #4a6fc2;
+  color: white;
+}
+
+.navbar-actions {
+  display: flex;
+  gap: 15px;
+}
+
+.logout-button {
+  padding: 8px 16px;
+  background-color: #f0f0f0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+
+.logout-button:hover {
+  background-color: #e0e0e0;
+}
+
+.App-main {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.view-container {
+  width: 100%;
+}
+
+.search-results-info {
+  color: #4a6fc2;
+  font-size: 0.9rem;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+.loading, .error, .no-results {
+  text-align: center;
+  padding: 40px;
+  border-radius: 5px;
+  background-color: #f9f9f9;
+  color: #666;
+}
+
+.error {
+  color: #e74c3c;
+  background-color: #fdf3f2;
+}
+
+.target-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .App {
+    padding: 10px;
+  }
+  
+  .navbar-tabs {
+    flex-direction: column;
+    gap: 5px;
+  }
+  
+  .App-navbar {
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-start;
+  }
+  
+  .navbar-actions {
+    margin-top: 10px;
+    align-self: flex-end;
+  }
+}

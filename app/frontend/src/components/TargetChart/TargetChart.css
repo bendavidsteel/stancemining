@@ -1,0 +1,193 @@
+.target-chart {
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  padding: 20px;
+  transition: box-shadow 0.3s;
+}
+
+.target-chart:hover {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.target-chart h2 {
+  margin-top: 0;
+  margin-bottom: 20px;
+  color: #333;
+  font-size: 1.5rem;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 10px;
+}
+
+.chart-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 15px;
+}
+
+.filter-controls {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.filter-group label {
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.filter-group select {
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+  background-color: white;
+  min-width: 120px;
+}
+
+.chart-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.scatter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.chart-button, .scatter-button {
+  padding: 8px 12px;
+  background-color: #f0f0f0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+
+.chart-button:hover:not(:disabled), .scatter-button:hover:not(:disabled) {
+  background-color: #e0e0e0;
+}
+
+.chart-button.active, .scatter-button.active {
+  background-color: #4a6fc2;
+  color: white;
+  border-color: #3a5dae;
+}
+
+.chart-button:disabled, .scatter-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.reset-zoom-button {
+  background-color: #f8d7da;
+  color: #721c24;
+  border-color: #f5c6cb;
+}
+
+.reset-zoom-button:hover {
+  background-color: #f1b0b7;
+  border-color: #eea0a8;
+}
+
+.scatter-warning {
+  font-size: 0.8rem;
+  color: #888;
+  font-style: italic;
+}
+
+.zoom-info {
+  font-size: 0.85rem;
+  color: #666;
+  min-width: 70px;
+}
+
+.charts-container {
+  user-select: none; /* Prevent text selection while panning */
+  touch-action: none; /* Disable browser handling of touch actions */
+}
+
+.stance-chart {
+  margin-bottom: 10px;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+}
+
+.volume-chart {
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+}
+
+.chart-instructions {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: #666;
+  background-color: #f9f9f9;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border-left: 3px solid #4a6fc2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-tooltip {
+  background-color: rgba(255, 255, 255, 0.9);
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 10px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.custom-tooltip p {
+  margin: 0;
+  padding: 3px 0;
+}
+
+.custom-tooltip .label {
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
+.target-chart.loading,
+.target-chart.error,
+.target-chart.no-data {
+  height: 400px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  color: #666;
+}
+
+.target-chart.error {
+  color: #e74c3c;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .chart-controls {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .filter-controls, .chart-actions {
+    width: 100%;
+  }
+  
+  .chart-actions {
+    justify-content: space-between;
+  }
+}
