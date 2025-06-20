@@ -2,13 +2,12 @@ import datetime
 import json
 import multiprocessing
 import re
-from typing import Optional, Any, Dict, List, Tuple
+from typing import Optional, Any, Dict, List, Tuple, Iterable, Union, Callable
 
 import gpytorch
 from gpytorch.priors import Prior, NormalPrior
 from gpytorch.constraints import Interval, Positive
-from gpytorch.likelihoods.likelihood_list import _get_tuple_args_
-from gpytorch.likelihoods import Likelihood
+from gpytorch.likelihoods.likelihood_list import _get_tuple_args_, LikelihoodList
 from gpytorch.mlls import VariationalELBO, MarginalLogLikelihood
 from gpytorch.utils.generic import length_safe_zip
 import huggingface_hub
@@ -21,6 +20,8 @@ from tqdm import tqdm
 
 from stancemining.finetune import LABELS_2_ID
 from stancemining.main import logger
+
+MAX_FULL_GP_BATCH = 10000
 
 def get_inferred_normal(dataset, opinion_sequences, all_classifier_indices):
     estimator = StanceEstimation(dataset.all_classifier_profiles)
@@ -187,10 +188,8 @@ class BoundedOrdinalWithErrorLikelihood(gpytorch.likelihoods._OneDimensionalLike
             sigma_constraint: Optional[Interval] = None,
         ):
         super().__init__()
-        self.predictor_confusion_probs = get_target_predictor_confusion_probs(classifier_profiles)
-        # if torch.cuda.is_available():
-        #     self.predictor_confusion_probs['predict_probs'] = self.predictor_confusion_probs['predict_probs'].to('cuda')
-        #     self.predictor_confusion_probs['true_probs'] = self.predictor_confusion_probs['true_probs'].to('cuda')
+        predictor_predict_probs = get_target_predictor_confusion_probs(classifier_profiles)['predict_probs']
+        self.register_parameter('predictor_predict_probs', torch.nn.Parameter(predictor_predict_probs, requires_grad=False))
         
         self.num_bins = len(bin_edges) + 1
         self.register_parameter("bin_edges", torch.nn.Parameter(bin_edges, requires_grad=False))
@@ -221,7 +220,7 @@ class BoundedOrdinalWithErrorLikelihood(gpytorch.likelihoods._OneDimensionalLike
         assert 'classifier_ids' in kwargs, "Classifier IDs not provided in kwargs"
 
         classifier_ids = kwargs['classifier_ids']
-        predictor_predict_probs = self.predictor_confusion_probs['predict_probs'][classifier_ids]
+        predictor_predict_probs = self.predictor_predict_probs[classifier_ids]
 
         predict_probs = get_ordinal_probs(function_samples, self.bin_edges, self.sigma, predictor_predict_probs)
 
@@ -242,7 +241,7 @@ class SumVariationalELBO(MarginalLogLikelihood):
 
     def __init__(self, likelihood, model, mll_cls=VariationalELBO):
         super().__init__(model.likelihood, model)
-        self.mlls = ModuleList([mll_cls(mdl.likelihood, mdl, mdl.train_targets.size(0)) for mdl in model.models])
+        self.mlls = torch.nn.ModuleList([mll_cls(mdl.likelihood, mdl, mdl.train_targets.size(0)) for mdl in model.models])
 
     def forward(self, outputs, targets, **kwargs):
         """
@@ -261,6 +260,43 @@ class SumVariationalELBO(MarginalLogLikelihood):
             )
         return sum_mll.div_(len(self.mlls))
 
+class FullBatchNGD(torch.optim.Optimizer):
+    r"""Implements a natural gradient descent step.
+    It **can only** be used in conjunction with a :obj:`~gpytorch.variational._NaturalVariationalDistribution`.
+
+    .. seealso::
+        - :obj:`gpytorch.variational.NaturalVariationalDistribution`
+        - :obj:`gpytorch.variational.TrilNaturalVariationalDistribution`
+        - The `natural gradient descent tutorial
+          <examples/04_Variational_and_Approximate_GPs/Natural_Gradient_Descent.ipynb>`_
+          for use instructions.
+
+    Example:
+        >>> ngd_optimizer = torch.optim.NGD(model.variational_parameters(), num_data=train_y.size(0), lr=0.1)
+        >>> ngd_optimizer.zero_grad()
+        >>> mll(gp_model(input), target).backward()
+        >>> ngd_optimizer.step()
+    """
+
+    def __init__(self, params: Iterable[Union[torch.nn.Parameter, dict]], lr: float = 0.1):
+        super().__init__(params, defaults=dict(lr=lr))
+
+    @torch.no_grad()
+    def step(self, closure: Optional[Callable] = None) -> None:
+        """
+        Performs a single optimization step.
+
+        (Note that the :attr:`closure` argument is not used by this optimizer; it is simply included to be
+        compatible with the PyTorch optimizer API.)
+        """
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                p.add_(p.grad, alpha=(-group["lr"] * p.size(0)))
+
+        return None
+
 class ApproximateGPModelListModel(GPClassificationModel):
     def __init__(self, *args, train_inputs=None, train_targets=None, likelihood=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -268,27 +304,11 @@ class ApproximateGPModelListModel(GPClassificationModel):
         self.train_targets = train_targets
         self.likelihood = likelihood
 
-class LikelihoodList(Likelihood):
-    def __init__(self, *likelihoods):
-        super().__init__()
-        self.likelihoods = ModuleList(likelihoods)
-
-    def expected_log_prob(self, *args, **kwargs):
-        return [
-            likelihood.expected_log_prob(*args_, **kwargs)
-            for likelihood, args_ in length_safe_zip(self.likelihoods, _get_tuple_args_(*args))
-        ]
-
+class LikelihoodList(LikelihoodList):
     def forward(self, *args, **kwargs):
         return [
             likelihood.forward(*args_, **{k: v for k, v in zip(kwargs.keys(), k_vals)})
             for likelihood, args_, *k_vals in length_safe_zip(self.likelihoods, _get_tuple_args_(*args), *kwargs.values())
-        ]
-
-    def pyro_sample_output(self, *args, **kwargs):
-        return [
-            likelihood.pyro_sample_output(*args_, **kwargs)
-            for likelihood, args_ in length_safe_zip(self.likelihoods, _get_tuple_args_(*args))
         ]
 
     def __call__(self, *args, **kwargs):
@@ -297,13 +317,7 @@ class LikelihoodList(Likelihood):
             for likelihood, args_, *k_vals in length_safe_zip(self.likelihoods, _get_tuple_args_(*args), *kwargs.values())
         ]
 
-
-def get_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=1.0, lengthscale_scale=0.5, sigma_loc=1.0, sigma_scale=0.5):
-    bin_edges = torch.tensor([-0.5, 0.5])
-    # likelihood = OrdinalLikelihood(bin_edges)
-    sigma_prior = NormalPrior(sigma_loc, sigma_scale)
-    likelihood = BoundedOrdinalWithErrorLikelihood(bin_edges, classifier_profiles, sigma_prior=sigma_prior)
-    
+def get_inducing_points(train_x):
     max_inducing_points = 1000
     if train_x.size(0) > max_inducing_points:
         learn_inducing_locations = True
@@ -314,6 +328,16 @@ def get_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=
         learn_inducing_locations = False
         inducing_points = train_x
 
+    return inducing_points, learn_inducing_locations
+
+def get_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=1.0, lengthscale_scale=0.5, sigma_loc=1.0, sigma_scale=0.5):
+    bin_edges = torch.tensor([-0.5, 0.5])
+    # likelihood = OrdinalLikelihood(bin_edges)
+    sigma_prior = NormalPrior(sigma_loc, sigma_scale)
+    likelihood = BoundedOrdinalWithErrorLikelihood(bin_edges, classifier_profiles, sigma_prior=sigma_prior)
+    
+    inducing_points, learn_inducing_locations = get_inducing_points(train_x)
+
     model = GPClassificationModel(
         inducing_points, 
         learn_inducing_locations=learn_inducing_locations, 
@@ -323,14 +347,45 @@ def get_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=
     )
     return model, likelihood
 
-def setup_ordinal_gp_model(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc=1.0, sigma_scale=0.1):
+def inputs_np_to_torch(timestamps, stance, classifier_ids):
     timestamps = torch.as_tensor(timestamps, dtype=torch.float32)
     stance = torch.as_tensor(stance, dtype=torch.float32) + 1
     classifier_ids = torch.as_tensor(classifier_ids, dtype=torch.int)
+    return timestamps, stance, classifier_ids
+
+def setup_ordinal_gp_model(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc=1.0, sigma_scale=0.1):
+    timestamps, stance, classifier_ids = inputs_np_to_torch(timestamps, stance, classifier_ids)
 
     model, likelihood = get_ordinal_gp_model(timestamps, stance, classifier_profiles, lengthscale_loc=lengthscale_loc, lengthscale_scale=lengthscale_scale, sigma_loc=sigma_loc, sigma_scale=sigma_scale)
-    
+
     return model, likelihood, timestamps, stance, classifier_ids
+
+def get_batchable_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=1.0, lengthscale_scale=0.5, sigma_loc=1.0, sigma_scale=0.5):
+    bin_edges = torch.tensor([-0.5, 0.5])
+    # likelihood = OrdinalLikelihood(bin_edges)
+    sigma_prior = NormalPrior(sigma_loc, sigma_scale)
+    likelihood = BoundedOrdinalWithErrorLikelihood(bin_edges, classifier_profiles, sigma_prior=sigma_prior)
+    
+    inducing_points, learn_inducing_locations = get_inducing_points(train_x)
+
+    model = ApproximateGPModelListModel(
+        inducing_points, 
+        learn_inducing_locations=learn_inducing_locations, 
+        lengthscale_loc=lengthscale_loc, 
+        lengthscale_scale=lengthscale_scale,
+        variational_dist='natural',
+        train_inputs=train_x,
+        train_targets=train_y,
+        likelihood=likelihood
+    )
+    return model
+
+def setup_batchable_ordinal_gp_model(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc=1.0, sigma_scale=0.1):
+    timestamps, stance, classifier_ids = inputs_np_to_torch(timestamps, stance, classifier_ids)
+
+    model = get_batchable_ordinal_gp_model(timestamps, stance, classifier_profiles, lengthscale_loc=lengthscale_loc, lengthscale_scale=lengthscale_scale, sigma_loc=sigma_loc, sigma_scale=sigma_scale)
+    
+    return model, classifier_ids
 
 def optimize_step(optimizers, model, mll, likelihood, batch_X, batch_y, batch_classifier_ids):
     for optimizer in optimizers:
@@ -346,6 +401,104 @@ def optimize_step(optimizers, model, mll, likelihood, batch_X, batch_y, batch_cl
         optimizer.step()
     return loss
 
+def get_optimizer(model, likelihood, num_data=None):
+    adam_params = []
+    if isinstance(model, gpytorch.models.IndependentModelList):
+        variational_distribution = model.models[0].variational_strategy._variational_distribution
+        # don't add likelihood parameters if they are already included in the model
+    else:
+        variational_distribution = model.variational_strategy._variational_distribution
+        adam_params.append({'params': likelihood.parameters()})
+
+    if isinstance(variational_distribution, gpytorch.variational.CholeskyVariationalDistribution):
+        optimizer = torch.optim.Adam(
+            adam_params + [{'params': model.parameters()}],  # Includes GaussianLikelihood parameters
+            lr=0.05
+        )
+        optimizers = [optimizer]
+    elif isinstance(variational_distribution, gpytorch.variational.NaturalVariationalDistribution):
+        if isinstance(model, gpytorch.models.IndependentModelList):
+            variational_ngd_optimizer = FullBatchNGD(model.variational_parameters(), lr=0.1)
+        else:
+            assert num_data is not None, "num_data must be provided for NGD optimizer"
+            variational_ngd_optimizer = gpytorch.optim.NGD(model.variational_parameters(), num_data=num_data, lr=0.1)
+
+        hyperparameter_optimizer = torch.optim.Adam(
+            adam_params + [{'params': model.hyperparameters()}],
+            lr=0.01
+        )
+        optimizers = [hyperparameter_optimizer, variational_ngd_optimizer]
+    else:
+        raise NotImplementedError("Unrecognized variational distribution.")
+    
+    return optimizers
+
+def batch_train_ordinal_likelihood_gp(
+        models: List[ApproximateGPModelListModel], 
+        all_classifier_ids: torch.Tensor,
+        verbose=True
+    ):
+    if torch.cuda.is_available():
+        for model in models:
+            model = model.cuda()
+            model.likelihood = model.likelihood.cuda()
+            model.train_inputs = model.train_inputs.cuda()
+            model.train_targets = model.train_targets.cuda()
+
+    model = gpytorch.models.IndependentModelList(*models)
+    likelihood = LikelihoodList(*[m.likelihood for m in models])
+
+    mll = SumVariationalELBO(likelihood, model)
+        
+    model.train()
+    likelihood.train()
+    losses = []
+
+    # TODO check that num_data makes sense here
+    optimizers = get_optimizer(model, likelihood)
+
+    training_iter = 5000
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizers[0], int(training_iter / 10))
+    best_loss = torch.tensor(float('inf'))
+    num_since_best = 0
+    num_iters_before_stopping = training_iter // 20
+    min_loss_improvement = 0.0001
+
+    with gpytorch.settings.cholesky_max_tries(10):
+        pbar = tqdm(total=training_iter, desc='Training GP Model') if verbose else None
+        for k in range(training_iter):
+            for optimizer in optimizers:
+                optimizer.zero_grad()
+            with gpytorch.settings.variational_cholesky_jitter(1e-4):
+                output = model(*model.train_inputs)
+                loss = -mll(output, model.train_targets, classifier_ids=all_classifier_ids)
+            loss.backward()
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(likelihood.parameters(), max_norm=1.0)
+            for optimizer in optimizers:
+                optimizer.step()
+
+            if pbar is not None:
+                pbar.update(1)
+                pbar.set_description('Iter %d/%d - Loss: %.3f' % (k + 1, training_iter, loss.item()))
+            
+            scheduler.step(k)
+            losses.append(loss.item())
+            # checking since substantive decrease in loss
+            if best_loss - loss.item() > min_loss_improvement:
+                best_loss = loss.item()
+                num_since_best = 0
+            else:
+                num_since_best += 1
+            if num_since_best > num_iters_before_stopping:
+                if pbar is not None:
+                    pbar.close()
+                break
+        
+
+    return model
+
 
 def train_ordinal_likelihood_gp(model: GPClassificationModel, likelihood: BoundedOrdinalWithErrorLikelihood, train_X: torch.Tensor, train_y: torch.Tensor, classifier_ids: torch.Tensor, verbose=True):
     mll = gpytorch.mlls.VariationalELBO(likelihood, model, train_y.size(0))
@@ -360,7 +513,6 @@ def train_ordinal_likelihood_gp_with_mll(
         classifier_ids: torch.Tensor,
         verbose=True
     ):
-    max_full_batch = 10000
 
     if torch.cuda.is_available():
         model = model.cuda()
@@ -369,22 +521,7 @@ def train_ordinal_likelihood_gp_with_mll(
     model.train()
     likelihood.train()
     losses = []
-    if isinstance(model.variational_strategy._variational_distribution, gpytorch.variational.CholeskyVariationalDistribution):
-        optimizer = torch.optim.Adam([
-            {'params': model.parameters()},  # Includes GaussianLikelihood parameters
-            {'params': likelihood.parameters()},
-        ], lr=0.05)
-        optimizers = [optimizer]
-    elif isinstance(model.variational_strategy._variational_distribution, gpytorch.variational.NaturalVariationalDistribution):
-        variational_ngd_optimizer = gpytorch.optim.NGD(model.variational_parameters(), num_data=train_y.size(0), lr=0.1)
-
-        hyperparameter_optimizer = torch.optim.Adam([
-            {'params': model.hyperparameters()},
-            {'params': likelihood.parameters()},
-        ], lr=0.01)
-        optimizers = [hyperparameter_optimizer, variational_ngd_optimizer]
-    else:
-        raise NotImplementedError("Unrecognized variational distribution.")
+    optimizers = get_optimizer(model, likelihood, num_data=train_y.size(0))
 
     training_iter = 5000
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizers[0], int(training_iter / 10))
@@ -394,7 +531,7 @@ def train_ordinal_likelihood_gp_with_mll(
     min_loss_improvement = 0.0001
 
     with gpytorch.settings.cholesky_max_tries(10):
-        if train_X.size(0) < max_full_batch:
+        if train_X.size(0) < MAX_FULL_GP_BATCH:
             if torch.cuda.is_available():
                 train_X = train_X.cuda()
                 train_y = train_y.cuda()
@@ -483,16 +620,38 @@ def get_model_prediction(model: GPClassificationModel, test_x):
         try:
             with gpytorch.settings.fast_pred_var():
                 model_pred = model(test_x)
-                
-                # Get upper and lower confidence bounds
-                lower, upper = model_pred.confidence_region()
         except NotPSDError:
             model_pred = model(test_x)
                 
-            # Get upper and lower confidence bounds
-            lower, upper = model_pred.confidence_region()
+    # Get upper and lower confidence bounds
+    lower, upper = model_pred.confidence_region()
 
     return torch.tanh(model_pred.loc).cpu().numpy(), torch.tanh(lower).cpu().numpy(), torch.tanh(upper).cpu().numpy()
+
+def get_batch_model_predictions(model: gpytorch.models.IndependentModelList, test_xs):
+    test_xs = [torch.as_tensor(test_x).float() for test_x in test_xs]
+
+    model.eval()
+    model = model.cuda()
+    test_xs = [test_x.cuda() for test_x in test_xs]
+
+    with torch.no_grad():
+        try:
+            with gpytorch.settings.fast_pred_var():
+                model_preds = model(*test_xs)
+        except NotPSDError:
+            model_preds = model(*test_xs)
+
+    # Get upper and lower confidence bounds
+    preds = []
+    lowers = []
+    uppers = []
+    for model_pred in model_preds:
+        preds.append(torch.tanh(model_pred.loc).cpu().numpy())
+        lowers.append(torch.tanh(model_pred.confidence_region()[0]).cpu().numpy())
+        uppers.append(torch.tanh(model_pred.confidence_region()[1]).cpu().numpy())
+
+    return preds, lowers, uppers
 
 def get_classifier_profiles(confusion_matrix=None):
     if confusion_matrix is None:
@@ -591,9 +750,7 @@ def get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
 
     return timestamps, stance, classifier_ids, test_x, day_df
 
-def get_timeseries(args):
-    timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, test_x, verbose = args
-    
+def get_timeseries(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, test_x, verbose):
     model, likelihood, train_x, train_y, classifier_ids = setup_ordinal_gp_model(
         timestamps, 
         stance, 
@@ -627,20 +784,82 @@ def combine_trend_df(trend_df: pl.DataFrame, pred, lower, upper, target_name, fi
     ])
     return trend_df
 
+def calculate_trends_for_filtered_df_with_batching(
+        target_df: pl.DataFrame, 
+        target_name: str, 
+        filter_type: str, 
+        classifier_profiles,
+        lengthscale_loc: float,
+        lengthscale_scale: float,
+        sigma_loc: float,
+        sigma_scale: float,
+        time_column: str,
+        time_scale: str,
+        verbose: bool
+    ) -> Tuple[pl.DataFrame, List[Dict[str, Any]]]:
+
+    assert isinstance(target_df.schema[time_column], pl.Datetime), f"Column {time_column} must be of type DateTime"
+
+    batch_gp_params = []
+    all_trends_df = None
+
+    unique_df = target_df.group_by(filter_type)\
+        .len()
+    
+    batched_values = unique_df.sort('len')\
+        .with_columns((pl.col('len').cum_sum() / MAX_FULL_GP_BATCH).floor().alias('group'))\
+        .group_by('group')\
+        .agg(pl.col(filter_type))[filter_type].to_list()
+    
+    if verbose:
+        pbar = tqdm(total=unique_df.shape[0], desc='Training GPs')
+    for batch in batched_values:
+        try:
+            batch_trend_df, batch_gp_params_batch = batch_calculate_trends_for_filtered_df(
+                target_df, 
+                target_name, 
+                filter_type, 
+                batch, 
+                classifier_profiles,
+                lengthscale_loc,
+                lengthscale_scale,
+                sigma_loc,
+                sigma_scale,
+                time_column,
+                time_scale,
+                False
+            )
+        except Exception as ex:
+            logger.error(f"Failed to calculate trends for {target_name} {filter_type} {batch}: {ex}")
+            continue
+        if verbose:
+            pbar.update(len(batch))
+        if batch_trend_df is not None:
+            if all_trends_df is None:
+                all_trends_df = batch_trend_df
+            else:
+                all_trends_df = pl.concat([all_trends_df, batch_trend_df])
+            batch_gp_params.extend(batch_gp_params_batch)
+
+    return all_trends_df, batch_gp_params
+
 def batch_calculate_trends_for_filtered_df(
         target_df: pl.DataFrame, 
-        target_name, 
-        filter_type, 
-        unique_values, 
+        target_name: str, 
+        filter_type: str, 
+        unique_values: List[str], 
         classifier_profiles,
-        lengthscale_loc,
-        lengthscale_scale,
-        sigma_loc,
-        sigma_scale,
-        time_column,
-        time_scale,
-        verbose
-    ):
+        lengthscale_loc: float,
+        lengthscale_scale: float,
+        sigma_loc: float,
+        sigma_scale: float,
+        time_column: str,
+        time_scale: str,
+        verbose: bool
+    ) -> Tuple[pl.DataFrame, List[Dict[str, Any]]]:
+
+    batch_gp_params = []
+    all_trends_df = None
 
     all_timestamps, all_stance, all_classifier_ids, all_test_x, all_day_dfs = [], [], [], [], []
     for unique_value in unique_values:
@@ -653,23 +872,34 @@ def batch_calculate_trends_for_filtered_df(
         all_test_x.append(test_x)
         all_day_dfs.append(day_df)
 
-    args_list = []
-    arg_verbose = False # keep individual processes quiet
+    models = []
+    batch_classifier_ids = []
     for i in range(len(all_timestamps)):
-        args_list.append((all_timestamps[i], all_stance[i], all_classifier_ids[i], classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, all_test_x[i], arg_verbose))
+        timestamps = all_timestamps[i]
+        stance = all_stance[i]
+        classifier_ids = all_classifier_ids[i]
 
-    ctx = multiprocessing.get_context('spawn')
-    with ctx.Pool(processes=8) as pool:
-        if verbose:
-            results = list(tqdm(pool.imap(get_timeseries, args_list), total=len(args_list), desc='Training GPs'))
-        else:
-            results = pool.map(get_timeseries, args_list)
+        model, classifier_ids = setup_batchable_ordinal_gp_model(
+            timestamps, 
+            stance, 
+            classifier_ids, 
+            classifier_profiles, 
+            lengthscale_loc,
+            lengthscale_scale,
+            sigma_loc=sigma_loc,
+            sigma_scale=sigma_scale
+        )
+        models.append(model)
+        batch_classifier_ids.append(classifier_ids)
 
-    batch_gp_params = []
+    model = batch_train_ordinal_likelihood_gp(models, batch_classifier_ids, verbose=verbose)
+    preds, lowers, uppers = get_batch_model_predictions(model, all_test_x)
 
-    all_trends_df = None
-    for filter_value, day_df, result in zip(unique_values, all_day_dfs, results):
-        lengthscale, likelihood_sigma, losses, pred, lower, upper = result
+    
+
+    for filter_value, day_df, model, pred, lower, upper in zip(unique_values, all_day_dfs, models, preds, lowers, uppers):
+        lengthscale = model.covar_module.base_kernel.lengthscale.item()
+        likelihood_sigma = model.likelihood.sigma.item()
         trend_df = combine_trend_df(day_df, pred, lower, upper, target_name, filter_type, filter_value)
         if all_trends_df is None:
             all_trends_df = trend_df
@@ -678,7 +908,7 @@ def batch_calculate_trends_for_filtered_df(
         gp_params = {
             'lengthscale': lengthscale,
             'sigma': likelihood_sigma,
-            'loss': losses[-1],
+            'loss': None, # cannot retrieve individual losses from batch training
             'target_name': target_name,
             'filter_type': filter_type,
             'filter_value': filter_value
@@ -715,7 +945,7 @@ def calculate_trends_for_filtered_df(
     timestamps, stance, classifier_ids, test_x, trend_df = get_time_series_data(filtered_df, time_column, time_scale)
     
     try:
-        lengthscale, likelihood_sigma, losses, pred, lower, upper = get_timeseries((timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, test_x, verbose))
+        lengthscale, likelihood_sigma, losses, pred, lower, upper = get_timeseries(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, test_x, verbose)
     except Exception as ex:
         print(f"Failed for target {target_name} filter_type {filter_type} filter_value {filter_value} ex: {ex}")
         return None, None
@@ -742,7 +972,11 @@ def compute_trends_for_target(
         time_column,
         min_filter_count=5,
         time_scale='1mo',
-        verbose=False
+        verbose=False,
+        lengthscale_loc = 2.0, # mode at ~7.5 months
+        lengthscale_scale = 0.1,
+        sigma_loc = 1.0,
+        sigma_scale = 0.2
     ) -> Tuple[pl.DataFrame, List[Dict[str, Any]]]:
     """Precompute trend data for a specific target with optimized vectorized operations"""
     # Get target data in one operation
@@ -753,26 +987,16 @@ def compute_trends_for_target(
     # Calculate all trends
     
     all_gp_params = []
-    all_trend_df = None
-
-    # log normal
-    # mode at ~7.5 months
-    lengthscale_loc = 2.0
-    lengthscale_scale = 0.1
-
-    sigma_loc = 1.0
-    sigma_scale = 0.2
-
-    max_batch_group = 1000
+    all_trend_df = None    
 
     # For each filter type, calculate trends for each unique value
     for filter_column in filter_columns:
         # Get all unique values for this filter
-        all_unique_value_df = target_df.group_by(filter_column).len()
+        all_unique_value_df = target_df.group_by(filter_column).len().filter(pl.col('len') >= min_filter_count)
 
-        if all_unique_value_df.filter(pl.col('len') < max_batch_group).shape[0] > 1:
-            batch_unique_values = all_unique_value_df.filter(pl.col('len') < max_batch_group)[filter_column].to_list()
-            sequential_unique_values = all_unique_value_df.filter(pl.col('len') >= max_batch_group)[filter_column].to_list()
+        if all_unique_value_df.filter(pl.col('len') < MAX_FULL_GP_BATCH).shape[0] > 1:
+            batch_unique_values = all_unique_value_df.filter(pl.col('len') < MAX_FULL_GP_BATCH)[filter_column].to_list()
+            sequential_unique_values = all_unique_value_df.filter(pl.col('len') >= MAX_FULL_GP_BATCH)[filter_column].to_list()
         else:
             batch_unique_values = []
             sequential_unique_values = all_unique_value_df[filter_column].to_list()
@@ -780,11 +1004,11 @@ def compute_trends_for_target(
         # Apply filtering and trend calculation for each value
         if len(batch_unique_values) > 0:
             # compute in parallel
-            batch_trend_df, batch_gp_params = batch_calculate_trends_for_filtered_df(
-                target_df, 
+            filtered_df = target_df.filter(pl.col(filter_column).is_in(batch_unique_values))
+            batch_trend_df, batch_gp_params = calculate_trends_for_filtered_df_with_batching(
+                filtered_df, 
                 target_name, 
                 filter_column, 
-                batch_unique_values, 
                 classifier_profiles,
                 lengthscale_loc,
                 lengthscale_scale,
@@ -805,20 +1029,24 @@ def compute_trends_for_target(
         if len(sequential_unique_values) > 0:
             for filter_value in sequential_unique_values:
                 filtered_df = target_df.filter(pl.col(filter_column) == filter_value)
-                trend_df, gp_params = calculate_trends_for_filtered_df(
-                    filtered_df, 
-                    target_name, 
-                    filter_column, 
-                    filter_value, 
-                    classifier_profiles,
-                    lengthscale_loc,
-                    lengthscale_scale,
-                    sigma_loc,
-                    sigma_scale,
-                    time_column,
-                    time_scale,
-                    verbose
-                )
+                try:
+                    trend_df, gp_params = calculate_trends_for_filtered_df(
+                        filtered_df, 
+                        target_name, 
+                        filter_column, 
+                        filter_value, 
+                        classifier_profiles,
+                        lengthscale_loc,
+                        lengthscale_scale,
+                        sigma_loc,
+                        sigma_scale,
+                        time_column,
+                        time_scale,
+                        verbose
+                    )
+                except Exception as ex:
+                    logger.error(f"Failed to calculate trends for {target_name} {filter_column} {filter_value}: {ex}")
+                    continue
                 
                 if gp_params is None:
                     continue
