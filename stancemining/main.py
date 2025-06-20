@@ -20,14 +20,16 @@ class StanceMining:
             self, 
             llm_method='finetuned',
             num_representative_docs=5,
-            model_lib='transformers', 
-            model_name='microsoft/Phi-3.5-mini-instruct', 
+            model_inference='vllm', 
+            model_name='microsoft/Phi-4-mini-instruct', 
             model_kwargs={}, 
             tokenizer_kwargs={},
             stance_detection_finetune_kwargs={},
+            stance_detection_model_kwargs={},
             target_extraction_finetune_kwargs={},
+            target_extraction_model_kwargs={},
             embedding_model='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
-            load_generator=True,
+            embedding_model_inference='vllm',
             get_stance=True,
             verbose=False,
             lazy=True
@@ -37,7 +39,7 @@ class StanceMining:
 
         self.num_representative_docs = num_representative_docs
 
-        self.model_lib = model_lib
+        self.model_inference = model_inference
         self.model_name = model_name
         self.model_kwargs = model_kwargs
         if 'device_map' not in self.model_kwargs:
@@ -49,11 +51,27 @@ class StanceMining:
 
         if 'model_name' not in stance_detection_finetune_kwargs and 'hf_model' not in stance_detection_finetune_kwargs:
             stance_detection_finetune_kwargs['hf_model'] = 'bendavidsteel/SmolLM2-135M-Instruct-stance-detection'
+        if 'classification_method' not in stance_detection_finetune_kwargs:
+            stance_detection_finetune_kwargs['classification_method'] = 'head'
+        if 'prompting_method' not in stance_detection_finetune_kwargs:
+            stance_detection_finetune_kwargs['prompting_method'] = 'stancemining'
         self.stance_detection_finetune_kwargs = stance_detection_finetune_kwargs
+
+        if 'device_map' not in stance_detection_model_kwargs:
+            stance_detection_model_kwargs['device_map'] = 'auto'
+        self.stance_detection_model_kwargs = stance_detection_model_kwargs
 
         if 'model_name' not in target_extraction_finetune_kwargs and 'hf_model' not in target_extraction_finetune_kwargs:
             target_extraction_finetune_kwargs['hf_model'] = 'bendavidsteel/SmolLM2-360M-Instruct-stance-target-extraction'
+        if 'generation_method' not in target_extraction_finetune_kwargs:
+            target_extraction_finetune_kwargs['generation_method'] = 'list'
+        if 'prompting_method' not in target_extraction_finetune_kwargs:
+            target_extraction_finetune_kwargs['prompting_method'] = 'stancemining'
         self.target_extraction_finetune_kwargs = target_extraction_finetune_kwargs
+        
+        if 'device_map' not in target_extraction_model_kwargs:
+            target_extraction_model_kwargs['device_map'] = 'auto'
+        self.target_extraction_model_kwargs = target_extraction_model_kwargs
 
         self._get_stance = get_stance
         self.verbose = verbose
@@ -62,16 +80,20 @@ class StanceMining:
         else:
             logger.set_level("WARNING")
 
-        if load_generator:
-            self.generator = self._get_generator(lazy=lazy)
-        else:
-            self.generator = None
+        self.generator = self._get_generator(lazy=lazy)
 
         self.embedding_model = embedding_model
+        self.embedding_model_inference = embedding_model_inference
         self.embedding_cache_df = pl.DataFrame({'text': [], 'embedding': []}, schema={'text': pl.String, 'embedding': pl.Array(pl.Float32, 384)})
 
     def _get_embedding_model(self):
-        model = SentenceTransformer(self.embedding_model)
+        if self.embedding_model_inference == 'vllm':
+            import vllm
+            model = vllm.LLM(model=self.embedding_model)
+        elif self.embedding_model_inference == 'transformers':
+            model = SentenceTransformer(self.embedding_model)
+        else:
+            raise ValueError(f"Embedding model inference method '{self.embedding_model_inference}' not implemented")
         return model
 
     def _get_embeddings(self, docs: Union[List[str], pl.Series], model=None) -> np.ndarray:
@@ -85,7 +107,14 @@ class StanceMining:
         document_df = document_df.join(self.embedding_cache_df, on='text', how='left', maintain_order='left')
         missing_docs = document_df.unique('text').filter(pl.col('embedding').is_null())
         if len(missing_docs) > 0:
-            new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose)
+            if self.embedding_model_inference == 'vllm':
+                outputs = model.embed(missing_docs['text'].to_list(), use_tqdm=self.verbose)
+                new_embeddings = np.stack([np.array(o.outputs.embedding) for o in outputs])
+            elif self.embedding_model_inference == 'transformers':
+                new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose)
+            else:
+                raise ValueError(f"Embedding model inference method '{self.embedding_model_inference}' not implemented")
+            
             missing_docs = missing_docs.with_columns(pl.Series(name='embedding', values=new_embeddings))
             # cache embeddings
             self.embedding_cache_df = pl.concat([self.embedding_cache_df, missing_docs], how='diagonal_relaxed')
@@ -105,7 +134,13 @@ class StanceMining:
         elif self.llm_method == 'finetuned':
             df = pl.DataFrame({'Text': docs})
             
-            results = finetune.get_predictions("topic-extraction", df, self.target_extraction_finetune_kwargs, model_kwargs=self.target_extraction_model_kwargs)
+            if self.model_inference == 'transformers':
+                results = finetune.get_predictions("topic-extraction", df, self.target_extraction_finetune_kwargs, model_kwargs=self.target_extraction_model_kwargs)
+            elif self.model_inference == 'vllm':
+                results = llms.get_vllm_predictions("topic-extraction", df, self.target_extraction_finetune_kwargs, verbose=self.verbose)
+            else:
+                raise ValueError()
+
             if isinstance(results[0], str):
                 targets = [[r] for r in results]
             else:
@@ -120,8 +155,14 @@ class StanceMining:
         if self.llm_method == 'zero-shot':
             return prompting.ask_llm_zero_shot_stance(self.generator, docs, stance_targets)
         elif self.llm_method == 'finetuned':
-            data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentText': parent_docs})
-            results = finetune.get_predictions("stance-classification", data, self.stance_detection_finetune_kwargs, model_kwargs=self.stance_detection_model_kwargs)
+            data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentTexts': parent_docs})
+            if isinstance(data.schema['ParentTexts'], pl.String):
+                # convert to list
+                data = data.with_columns(pl.col('ParentTexts').cast(pl.List(pl.String)))
+            if self.model_inference == 'transformers':
+                results = finetune.get_predictions("stance-classification", data, self.stance_detection_finetune_kwargs, model_kwargs=self.stance_detection_model_kwargs)
+            elif self.model_inference == 'vllm':
+                results = llms.get_vllm_predictions("stance-classification", data, self.stance_detection_finetune_kwargs, verbose=self.verbose)
             results = [r.upper() for r in results]
             return results
 
@@ -185,7 +226,7 @@ class StanceMining:
             .drop_nulls()\
             .rename({'Targets': 'Target'})\
             .group_by('Target')\
-            .agg(pl.count().alias('count'))
+            .agg(pl.len().alias('count'))
         embeddings = self._get_embeddings(target_df['Target'], model=embedding_model)
         target_mapper = utils.get_similar_target_mapper(embeddings, target_df)
         documents_df = documents_df.with_columns(
@@ -206,38 +247,57 @@ class StanceMining:
                 bertopic_kwargs['hdbscan_model'] = HDBSCAN(min_samples=10, gen_min_span_tree=True, prediction_data=True, verbose=self.verbose, random_state=42)
         return BERTopic(**bertopic_kwargs)
 
-    def get_base_targets(self, docs, embedding_model=None):
+    def get_base_targets(self, docs, embedding_model=None, text_column='text', parent_text_column='parent_text'):
         if embedding_model is None:
             embedding_model = self._get_embedding_model()
 
         if isinstance(docs, list):
-            documents_df = pl.DataFrame({"Document": docs}).with_row_index(name='ID')
+            documents_df = pl.DataFrame({text_column: docs}).with_row_index(name='ID')
         elif isinstance(docs, pl.DataFrame):
             documents_df = docs
-            assert 'Document' in documents_df.columns, "docs must have a 'Document' column"
+            assert text_column in documents_df.columns, f"docs must have a '{text_column}' column if it is a dataframe"
             if 'ID' not in documents_df.columns:
                 documents_df = documents_df.with_row_index(name='ID')
 
-        stance_targets = self._ask_llm_stance_target(documents_df['Document'])
+        stance_targets = self._ask_llm_stance_target(documents_df[text_column])
         documents_df = documents_df.with_columns(pl.Series(name='Targets', values=stance_targets, dtype=pl.List(pl.String)))
+
+        # remove bad targets
+        target_df = documents_df.explode('Targets').rename({'Targets': 'Target'})
+        target_df = utils.remove_bad_targets(target_df)
+        documents_df = documents_df.drop('Targets')\
+            .join(
+                target_df.select(['ID', 'Target']).group_by('ID').agg(pl.col('Target')).rename({'Target': 'Targets'}),
+                on='ID',
+                how='left'
+            )
+
         documents_df = documents_df.with_columns(self._filter_document_similar_targets(documents_df['Targets'], embedding_model=embedding_model))
         
         return documents_df
 
-    def _fit_transform(self, docs, bertopic_kwargs={}):
+    def fit_transform(self, docs: Union[List[str], pl.DataFrame], embedding_cache: pl.DataFrame = None, bertopic_kwargs={}, text_column='text', parent_text_column='parent_text') -> pl.DataFrame:
+
+        if embedding_cache is not None:
+            assert isinstance(embedding_cache, pl.DataFrame), "embedding_cache must be a polars DataFrame"
+            assert 'text' in embedding_cache.columns, "embedding_cache must have a 'text' column"
+            assert 'embedding' in embedding_cache.columns, "embedding_cache must have an 'embedding' column"
+            assert isinstance(embedding_cache.schema['embedding'], pl.Array), "embedding_cache column 'embedding' must be an array of floats"
+            assert isinstance(embedding_cache.schema['text'], pl.String), "embedding_cache column 'text' must be a string"
+            self.embedding_cache_df = embedding_cache
         
         if isinstance(docs, list):
-            document_df = pl.DataFrame({"Document": docs}).with_row_index(name='ID')
+            document_df = pl.DataFrame({text_column: docs}).with_row_index(name='ID')
         elif isinstance(docs, pl.DataFrame):
             document_df = docs
-            assert 'Document' in document_df.columns, "docs must have a 'Document' column"
+            assert text_column in document_df.columns, f"docs argument must have a '{text_column}' column if it is a dataframe"
             if 'ID' not in document_df.columns:
                 document_df = document_df.with_row_index(name='ID')
         
         embed_model = self._get_embedding_model()
         if 'Targets' not in document_df.columns:
             logger.info("Getting base targets")
-            document_df = self.get_base_targets(docs, embedding_model=embed_model)
+            document_df = self.get_base_targets(docs, embedding_model=embed_model, text_column=text_column, parent_text_column=parent_text_column)
 
             # cluster initial stance targets
             base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls()[['Targets']]
@@ -267,39 +327,40 @@ class StanceMining:
         # get higher level stance targets for each topic
         topic_info = pl.from_pandas(topic_info)
         no_outliers_df = topic_info.filter(pl.col('Topic') != -1)
-        logger.info("Getting higher level stance targets")
-        stance_targets = [prompting.ask_llm_target_aggregate(self.generator, r['Representative_Docs'], r['Representation']) for r in tqdm(no_outliers_df[['Representative_Docs', 'Representation']].to_dicts(), desc="Getting topic noun phrases")]
-        no_outliers_df = no_outliers_df.with_columns(
-            pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String))
-        )
-        no_outliers_df = no_outliers_df.with_columns(self._filter_document_similar_targets(no_outliers_df['noun_phrases'], embedding_model=embed_model))
-        
-        topic_info = pl.concat([topic_info.filter(pl.col('Topic') == -1), no_outliers_df], how='diagonal_relaxed')\
-            .with_columns(pl.col('noun_phrases').fill_null([]))
+        if len(no_outliers_df) > 0:
+            logger.info("Getting higher level stance targets")
+            stance_targets = prompting.ask_llm_target_aggregate(self.generator, no_outliers_df.select(['Representative_Docs', 'Representation']).to_dicts())
+            no_outliers_df = no_outliers_df.with_columns(
+                pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String))
+            )
+            no_outliers_df = no_outliers_df.with_columns(self._filter_document_similar_targets(no_outliers_df['noun_phrases'], embedding_model=embed_model))
+            
+            topic_info = pl.concat([topic_info.filter(pl.col('Topic') == -1), no_outliers_df], how='diagonal_relaxed')\
+                .with_columns(pl.col('noun_phrases').fill_null([]))
 
-        logger.info("Mapping targets to topics")
-        # map documents to new noun phrases via topics
-        target_df = document_df.explode('Targets')
-        target_df = target_df.join(base_target_df, on='Targets', how='left')
-        target_df = target_df.filter(pl.col('Topic') != -1)
-        target_df = target_df.join(topic_info, on='Topic', how='left')
+            logger.info("Mapping targets to topics")
+            # map documents to new noun phrases via topics
+            target_df = document_df.explode('Targets')
+            target_df = target_df.join(base_target_df, on='Targets', how='left')
+            target_df = target_df.filter(pl.col('Topic') != -1)
+            target_df = target_df.join(topic_info, on='Topic', how='left')
 
-        logger.info("Joining new targets to documents")
-        document_df = document_df.join(
-                target_df.group_by('ID')\
-                    .agg(pl.col('noun_phrases').flatten())\
-                    .with_columns(pl.col('noun_phrases').list.drop_nulls().alias('NewTargets')),
-            on='ID', 
-            how='left',
-            maintain_order='left'
-        ).drop('noun_phrases')
-        
-        logger.info("Combining base and topic targets")
-        document_df = document_df.with_columns(
-            pl.when(pl.col('NewTargets').is_not_null())\
-                .then(pl.concat_list(pl.col('Targets'), pl.col('NewTargets')))\
-                .otherwise(pl.col('Targets')))
-        document_df = document_df.drop(['NewTargets'])
+            logger.info("Joining new targets to documents")
+            document_df = document_df.join(
+                    target_df.group_by('ID')\
+                        .agg(pl.col('noun_phrases').flatten())\
+                        .with_columns(pl.col('noun_phrases').list.drop_nulls().alias('NewTargets')),
+                on='ID', 
+                how='left',
+                maintain_order='left'
+            ).drop('noun_phrases')
+            
+            logger.info("Combining base and topic targets")
+            document_df = document_df.with_columns(
+                pl.when(pl.col('NewTargets').is_not_null())\
+                    .then(pl.concat_list(pl.col('Targets'), pl.col('NewTargets')))\
+                    .otherwise(pl.col('Targets')))
+            document_df = document_df.drop(['NewTargets'])
 
         logger.info("Removing similar stance targets")
         # remove targets that are too similar
@@ -307,7 +368,7 @@ class StanceMining:
 
         if self._get_stance:
             logger.info("Getting stance classifications for targets")
-            document_df = self.get_stance(document_df)
+            document_df = self.get_stance(document_df, text_column=text_column, parent_text_column=parent_text_column)
 
         logger.info("Getting target info")
         self.target_info = document_df.explode('Targets')\
@@ -318,22 +379,23 @@ class StanceMining:
             .len()\
             .rename({'len': 'Count'})
         # join to topic df to get topic info
-        self.target_info = self.target_info.join(
-            no_outliers_df.drop(['Name', 'Count']).explode('noun_phrases').drop_nulls('noun_phrases').rename({'noun_phrases': 'Target'}),
-            on='Target',
-            how='left'
-        )
+        if len(no_outliers_df) > 0:
+            self.target_info = self.target_info.join(
+                no_outliers_df.drop(['Name', 'Count']).explode('noun_phrases').drop_nulls('noun_phrases').rename({'noun_phrases': 'Target'}),
+                on='Target',
+                how='left'
+            )
 
         logger.info("Done")
         return document_df
     
-    def get_stance(self, document_df: pl.DataFrame) -> pl.DataFrame:
+    def get_stance(self, document_df: pl.DataFrame, text_column='text', parent_text_column='parent_text') -> pl.DataFrame:
         if 'ID' not in document_df.columns:
             document_df = document_df.with_row_index(name='ID')
 
         target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
-        parent_docs = target_df['ParentDocument'] if 'ParentDocument' in target_df.columns else None
-        target_stance = self._ask_llm_stance(target_df['Document'], target_df['Target'], parent_docs=parent_docs)
+        parent_docs = target_df[parent_text_column] if parent_text_column in target_df.columns else None
+        target_stance = self._ask_llm_stance(target_df[text_column], target_df['Target'], parent_docs=parent_docs)
         target_df = target_df.with_columns(pl.Series(name='stance', values=target_stance))
         target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('stance'))
 
@@ -346,42 +408,6 @@ class StanceMining:
                 maintain_order='left'
             )
         return document_df
-    
-    def _get_targets_probs_polarity(self, documents):
-        all_targets = self.target_info['noun_phrase'].to_list()
-        target_to_idx = {target: idx for idx, target in enumerate(all_targets)}
-        doc_targets = documents['Targets'].to_list()
-        doc_targets = [[t] if t is not None else [] for t in doc_targets]
-
-        num_targets = len(self.target_info)
-        
-        polarities = np.full((len(documents), num_targets), np.nan)
-        probs = np.zeros((len(documents), num_targets))
-        for i, doc_data in enumerate(documents.to_dicts()):
-            doc_num_targets = len(doc_data['Targets'])
-            for doc_target, doc_polarity in zip(doc_data['Targets'], doc_data['Polarities']):
-                idx = target_to_idx[doc_target]
-                polarities[i, idx] = doc_polarity
-                probs[i, idx] = 1
-
-        return documents, probs, polarities
-
-    def fit_transform(self, docs, embedding_cache=None, bertopic_kwargs={}):
-
-        if embedding_cache is not None:
-            assert isinstance(embedding_cache, pl.DataFrame), "embedding_cache must be a polars DataFrame"
-            assert 'text' in embedding_cache.columns, "embedding_cache must have a 'text' column"
-            assert 'embedding' in embedding_cache.columns, "embedding_cache must have an 'embedding' column"
-            assert isinstance(embedding_cache.schema['embedding'], pl.Array), "embedding_cache column 'embedding' must be an array of floats"
-            assert isinstance(embedding_cache.schema['text'], pl.String), "embedding_cache column 'text' must be a string"
-            self.embedding_cache_df = embedding_cache
-
-        documents = self._fit_transform(docs, bertopic_kwargs)
-        
-        if self._get_stance:
-            return self._get_targets_probs_polarity(documents)
-        else:
-            return documents
 
     def get_target_info(self):
         return self.target_info
@@ -390,10 +416,12 @@ class StanceMining:
         return self.topic_model
 
     def _get_generator(self, lazy=False):
-        if self.model_lib == 'transformers':
+        if self.model_inference == 'transformers':
             return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs, lazy=lazy)
+        elif self.model_inference == 'vllm':
+            return llms.VLLM(self.model_name, lazy=lazy, verbose=self.verbose)
         else:
-            raise ValueError(f"LLM library '{self.model_lib}' not implemented")
+            raise ValueError(f"LLM library '{self.model_inference}' not implemented")
         
 
                 

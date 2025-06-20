@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import multiprocessing
 import os
@@ -10,6 +10,7 @@ from typing import Optional, Dict, List, Any, Union
 import accelerate
 import datasets
 import evaluate
+import huggingface_hub
 import numpy as np
 import pandas as pd
 import peft
@@ -21,11 +22,10 @@ import tqdm
 import transformers
 import wandb
 
-import experiments.datasets
-from stancemining import metrics
+import stancemining.datasets, stancemining.metrics
 
 def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
-    return experiments.datasets.load_dataset(
+    return stancemining.datasets.load_dataset(
         dataset_name, 
         split=split, 
         group=(generation_method=='list') and (task=='topic-extraction'), 
@@ -69,7 +69,7 @@ def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_t
 
     return model_path_name
 
-def load_prompt(task: str, prompting_method: str, generation_method: str) -> str:
+def load_prompt(task: str, prompting_method: str, generation_method: str = None) -> str:
     top_dir = pathlib.Path(__file__).parent.parent
     if task == "stance-classification" or task == "argument-classification":
         if prompting_method == 'wiba':
@@ -156,7 +156,7 @@ def stance_target_examples_to_prompt(prompt_template: str, examples):
         prompts.append(prompt)
     return prompts
 
-def to_message_format(text, label):
+def to_message_format(text, label=None):
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": text},
@@ -205,8 +205,8 @@ class ModelConfig:
     model_name: str
     task: str
     num_labels: Optional[int]
-    device_map: Dict[str, int]
     prompt: str
+    device_map: Dict[str, int] = 'auto'
     parent_prompt: Optional[str] = None
     tokenizer: Optional[transformers.PreTrainedTokenizer] = None
     model: Optional[transformers.PreTrainedModel] = None
@@ -311,17 +311,23 @@ class ChatTemplateTokenizer:
             "labels": labels
         }
 
+LABELS_2_ID = {
+    "neutral": 0,
+    "favor": 1,
+    "against": 2
+}
+
 @dataclass
 class DataConfig:
     dataset_name: str
-    labels2id: Dict[str, int]
+    labels2id: Dict[str, int] = field(default_factory=lambda: LABELS_2_ID)
 
 class DataProcessor:
     def __init__(self, model_config: ModelConfig, data_config: DataConfig):
         self.model_config = model_config
         self.data_config = data_config
         
-    def process_data(self, df: pd.DataFrame, classification_method: str, generation_method: str, train: bool = True) -> datasets.Dataset:
+    def process_data(self, df: pd.DataFrame, classification_method: str, generation_method: str, train: bool = True, tokenize=True, truncate_beyond=None) -> datasets.Dataset:
         """Process dataframe into a format suitable for model input"""
         if self.model_config.task == "stance-classification":
             df = self._process_stance_classification(df, classification_method)
@@ -332,12 +338,13 @@ class DataProcessor:
             
         dataset = datasets.Dataset.from_polars(df)
         dataset = self._add_prompts(dataset)
-        dataset = self._tokenize_dataset(dataset, classification_method, train=train)
-        if train:
-            columns = ['input_ids', 'attention_mask', 'labels']
-        else:
-            columns = ['input_ids', 'attention_mask']
-        dataset.set_format(type='torch', columns=columns)
+        if tokenize:
+            dataset = self._tokenize_dataset(dataset, classification_method, train=train)
+            if train:
+                columns = ['input_ids', 'attention_mask', 'labels']
+            else:
+                columns = ['input_ids', 'attention_mask']
+            dataset.set_format(type='torch', columns=columns)
         if train:
             dataset.shuffle(seed=42)
         return dataset
@@ -353,8 +360,11 @@ class DataProcessor:
         )
     
     def _process_stance_classification(self, df: pl.DataFrame, classification_method: str) -> pl.DataFrame:
-        cols = ['text', 'topic', 'dataset']
-        df = df.rename({'Dataset': 'dataset'})
+        cols = ['text', 'topic']
+        if 'Dataset' in df.columns and 'dataset' not in df.columns:
+            df = df.rename({'Dataset': 'dataset'})
+        if 'dataset' in df.columns:
+            cols.append('dataset')
         if 'Stance' in df.columns and 'class' not in df.columns:
             df = df.rename({"Stance": "class"})
         if 'class' in df.columns:
@@ -429,20 +439,20 @@ class DataProcessor:
         return dataset
 
 class ModelEvaluator:
-    def __init__(self, model_config: ModelConfig, data_config: DataConfig):
-        self.model_config = model_config
-        self.data_config = data_config
+    def __init__(self, task, labels2id=None):
+        self.task = task
+        self.labels2id = labels2id
         self.metrics = self._setup_metrics()
     
     def _setup_metrics(self) -> Dict[str, Any]:
-        if self.model_config.task in ["stance-classification", "argument-classification"]:
+        if self.task in ["stance-classification", "argument-classification"]:
             return {
                 'accuracy': evaluate.load("accuracy"),
                 'f1': evaluate.load("f1"),
                 'precision': evaluate.load("precision"),
                 'recall': evaluate.load("recall")
             }
-        elif self.model_config.task == "topic-extraction":
+        elif self.task == "topic-extraction":
             return {
                 'bertscore': evaluate.load("bertscore"),
                 'bleu': evaluate.load("bleu")
@@ -450,10 +460,11 @@ class ModelEvaluator:
         raise ValueError(f"Unknown task: {self.model_config.task}")
     
     def evaluate(self, predictions: List[Any], references: List[Any], datasets: List[Any]) -> Dict[str, float]:
-        if self.model_config.task in ["stance-classification", "argument-classification"]:
+        if self.task in ["stance-classification", "argument-classification"]:
+            assert self.labels2id is not None, "Must provide labels2id for classification evaluation"
             if isinstance(predictions[0], str):
-                predictions = [self.data_config.labels2id[p] for p in predictions]
-                references = [self.data_config.labels2id[r] for r in references]
+                predictions = [self.labels2id[p] for p in predictions]
+                references = [self.labels2id[r] for r in references]
             return self._evaluate_classification(predictions, references, datasets)
         else:
             return self._evaluate_generation(predictions, references, datasets)
@@ -483,8 +494,8 @@ class ModelEvaluator:
         return pred_metrics
 
     def _evaluate_generation(self, predictions: List[Any], references: List[Any], datasets: List[str]) -> Dict[str, float]:
-        bertscore_f1, bertscore_p, bertscore_r = metrics.bertscore_f1_targets(predictions, references)
-        bleu_f1, bleu_p, bleu_r = metrics.bleu_targets(predictions, references)
+        bertscore_f1, bertscore_p, bertscore_r = stancemining.metrics.bertscore_f1_targets(predictions, references)
+        bleu_f1, bleu_p, bleu_r = stancemining.metrics.bleu_targets(predictions, references)
         pred_metrics = {
             'bertscore_f1': bertscore_f1,
             'bertscore_p': bertscore_p,
@@ -500,8 +511,8 @@ class ModelEvaluator:
             d_predictions = dataset_df['prediction'].to_list()
             d_references = dataset_df['reference'].to_list()
     
-            d_bertscore_f1, d_bertscore_p, d_bertscore_r = metrics.bertscore_f1_targets(d_predictions, d_references)
-            d_bleu_f1, d_bleu_p, d_bleu_r = metrics.bleu_targets(d_predictions, d_references)
+            d_bertscore_f1, d_bertscore_p, d_bertscore_r = stancemining.metrics.bertscore_f1_targets(d_predictions, d_references)
+            d_bleu_f1, d_bleu_p, d_bleu_r = stancemining.metrics.bleu_targets(d_predictions, d_references)
             pred_metrics[dataset] = {
                 'bertscore_f1': d_bertscore_f1,
                 'bertscore_p': d_bertscore_p,
@@ -793,7 +804,7 @@ class ModelTrainer:
         
         return evaluator.evaluate(all_preds, all_labels, datasets)
 
-def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwargs={}, model_save_path=None, model_name=None):
+def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwargs={}, model_save_path=None, model_name=None, full_saved_model=False):
     """Initialize model and tokenizer based on config"""
     model_path = model_save_path if model_save_path else model_name
     tokenizer_kwargs = {}
@@ -806,7 +817,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwa
     
     if task in ["stance-classification", "argument-classification"]:
         if classification_method == 'head':
-            if model_save_path:
+            if model_save_path and not full_saved_model:
                 create_fn = peft.AutoPeftModelForSequenceClassification.from_pretrained
             else:
                 create_fn = transformers.AutoModelForSequenceClassification.from_pretrained
@@ -849,6 +860,9 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwa
         
     return model, tokenizer
 
+def parse_list_completions(completions):
+    return [re.findall('"(.*?)"', c) for c in completions] 
+
 def get_prediction(inputs, task, model, tokenizer, classification_method, generation_method, generate_kwargs={}):
     """Get model predictions"""
     if task in ["stance-classification", "argument-classification"]:
@@ -879,11 +893,11 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
                 skip_special_tokens=True
             ) for output in outputs]
             def get_label(c):
-                for label in ['neutral', 'favor', 'against']:
+                for label in ['neutral', 'in favor', 'against']:
                     if label in c.lower():
                         return label
                 else:
-                    if c == 'f' and generate_kwargs['max_new_tokens'] == 1:
+                    if c.lower() in ['f', 'in'] and generate_kwargs['max_new_tokens'] == 1:
                         return 'favor'
                     return 'neutral'
             return [get_label(c) for c in completions]
@@ -907,8 +921,7 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             skip_special_tokens=True
         ) for output in outputs]
         if generation_method == 'list':
-            completions = [re.findall('"(.*?)"', c) for c in completions] 
-            return completions
+            return parse_list_completions(completions)
         elif generation_method == 'beam':
             batched_completions = []
             num_return_sequences = generate_kwargs.get('num_return_sequences', 1)
@@ -924,28 +937,30 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
     output_type = config['classification_method'] if task == "stance-classification" else config['generation_method']
     if 'hf_model' in config:
         model_save_path = config['hf_model']
+        file_path = huggingface_hub.hf_hub_download(repo_id=model_save_path, filename='metadata.json')
+        with open(file_path, 'r') as f:
+            metadata = json.load(f)
+        prompt = metadata['prompt']
+        parent_prompt = metadata['parent_prompt'] if 'parent_prompt' in metadata else None
     else:
         model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], config['data_name'], output_type)
-    
+        prompt = load_prompt(task, config['prompting_method'], generation_method=config['generation_method'] if 'generation_method' in config else None)
+        parent_prompt = load_parent_prompt(task, prompting_method=config['prompting_method'])
+
     # Setup configurations
     model_config = ModelConfig(
         model_name=None,
         task=task,
         num_labels=2 if task == "argument-classification" else 3,
         device_map=model_kwargs['device_map'],
-        prompt=load_prompt(task, config['prompting_method'], config['generation_method']),
-        parent_prompt=load_parent_prompt(task, prompting_method=config['prompting_method']),
-        classification_method=config['classification_method'],
-        generation_method=config['generation_method']
+        prompt=prompt,
+        parent_prompt=parent_prompt,
+        classification_method=config['classification_method'] if task == 'stance-classification' else None,
+        generation_method=config['generation_method'] if task == 'topic-extraction' else None,
     )
     
     data_config = DataConfig(
-        dataset_name=None,
-        labels2id={
-            "neutral": 0,
-            "favor": 1,
-            "against": 2
-        }
+        dataset_name=None
     )
     
     # Initialize components

@@ -9,7 +9,7 @@ from scipy.stats import dirichlet as scipy_dirichlet
 from stancemining import StanceMining
 from stancemining import metrics
 
-from test_all import MockStanceMining
+from test_main import MockStanceMining
 
 def test_filter_targets():
     num_docs = 10

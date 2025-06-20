@@ -34,7 +34,9 @@ def remove_bad_targets(target_df: pl.DataFrame):
         'the primary stance target is',
         'stance target: 1.',
         'stance target:',
-        'stance target'
+        'stance target',
+        'target1',
+        'target2'
     ]
     for phrase in phrases:
         target_df = target_df.with_columns(pl.col('Target').str.replace(phrase, ''))

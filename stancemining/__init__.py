@@ -1,1 +1,2 @@
-from main import StanceMining
+from stancemining.main import StanceMining
+from stancemining.estimate import get_stance_trends

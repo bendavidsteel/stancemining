@@ -1,4 +1,4 @@
-import argparse
+import json
 import os
 
 import dotenv
@@ -65,12 +65,7 @@ def _main(config, args):
     )
     
     data_config = DataConfig(
-        dataset_name=config.data.dataset,
-        labels2id={
-            "neutral": 0,
-            "favor": 1,
-            "against": 2
-        }
+        dataset_name=config.data.dataset
     )
     
     training_config = TrainingConfig(
@@ -84,11 +79,11 @@ def _main(config, args):
     # Initialize components
     trainer = ModelTrainer(model_config, training_config)
     processor = DataProcessor(model_config, data_config)
-    evaluator = ModelEvaluator(model_config, data_config)
+    evaluator = ModelEvaluator(model_config.task, labels2id=data_config.labels2id)
     
     # Load HF token
-    dotenv.load_dotenv()
-    hf_token = os.environ['HF_TOKEN']
+    # dotenv.load_dotenv()
+    hf_token = config.hf_token
     
     # Setup model path
     output_type = model_config.classification_method if model_config.task == "stance-classification" else model_config.generation_method
@@ -136,6 +131,15 @@ def _main(config, args):
     
     if args.do_eval:
         model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_save_path=model_save_path)
+        
+        if model_config.task == 'stance-classification' and model_config.classification_method == 'head':
+            # merge adapter into model and save for vllm
+            model = model.merge_and_unload()
+            # save new model
+            model_save_path = f"{model_save_path}-merged"
+            model.save_pretrained(model_save_path)
+            tokenizer.save_pretrained(model_save_path)
+        
         trainer.set_model_and_tokenizer(model, tokenizer)
 
         test_data = load_test_data(data_config.dataset_name, model_config.task, model_config.generation_method)
@@ -165,28 +169,41 @@ def _main(config, args):
                 generate_kwargs=generate_kwargs
             ))
         
+        datasets = test_dataset['dataset']
         if model_config.task in ["argument-classification", "stance-classification"]:
             references = test_dataset['class']
-            datasets = test_dataset['dataset']
-            metrics = evaluator.evaluate(
-                predictions,
-                references,
-                datasets
-            )
         else:
             references = test_data['Target'].to_list()
-            b_f1, b_precision, b_recall = bertscore_f1_targets(predictions, references)
-            # bleu_score = bleu_targets(predictions, references)
-            metrics = {
-                'bertscore_f1': b_f1,
-                'bertscore_precision': b_precision,
-                'bertscore_recall': b_recall,
-                # 'bleu_score': bleu_score
-            }
+
+        metrics = evaluator.evaluate(
+            predictions,
+            references,
+            datasets
+        )
         
         print_metrics(metrics)
         test_metrics = {f"test/{k}": v for k, v in metrics.items()}
         wandb.run.summary.update(test_metrics)
+
+        # save metadata to model repo
+        metadata = {}
+
+        # convert confusion matrix to list for json saving
+        if 'test/confusion_matrix' in test_metrics:
+            test_metrics['test/confusion_matrix'] = test_metrics['test/confusion_matrix'].tolist()
+        metadata['test_metrics'] = test_metrics
+        metadata['prompt'] = model_config.prompt
+        if model_config.parent_prompt is not None:
+            metadata['parent_prompt'] = model_config.parent_prompt
+        if model_config.task == 'stance-classification':
+            metadata['classification_method'] = model_config.classification_method
+        elif model_config.task == 'topic-extraction':
+            metadata['generation_method'] = model_config.generation_method
+        else:
+            raise ValueError()
+
+        with open(os.path.join(model_save_path, 'metadata.json'), 'w') as f:
+            json.dump(metadata, f)
     wandb.finish()
 
 if __name__ == "__main__":

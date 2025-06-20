@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 from pydantic import BaseModel
 import pynndescent
-from sentence_transformers import SentenceTransformer
+import sentence_transformers
 from jose import jwt, JWTError
 import sklearn.metrics.pairwise
 
@@ -210,8 +210,6 @@ def process_data():
 
 def compute_target_embeddings(target_count_df: pl.DataFrame):
     """Compute embeddings for targets efficiently"""
-    print("Loading sentence transformer model...")
-    model = SentenceTransformer('paraphrase-MiniLM-L6-v2', device='cuda')
     
     embeddings_dir = './data/precomputed'
     embeddings_path = f'{embeddings_dir}/target_embeddings.parquet.zstd'
@@ -247,7 +245,13 @@ def compute_target_embeddings(target_count_df: pl.DataFrame):
     # If we have targets that need embedding
     if missing_targets:
         print(f"Computing embeddings for {len(missing_targets)} new targets...")
-        new_embeddings = model.encode(missing_targets, show_progress_bar=True)
+        if isinstance(embedding_model, sentence_transformers.SentenceTransformer):
+            new_embeddings = embedding_model.encode(missing_targets, show_progress_bar=True)
+        elif str(type(embedding_model)) == "<class 'vllm.LLM'>":
+            outputs = embedding_model.embed(missing_targets, use_tqdm=True)
+            new_embeddings = np.stack([np.array(o.outputs.embedding) for o in outputs])
+        else:
+            raise ValueError(f"Unsupported embedding model type: {type(embedding_model)}")
         
         # Create dataframe for new embeddings
         new_embeddings_df = pl.DataFrame({
@@ -506,6 +510,15 @@ async def startup_event():
     print("Loading precomputed data...")
     
     try:
+        # Initialize embedding model
+        print("Initialized semantic search model")
+        embedding_model_name = 'sentence-transformers/all-MiniLM-L12-v2'
+        try:
+            import vllm
+            embedding_model = vllm.LLM(model=embedding_model_name)
+        except Exception:
+            embedding_model = sentence_transformers.SentenceTransformer(embedding_model_name)
+
         # Load filtered targets list
         target_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed/valid_targets_list.parquet.zstd'))
         
@@ -556,10 +569,7 @@ async def startup_event():
         
         print(f"Loaded {len(unique_platforms)} platforms and {len(unique_parties)} parties")
         
-        # Initialize embedding model
-        embedding_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
-        print("Initialized semantic search model")
-
+        
         umap_df = compute_umap_embeddings(target_df, target_embeddings_df)
     
     except Exception as e:

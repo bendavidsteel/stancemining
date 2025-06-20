@@ -24,7 +24,8 @@ import stancemining
 
 model = stancemining.StanceMining()
 document_df = model.fit_transform(docs)
-trends = stancemining.get_stance_trends(document_df, target_info_df)
+target_info_df = model.get_target_info()
+trend_df = stancemining.get_stance_trends(document_df, target_info_df)
 ```
 
 # To deploy stancemining app
