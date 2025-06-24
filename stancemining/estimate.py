@@ -449,13 +449,17 @@ def batch_train_ordinal_likelihood_gp(
     likelihood = LikelihoodList(*[m.likelihood for m in models])
 
     mll = SumVariationalELBO(likelihood, model)
-        
+
+    # TODO check that num_data makes sense here
+    optimizers = get_optimizer(model, likelihood)
+
     model.train()
     likelihood.train()
     losses = []
 
-    # TODO check that num_data makes sense here
-    optimizers = get_optimizer(model, likelihood)
+    model.compile(fullgraph=True, mode='reduce-overhead')
+    likelihood.compile(fullgraph=True, mode='reduce-overhead')
+    mll.compile(fullgraph=True, mode='reduce-overhead')
 
     training_iter = 5000
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizers[0], int(training_iter / 10))
@@ -507,21 +511,25 @@ def train_ordinal_likelihood_gp(model: GPClassificationModel, likelihood: Bounde
 def train_ordinal_likelihood_gp_with_mll(
         model: GPClassificationModel, 
         likelihood: BoundedOrdinalWithErrorLikelihood, 
-        mll,
+        mll: MarginalLogLikelihood,
         train_X: torch.Tensor, 
         train_y: torch.Tensor, 
         classifier_ids: torch.Tensor,
         verbose=True
     ):
 
-    if torch.cuda.is_available():
-        model = model.cuda()
-        likelihood = likelihood.cuda()
-        
     model.train()
     likelihood.train()
     losses = []
     optimizers = get_optimizer(model, likelihood, num_data=train_y.size(0))
+
+    model.compile(fullgraph=True, mode='reduce-overhead')
+    likelihood.compile(fullgraph=True, mode='reduce-overhead')
+    mll.compile(fullgraph=True, mode='reduce-overhead')
+
+    if torch.cuda.is_available():
+        model = model.cuda()
+        likelihood = likelihood.cuda()
 
     training_iter = 5000
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizers[0], int(training_iter / 10))
@@ -750,7 +758,19 @@ def get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
 
     return timestamps, stance, classifier_ids, test_x, day_df
 
-def get_timeseries(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, test_x, verbose):
+def get_gp_timeseries(
+        timestamps, 
+        stance, 
+        classifier_ids, 
+        classifier_profiles, 
+        test_x, 
+        lengthscale_loc = 2.0, # mode at ~7.5 months
+        lengthscale_scale = 0.1,
+        sigma_loc = 1.0,
+        sigma_scale = 0.2,
+        verbose = False
+    ):
+    
     model, likelihood, train_x, train_y, classifier_ids = setup_ordinal_gp_model(
         timestamps, 
         stance, 
@@ -923,13 +943,13 @@ def calculate_trends_for_filtered_df(
         filter_type, 
         filter_value, 
         classifier_profiles,
-        lengthscale_loc,
-        lengthscale_scale,
-        sigma_loc,
-        sigma_scale,
         time_column,
         time_scale,
-        verbose
+        lengthscale_loc = 2.0, # mode at ~7.5 months
+        lengthscale_scale = 0.1,
+        sigma_loc = 1.0,
+        sigma_scale = 0.2,
+        verbose=False
     ):
     """Calculate trends for a filtered DataFrame with optimized operations"""
     # First sort by createtime - ensures consistent results
@@ -939,15 +959,15 @@ def calculate_trends_for_filtered_df(
     if end_date - start_date < datetime.timedelta(days=1):
         # TODO implement static distribution calculation
         # return calculate_static_dist_for_filtered_df(filtered_df, target_name, filter_type, filter_value, trend_path, classifier_profiles)
-        print(f"Skipping {target_name} {filter_type} {filter_value} - not enough data")
+        logger.warning(f"Skipping {target_name} {filter_type} {filter_value} - not enough data")
         return None, None
 
     timestamps, stance, classifier_ids, test_x, trend_df = get_time_series_data(filtered_df, time_column, time_scale)
     
     try:
-        lengthscale, likelihood_sigma, losses, pred, lower, upper = get_timeseries(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, test_x, verbose)
+        lengthscale, likelihood_sigma, losses, pred, lower, upper = get_gp_timeseries(timestamps, stance, classifier_ids, classifier_profiles, test_x, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, verbose)
     except Exception as ex:
-        print(f"Failed for target {target_name} filter_type {filter_type} filter_value {filter_value} ex: {ex}")
+        logger.error(f"Failed for target {target_name} filter_type {filter_type} filter_value {filter_value} ex: {ex}")
         return None, None
     
     trend_df = combine_trend_df(trend_df, pred, lower, upper, target_name, filter_type, filter_value)
@@ -1036,13 +1056,13 @@ def compute_trends_for_target(
                         filter_column, 
                         filter_value, 
                         classifier_profiles,
-                        lengthscale_loc,
-                        lengthscale_scale,
-                        sigma_loc,
-                        sigma_scale,
                         time_column,
                         time_scale,
-                        verbose
+                        lengthscale_loc=lengthscale_loc,
+                        lengthscale_scale=lengthscale_scale,
+                        sigma_loc=sigma_loc,
+                        sigma_scale=sigma_scale,
+                        verbose=verbose
                     )
                 except Exception as ex:
                     logger.error(f"Failed to calculate trends for {target_name} {filter_column} {filter_value}: {ex}")
@@ -1066,12 +1086,13 @@ def compute_trends_for_target(
         'all', 
         'all', 
         classifier_profiles,
-        lengthscale_loc,
-        lengthscale_scale,
-        sigma_loc,
-        sigma_scale,
         time_column,
-        time_scale
+        time_scale,
+        lengthscale_loc=lengthscale_loc,
+        lengthscale_scale=lengthscale_scale,
+        sigma_loc=sigma_loc,
+        sigma_scale=sigma_scale,
+        verbose=verbose
     )
     if gp_params is not None:
         all_gp_params.append(gp_params)
@@ -1101,7 +1122,7 @@ def get_stance_trends(
     
     for target in target_info_df.to_dicts():
         target_name = target['Target']
-        print(f"Processing primary target: {target_name}")
+        logger.info(f"Processing primary target: {target_name}")
             
         # Process the target with grouping
         target_trend_df, gp_params = compute_trends_for_target(

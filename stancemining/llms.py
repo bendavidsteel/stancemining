@@ -115,7 +115,7 @@ class VLLM(BaseLLM):
 
     def load_model(self):
         import vllm
-        self.model = vllm.LLM(model=self.model_name)
+        self.model = vllm.LLM(model=self.model_name, enable_prefix_caching=True)
         self.sampling_params = vllm.SamplingParams(temperature=0.0)
     
     def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
@@ -239,6 +239,7 @@ def get_vllm_predictions(task, df, config, verbose=False):
         llm = vllm.LLM(
             model=model_name,
             enable_lora=True,
+            enable_prefix_caching=True,
             **llm_kwargs
         )
     except NotImplementedError as ex:
@@ -248,6 +249,7 @@ def get_vllm_predictions(task, df, config, verbose=False):
             llm = vllm.LLM(
                 model=model_name,
                 enable_lora=True,
+                enable_prefix_caching=True,
                 **llm_kwargs
             )
         else:

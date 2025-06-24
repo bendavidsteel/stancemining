@@ -12,8 +12,12 @@ import torch
 from stancemining import llms, finetune, prompting, utils
 from stancemining.ngram_gen import NGramGeneration
 
-logger = utils.MyLogger('WARNING')
-
+logger = logging.getLogger('StanceMining')
+logger.setLevel('WARNING')
+sh = logging.StreamHandler()
+sh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s: %(message)s'))
+logger.addHandler(sh)
+logger.propagate = False
 
 class StanceMining:
     def __init__(
@@ -76,9 +80,9 @@ class StanceMining:
         self._get_stance = get_stance
         self.verbose = verbose
         if self.verbose:
-            logger.set_level("DEBUG")
+            logger.setLevel("DEBUG")
         else:
-            logger.set_level("WARNING")
+            logger.setLevel("WARNING")
 
         self.generator = self._get_generator(lazy=lazy)
 
