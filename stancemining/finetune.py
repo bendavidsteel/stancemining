@@ -708,7 +708,7 @@ class ModelTrainer:
             batch_keys = ['input_ids', 'attention_mask', 'labels']
             loss_func = None
 
-        assert len(train_loader) >= self.training_config.eval_steps * self.training_config.grad_accum_steps, \
+        assert self.training_config.num_epochs * len(train_loader) >= self.training_config.eval_steps * self.training_config.grad_accum_steps, \
             "Not enough steps to evaluate"
         
         self.model_config.model, neftune_hook = activate_neftune(

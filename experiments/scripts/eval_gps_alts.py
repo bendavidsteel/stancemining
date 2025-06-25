@@ -30,58 +30,6 @@ def rolling_avg(timestamps, values, window_size=30):
     
     return np.array(rolling_means)
 
-def kalman_interpolate(timestamps, observations, test_x, process_noise_var=0.01**2, obs_noise_var=0.5**2):
-    """
-    Use Kalman filter to interpolate stance values.
-    
-    Args:
-        timestamps: observation times
-        observations: observed stance values
-        test_x: times to predict at
-        process_noise_var: Q - how much we expect the true stance to vary per unit time
-        obs_noise_var: R - observation noise variance
-    """
-    # Create 1D Kalman filter (position only, no velocity)
-    kf = KalmanFilter(dim_x=1, dim_z=1)
-    
-    # State transition matrix (stance evolves as random walk)
-    kf.F = np.array([[1.0]])
-    
-    # Observation matrix (we observe stance directly)
-    kf.H = np.array([[1.0]])
-    
-    # Observation noise
-    kf.R = obs_noise_var
-    
-    # Initial state (start with first observation)
-    kf.x = np.array([[observations[0]]])
-    kf.P = np.array([[1.0]])  # Initial uncertainty
-    
-    # Store results
-    means = []
-    
-    # Process observations and interpolate
-    obs_idx = 0
-    for t in test_x:
-        # Update process noise based on time step
-        if len(means) > 0:
-            dt = t - test_x[len(means)-1] if len(means) > 0 else 1.0
-            kf.Q = process_noise_var * dt
-        else:
-            kf.Q = process_noise_var
-            
-        # Predict step
-        kf.predict()
-        
-        # If we have an observation at this time (within tolerance), update
-        if obs_idx < len(timestamps) and abs(t - timestamps[obs_idx]) < 0.1:
-            kf.update(observations[obs_idx])
-            obs_idx += 1
-        
-        means.append(kf.x[0, 0])
-    
-    return np.array(means)
-
 def spline_interpolate(timestamps, observations, test_x, n_knots=4, degree=3, alpha=0.1):
     """
     Use smoothing splines to interpolate stance values.
