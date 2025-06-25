@@ -8,8 +8,6 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 import sklearn.preprocessing
 import sklearn.pipeline
 import sklearn.linear_model
-from filterpy.kalman import KalmanFilter
-from filterpy.common import Q_discrete_white_noise
 
 from stancemining.estimate import get_gp_timeseries, get_classifier_profiles, get_timestamps
 
@@ -165,8 +163,8 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
             time_column: [start_date + datetime.timedelta(days=int(i)) for i in timestamps],
         })
         base_timestamps = get_timestamps(sorted_df, start_date, time_column, time_scale)
-        user_true_stances = np.round(noisy_latent_user_stance[i, idxs])
-        
+        user_true_stances = np.round(np.clip(noisy_latent_user_stance[i, idxs], -1, 1))
+
         all_true_stances.append(user_true_stances)
 
         # observe stances
@@ -195,8 +193,8 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
         # GP
         classifier_ids = np.zeros_like(observed_stances, dtype=int)
         start_time = datetime.datetime.now()
-        # lengthscale, likelihood_sigma, losses, gp_mean, gp_lower, gp_upper = get_gp_timeseries(base_timestamps, observed_stances, classifier_ids, classifier_profile, test_x)
-        gp_mean, gp_lower, gp_upper = np.zeros_like(test_x), np.zeros_like(test_x), np.zeros_like(test_x)
+        lengthscale, likelihood_sigma, losses, gp_mean, gp_lower, gp_upper = get_gp_timeseries(base_timestamps, observed_stances, classifier_ids, classifier_profile, test_x)
+        # gp_mean, gp_lower, gp_upper = np.zeros_like(test_x), np.zeros_like(test_x), np.zeros_like(test_x)
         end_time = datetime.datetime.now()
         gp_time = (end_time - start_time).total_seconds()
 
@@ -284,20 +282,152 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
         'spline_mses': spline_mses,
     }
 
-    # Print results
-    print(f'Average LOWESS Time: {np.mean(lowess_times):.4f} seconds')
-    print(f'Average GP Time: {np.mean(gp_times):.4f} seconds')
-    # print(f'Average Kalman Time: {np.mean(kalman_times):.4f} seconds')
-    print(f'Average Spline Time: {np.mean(spline_times):.4f} seconds')
-    print()
-    print(f'Average LOWESS MSE: {np.mean(lowess_mses):.4f}')
-    print(f'Average GP MSE: {np.mean(gp_mses):.4f}')
-    # print(f'Average Kalman MSE: {np.mean(kalman_mses):.4f}')
-    print(f'Average Spline MSE: {np.mean(spline_mses):.4f}')
+def run_parameter_sweep():
+    """Run eval_gp across parameter grid and create separate plots."""
+    np.random.seed(42)
+    
+    # Parameter ranges
+    noise_scales = np.linspace(0.05, 0.5, 10)
+    random_walk_scales = np.linspace(0.005, 0.05, 10)
+    
+    # Storage for results
+    noise_results = {'noise_scales': [], 'lowess_mses': [], 'gp_mses': [], 'spline_mses': [],
+                    'lowess_times': [], 'gp_times': [], 'spline_times': []}
+    rw_results = {'rw_scales': [], 'lowess_mses': [], 'gp_mses': [], 'spline_mses': [],
+                 'lowess_times': [], 'gp_times': [], 'spline_times': []}
+    
+    print("Running noise scale sweep...")
+    # Noise scale sweep (fix random walk scale)
+    for noise_scale in noise_scales:
+        results = eval_gp(n_samples=5, noise_scale=noise_scale, random_walk_scale=0.01)
+        
+        noise_results['noise_scales'].append(noise_scale)
+        noise_results['lowess_mses'].append(results['lowess_mses'])
+        noise_results['gp_mses'].append(results['gp_mses'])
+        noise_results['spline_mses'].append(results['spline_mses'])
+        noise_results['lowess_times'].append(results['lowess_times'])
+        noise_results['gp_times'].append(results['gp_times'])
+        noise_results['spline_times'].append(results['spline_times'])
+        
+        print(f"Completed noise scale {noise_scale:.3f}")
+    
+    print("Running random walk scale sweep...")
+    # Random walk scale sweep (fix noise scale)
+    for rw_scale in random_walk_scales:
+        results = eval_gp(n_samples=5, noise_scale=0.1, random_walk_scale=rw_scale)
+        
+        rw_results['rw_scales'].append(rw_scale)
+        rw_results['lowess_mses'].append(results['lowess_mses'])
+        rw_results['gp_mses'].append(results['gp_mses'])
+        rw_results['spline_mses'].append(results['spline_mses'])
+        rw_results['lowess_times'].append(results['lowess_times'])
+        rw_results['gp_times'].append(results['gp_times'])
+        rw_results['spline_times'].append(results['spline_times'])
+        
+        print(f"Completed random walk scale {rw_scale:.4f}")
+    
+    # Helper function to calculate mean and confidence intervals
+    def calc_stats(data_list):
+        means = [np.mean(data) for data in data_list]
+        stds = [np.std(data) for data in data_list]
+        return np.array(means), np.array(stds)
+    
+    # Plot 1: MSE vs Noise Scale
+    plt.figure(figsize=(6, 2))
+    
+    lowess_means, lowess_stds = calc_stats(noise_results['lowess_mses'])
+    gp_means, gp_stds = calc_stats(noise_results['gp_mses'])
+    spline_means, spline_stds = calc_stats(noise_results['spline_mses'])
+    
+    plt.errorbar(noise_results['noise_scales'], lowess_means, yerr=lowess_stds, 
+               label='LOWESS', marker='o', capsize=5)
+    plt.errorbar(noise_results['noise_scales'], gp_means, yerr=gp_stds, 
+               label='GP', marker='s', capsize=5)
+    plt.errorbar(noise_results['noise_scales'], spline_means, yerr=spline_stds, 
+               label='Spline', marker='^', capsize=5)
+    
+    plt.xlabel('Noise Scale')
+    plt.ylabel('MSE')
+    # plt.title('MSE vs Noise Scale')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('./figs/mse_vs_noise_scale.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    
+    # Plot 2: Runtime Bar Chart (aggregated across all parameters)
+    plt.figure(figsize=(4, 3))
+    
+    # Aggregate all runtime data across both parameter sweeps
+    all_lowess_times = []
+    all_gp_times = []
+    all_spline_times = []
+    
+    # Add times from noise scale sweep
+    for times_list in noise_results['lowess_times']:
+        all_lowess_times.extend(times_list)
+    for times_list in noise_results['gp_times']:
+        all_gp_times.extend(times_list)
+    for times_list in noise_results['spline_times']:
+        all_spline_times.extend(times_list)
+    
+    # Add times from random walk scale sweep
+    for times_list in rw_results['lowess_times']:
+        all_lowess_times.extend(times_list)
+    for times_list in rw_results['gp_times']:
+        all_gp_times.extend(times_list)
+    for times_list in rw_results['spline_times']:
+        all_spline_times.extend(times_list)
+    
+    # Calculate aggregated statistics
+    methods = ['LOWESS', 'GP', 'Spline']
+    all_times = [all_lowess_times, all_gp_times, all_spline_times]
+    means = [np.mean(times) for times in all_times]
+    stds = [np.std(times) for times in all_times]
+    
+    # Create bar chart
+    x_pos = np.arange(len(methods))
+    bars = plt.bar(x_pos, means, yerr=stds, capsize=5, 
+                   color=['green', 'orange', 'brown'], alpha=0.7)
+    
+    plt.xlabel('Method')
+    plt.ylabel('Time (seconds)')
+    # plt.title('Runtime Comparison (Aggregated)')
+    plt.xticks(x_pos, methods)
+    plt.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    plt.savefig('./figs/runtime_comparison.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    
+    # Plot 3: MSE vs Random Walk Scale
+    plt.figure(figsize=(6, 2))
+    
+    lowess_means, lowess_stds = calc_stats(rw_results['lowess_mses'])
+    gp_means, gp_stds = calc_stats(rw_results['gp_mses'])
+    spline_means, spline_stds = calc_stats(rw_results['spline_mses'])
+    
+    plt.errorbar(rw_results['rw_scales'], lowess_means, yerr=lowess_stds, 
+               label='LOWESS', marker='o', capsize=5)
+    plt.errorbar(rw_results['rw_scales'], gp_means, yerr=gp_stds, 
+               label='GP', marker='s', capsize=5)
+    plt.errorbar(rw_results['rw_scales'], spline_means, yerr=spline_stds, 
+               label='Spline', marker='^', capsize=5)
+    
+    plt.xlabel('Random Walk Scale')
+    plt.ylabel('MSE')
+    # plt.title('MSE vs Random Walk Scale')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('./figs/mse_vs_rw_scale.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    
+    
+    print("Parameter sweep completed! Results saved to ./figs/")
 
 def main():
     np.random.seed(42)  # For reproducibility
-    eval_gp(noise_scale=0.1, n_samples=1)
+    run_parameter_sweep()
 
 if __name__ == '__main__':
     main()
