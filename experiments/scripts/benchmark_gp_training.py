@@ -76,7 +76,7 @@ def generate_synthetic_data(
     return timestamps, observed_stances, classifier_ids
 
 # Custom training function with timing and scheduler
-def timed_train_gp(model, likelihood, train_x, train_y, classifier_ids, optimizers, scheduler=None):
+def timed_train_gp(model, likelihood, train_x, train_y, classifier_ids, optimizers, training_iter, scheduler=None):
     model.train()
     likelihood.train()
     
@@ -94,7 +94,6 @@ def timed_train_gp(model, likelihood, train_x, train_y, classifier_ids, optimize
     mll = gpytorch.mlls.VariationalELBO(likelihood, model, train_y.size(0))
     
     start_time = time.time()
-    training_iter = 10  # Fixed number of iterations for fair comparison
     
     losses = []
     for k in range(training_iter):
@@ -141,6 +140,7 @@ def benchmark_gp_training(
     total_combinations = len(learning_rates) * len(ngd_learning_rates) * len(scheduler_types) * len(data_sizes) * n_trials
     pbar = tqdm(total=total_combinations, desc="Benchmarking GP Training")
     
+    max_epochs = 200
     for data_size in data_sizes:
         for lr in learning_rates:
             for ngd_lr in ngd_learning_rates:
@@ -186,11 +186,11 @@ def benchmark_gp_training(
                                 # Apply different schedulers
                                 if scheduler_type == 'cosine':
                                     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                                        hyperparameter_optimizer, T_max=1000
+                                        hyperparameter_optimizer, T_max=max_epochs
                                     )
                                 elif scheduler_type == 'cosine_warm':
                                     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                                        hyperparameter_optimizer, T_0=100
+                                        hyperparameter_optimizer, T_0=max_epochs // 5
                                     )
                                 elif scheduler_type == 'exponential':
                                     scheduler = torch.optim.lr_scheduler.ExponentialLR(
@@ -198,7 +198,7 @@ def benchmark_gp_training(
                                     )
                                 elif scheduler_type == 'step':
                                     scheduler = torch.optim.lr_scheduler.StepLR(
-                                        hyperparameter_optimizer, step_size=250, gamma=0.5
+                                        hyperparameter_optimizer, step_size=max_epochs // 5, gamma=0.5
                                     )
                                 else:  # 'none'
                                     scheduler = None
@@ -217,7 +217,7 @@ def benchmark_gp_training(
                         try:
                             optimizers, scheduler = custom_get_optimizer(model, likelihood, train_y.size(0))
                             training_time, final_loss, losses = timed_train_gp(
-                                model, likelihood, train_x, train_y, classifier_ids, optimizers, scheduler=scheduler
+                                model, likelihood, train_x, train_y, classifier_ids, optimizers, max_epochs, scheduler=scheduler
                             )
                         
                             # Calculate convergence metrics
