@@ -2,13 +2,13 @@
 
 A tool for mining stance targets from a corpus of documents.
 
-# Installation
+## Installation
 
 ```bash
 pip install git+https://github.com/bendavidsteel/stancemining.git
 ```
 
-# To get stance targets and stance from a corpus of documents
+## To get stance targets and stance from a corpus of documents
 ```
 import stancemining
 
@@ -18,7 +18,7 @@ document_df = model.fit_transform(docs)
 target_info_df = model.get_target_info()
 ```
 
-# To get stance target, stance, and stance trends from a corpus of documents
+## To get stance target, stance, and stance trends from a corpus of documents
 ```
 import stancemining
 
@@ -28,12 +28,12 @@ target_info_df = model.get_target_info()
 trend_df = stancemining.get_stance_trends(document_df, target_info_df)
 ```
 
-# To deploy stancemining app
+## To deploy stancemining app
 ```
 docker compose up
 ```
 
-# To reproduce experimental results
+## To reproduce experimental results
 Rename `./config/config_default.yaml` to `./config/config.yaml` and set the parameters in the file.
 Run:
 ```
