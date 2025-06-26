@@ -1106,7 +1106,6 @@ def compute_trends_for_target(
 
 def get_stance_trends(
         document_df: pl.DataFrame, 
-        target_info_df: pl.DataFrame, 
         time_column: str = None, 
         filter_columns: List[str] = [], 
         min_count: int = 5, 
@@ -1118,10 +1117,11 @@ def get_stance_trends(
 
     targets_df = document_df.explode(['Targets', 'Stances']).rename({'Targets': 'Target', 'Stances': 'Stance'})
 
+    target_names = targets_df.group_by('Target').len().sort('len', descending=True)['Target'].to_list()
+
     classifier_profiles = get_classifier_profiles()
-    
-    for target in target_info_df.to_dicts():
-        target_name = target['Target']
+
+    for target_name in target_names:
         logger.info(f"Processing primary target: {target_name}")
             
         # Process the target with grouping
