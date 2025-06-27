@@ -5,7 +5,7 @@ A tool for mining stance targets from a corpus of documents.
 ## Installation
 
 ```bash
-pip install git+https://github.com/bendavidsteel/stancemining.git
+pip install stancemining
 ```
 
 ## To get stance targets and stance from a corpus of documents
@@ -24,8 +24,7 @@ import stancemining
 
 model = stancemining.StanceMining()
 document_df = model.fit_transform(docs)
-target_info_df = model.get_target_info()
-trend_df = stancemining.get_stance_trends(document_df, target_info_df)
+trend_df = stancemining.get_stance_trends(document_df)
 ```
 
 ## To deploy stancemining app

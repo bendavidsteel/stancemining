@@ -1,7 +1,7 @@
 import logging
 from typing import Any, List, Union
 
-from bertopic import BERTopic
+import toponymy
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -238,18 +238,130 @@ class StanceMining:
         )
         return documents_df
 
-    def _get_base_topic_model(self, bertopic_kwargs):
-        if 'verbose' not in bertopic_kwargs:
-            bertopic_kwargs['verbose'] = self.verbose
-        if 'umap_model' not in bertopic_kwargs:
-            if torch.cuda.is_available():
-                from cuml.manifold import UMAP
-                bertopic_kwargs['umap_model'] = UMAP(n_components=5, n_neighbors=15, min_dist=0.0, verbose=self.verbose, random_state=42)
-        if 'hdbscan_model' not in bertopic_kwargs:
-            if torch.cuda.is_available():
-                from cuml.cluster import HDBSCAN
-                bertopic_kwargs['hdbscan_model'] = HDBSCAN(min_samples=10, gen_min_span_tree=True, prediction_data=True, verbose=self.verbose, random_state=42)
-        return BERTopic(**bertopic_kwargs)
+    def _topic_model(self, targets, embeddings, embedding_model, kwargs):
+        if 'show_progress_bars' not in kwargs:
+            kwargs['show_progress_bars'] = self.verbose
+        clusterer = toponymy.ToponymyClusterer(min_clusters=4)
+        topic_model = toponymy.Toponymy(
+            llm_wrapper=None,
+            text_embedding_model=embedding_model,
+            clusterer=clusterer,
+            object_description="documents",
+            corpus_description="document corpus",
+            **kwargs
+        )
+        try:
+            from cuml.manifold.umap import UMAP
+            clusterable_vectors = UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric='cosine').fit_transform(embeddings)
+        except ImportError:
+            from umap import UMAP
+            clusterable_vectors = UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric='cosine').fit_transform(embeddings)
+
+        # running toponymy fit method except topic naming step which we do ourselves
+        exemplar_method = "central"
+        keyphrase_method = "information_weighted"
+        subtopic_method = "central"
+        topic_model.cluster_layers_, topic_model.cluster_tree_ = topic_model.clusterer.fit_predict(
+            clusterable_vectors,
+            embeddings,
+            topic_model.layer_class,
+            show_progress_bar=topic_model.show_progress_bars,
+            exemplar_delimiters=topic_model.exemplar_delimiters
+        )
+
+        # Initialize other data structures
+        self.topic_names_ = [[]] * len(topic_model.cluster_layers_)
+        topic_model.topic_name_vectors_ = [np.array([])] * len(topic_model.cluster_layers_)
+        detail_levels = np.linspace(
+            topic_model.lowest_detail_level,
+            topic_model.highest_detail_level,
+            len(topic_model.cluster_layers_),
+        )
+
+        # Get exemplars for layer 0 first and build keyphrase matrix
+        if (
+            hasattr(topic_model.cluster_layers_[0], "object_to_text_function")
+            and topic_model.cluster_layers_[0].object_to_text_function is not None
+        ):
+            # Non-text objects: use exemplars to build keyphrase matrix
+            exemplars, exemplar_indices = topic_model.cluster_layers_[0].make_exemplar_texts(
+                targets,
+                embeddings,
+            )
+
+            # Create aligned text list
+            aligned_texts = [""] * len(targets)  # Empty strings for non-exemplars
+            for cluster_idx, cluster_exemplars in enumerate(exemplars):
+                for exemplar_idx, exemplar_text in zip(
+                    exemplar_indices[cluster_idx], cluster_exemplars
+                ):
+                    aligned_texts[exemplar_idx] = exemplar_text
+
+            # Build keyphrase matrix from aligned texts
+            (
+                topic_model.object_x_keyphrase_matrix_,
+                topic_model.keyphrase_list_,
+                topic_model.keyphrase_vectors_,
+            ) = topic_model.keyphrase_builder.fit_transform(aligned_texts)
+        else:
+            # Text objects: build keyphrase matrix directly from objects
+            (
+                topic_model.object_x_keyphrase_matrix_,
+                topic_model.keyphrase_list_,
+                topic_model.keyphrase_vectors_,
+            ) = topic_model.keyphrase_builder.fit_transform(targets)
+            # Still need to generate exemplars for layer 0
+            topic_model.cluster_layers_[0].make_exemplar_texts(
+                targets,
+                embeddings,
+            )
+
+        if topic_model.keyphrase_vectors_ is None:
+            # If the keyphrase vectors are None, we need to generate them
+            topic_model.keyphrase_vectors_ = topic_model.embedding_model.encode(
+                topic_model.keyphrase_list_,
+                show_progress_bar=topic_model.show_progress_bars,
+            )
+
+        # Iterate through the layers and build the topic names
+        for i, layer in tqdm(
+            enumerate(topic_model.cluster_layers_),
+            desc=f"Building topic names by layer",
+            disable=not topic_model.show_progress_bars,
+            total=len(topic_model.cluster_layers_),
+            unit="layer",
+        ):
+            if i > 0:  # Skip layer 0 exemplars as we already did them
+                layer.make_exemplar_texts(
+                    targets,
+                    embeddings,
+                    method=exemplar_method,
+                )
+
+            layer.make_keyphrases(
+                topic_model.keyphrase_list_,
+                topic_model.object_x_keyphrase_matrix_,
+                topic_model.keyphrase_vectors_,
+                topic_model.embedding_model,
+                method=keyphrase_method,
+            )
+
+            if i > 0:
+                if not hasattr(topic_model.cluster_layers_[0], "topic_name_embeddings"):
+                    topic_model.cluster_layers_[0].embed_topic_names(topic_model.embedding_model)
+
+                layer.make_subtopics(
+                    topic_model.topic_names_[0],
+                    topic_model.cluster_layers_[0].cluster_labels,
+                    topic_model.cluster_layers_[0].topic_name_embeddings,
+                    topic_model.embedding_model,
+                    method=subtopic_method,
+                )
+
+            topic_model.topic_name_vectors_[i] = layer.make_topic_name_vector()
+
+        return topic_model.topic_name_vectors_
+
 
     def get_base_targets(self, docs, embedding_model=None, text_column='text', parent_text_column='parent_text'):
         if embedding_model is None:
@@ -280,7 +392,7 @@ class StanceMining:
         
         return documents_df
 
-    def fit_transform(self, docs: Union[List[str], pl.DataFrame], embedding_cache: pl.DataFrame = None, bertopic_kwargs={}, text_column='text', parent_text_column='parent_text') -> pl.DataFrame:
+    def fit_transform(self, docs: Union[List[str], pl.DataFrame], embedding_cache: pl.DataFrame = None, toponymy_kwargs={}, text_column='text', parent_text_column='parent_text') -> pl.DataFrame:
 
         if embedding_cache is not None:
             assert isinstance(embedding_cache, pl.DataFrame), "embedding_cache must be a polars DataFrame"
@@ -309,27 +421,10 @@ class StanceMining:
             assert isinstance(document_df.schema['Targets'], pl.List), "Targets column must be a list of strings"
             base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls('Targets')[['Targets']]
         
-        logger.info("Fitting BERTopic model")
-        self.topic_model = self._get_base_topic_model(bertopic_kwargs)
+        logger.info("Fitting topic model")
         targets = base_target_df['Targets'].to_list()
         embeddings = self._get_embeddings(targets, model=embed_model)
-        topics, probs = self.topic_model.fit_transform(targets, embeddings=embeddings)
-        base_target_df = base_target_df.with_columns([
-            pl.Series(name='Topic', values=topics),
-            pl.col('Targets').alias('Document')
-        ]).with_row_index(name='ID')
-        repr_docs, _, _, _ = self.topic_model._extract_representative_docs(
-            self.topic_model.c_tf_idf_,
-            base_target_df.to_pandas(),
-            self.topic_model.topic_representations_,
-            nr_samples=500,
-            nr_repr_docs=self.num_representative_docs,
-        )
-        self.topic_model.representative_docs_ = repr_docs
-        topic_info = self.topic_model.get_topic_info()
-
-        # get higher level stance targets for each topic
-        topic_info = pl.from_pandas(topic_info)
+        topics = self._topic_model(targets, embeddings, embed_model, toponymy_kwargs)
         no_outliers_df = topic_info.filter(pl.col('Topic') != -1)
         if len(no_outliers_df) > 0:
             logger.info("Getting higher level stance targets")
