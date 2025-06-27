@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
-from cuml.manifold.umap import UMAP
+
 import vllm
 
 def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) -> plt.Figure:
@@ -22,7 +22,12 @@ def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) ->
     outputs = encoder.embed(target_df['Target'].to_list())
     embeddings = np.stack([o.outputs.embedding for o in outputs], axis=0)
     
-    umap_model = UMAP(spread=0.5)
+    try:
+        from cuml.manifold.umap import UMAP
+        umap_model = UMAP(spread=0.5)
+    except ImportError:
+        from umap import UMAP
+        umap_model = UMAP()
     coordinates = umap_model.fit_transform(embeddings)
     
     # Create figure with larger size for better visibility
