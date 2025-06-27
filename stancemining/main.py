@@ -54,7 +54,7 @@ class StanceMining:
         self.tokenizer_kwargs = tokenizer_kwargs
 
         if 'model_name' not in stance_detection_finetune_kwargs and 'hf_model' not in stance_detection_finetune_kwargs:
-            stance_detection_finetune_kwargs['hf_model'] = 'bendavidsteel/SmolLM2-135M-Instruct-stance-detection'
+            stance_detection_finetune_kwargs['hf_model'] = 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection'
         if 'classification_method' not in stance_detection_finetune_kwargs:
             stance_detection_finetune_kwargs['classification_method'] = 'head'
         if 'prompting_method' not in stance_detection_finetune_kwargs:

@@ -663,7 +663,7 @@ def get_batch_model_predictions(model: gpytorch.models.IndependentModelList, tes
 
 def get_classifier_profiles(confusion_matrix=None):
     if confusion_matrix is None:
-        file_path = huggingface_hub.hf_hub_download(repo_id='bendavidsteel/SmolLM2-135M-Instruct-stance-detection', filename='metadata.json')
+        file_path = huggingface_hub.hf_hub_download(repo_id='bendavidsteel/SmolLM2-360M-Instruct-stance-detection', filename='metadata.json')
         with open(file_path, 'r') as f:
             metadata = json.load(f)
 
