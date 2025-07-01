@@ -16,6 +16,8 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
   const [loadingRawData, setLoadingRawData] = useState(false);
   const [rawDataLoaded, setRawDataLoaded] = useState(false);
   const [multipleTimelines, setMultipleTimelines] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [showSuggestions, setShowSuggestions] = useState(false);
   
   const chartContainerRef = useRef(null);
 
@@ -195,25 +197,47 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
   // Handle filter type change
   const handleFilterTypeChange = (e) => {
     const newType = e.target.value;
-    // Reset filter value when changing type
+    // Reset filter value and search term when changing type
     setFilterValue('all');
+    setSearchTerm('');
+    setShowSuggestions(false);
     setFilterType(newType);
   };
   
-  // Handle filter value change
-  const handleFilterValueChange = (e) => {
-    setFilterValue(e.target.value);
+  
+  // Handle search input change
+  const handleSearchChange = (e) => {
+    const value = e.target.value;
+    setSearchTerm(value);
+    setShowSuggestions(value.length > 0);
   };
+  
+  // Handle suggestion selection
+  const handleSuggestionSelect = (value) => {
+    setFilterValue(value);
+    setSearchTerm(value);
+    setShowSuggestions(false);
+  };
+  
+  // Filter suggestions based on search term
+  const filteredSuggestions = availableFilterValues.filter(value => 
+    value.toLowerCase().includes(searchTerm.toLowerCase())
+  ).slice(0, 10); // Limit to 10 suggestions
   
 
   // Render multiple timelines chart with confidence intervals
   const renderMultipleTimelinesChart = () => {
     const traces = [];
-    const limitedFilterValues = availableFilterValues.slice(0, 5);
+    const usesSingleColor = availableFilterValues.length > 5;
+    const limitedFilterValues = usesSingleColor ? availableFilterValues : availableFilterValues.slice(0, 5);
+    
+    // Calculate alpha based on number of lines (more lines = lower alpha)
+    const baseAlpha = usesSingleColor ? Math.max(0.3, 1 - (availableFilterValues.length * 0.05)) : 1;
+    const fillAlpha = usesSingleColor ? Math.max(0.01, 1 - (availableFilterValues.length * 0.05)) : 0.3;
     
     // Create traces for each filter value
     limitedFilterValues.forEach((filterVal, index) => {
-      const color = getFilterColor(filterVal, index);
+      const color = usesSingleColor ? '#8884d8' : getFilterColor(filterVal, index);
       const xValues = trendData.map(d => new Date(d.x));
       
       // Confidence interval fill
@@ -233,6 +257,10 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
       });
       
       // Add confidence interval fill
+      const rgbColor = usesSingleColor 
+        ? `136, 132, 216` // RGB for #8884d8
+        : `${parseInt(color.slice(1, 3), 16)}, ${parseInt(color.slice(3, 5), 16)}, ${parseInt(color.slice(5, 7), 16)}`;
+      
       traces.push({
         x: xValues,
         y: lowerValues,
@@ -240,34 +268,46 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
         mode: 'lines',
         line: { color: 'transparent' },
         fill: 'tonexty',
-        fillcolor: `rgba(${parseInt(color.slice(1, 3), 16)}, ${parseInt(color.slice(3, 5), 16)}, ${parseInt(color.slice(5, 7), 16)}, 0.2)`,
+        fillcolor: `rgba(${rgbColor}, ${fillAlpha})`,
         showlegend: false,
         hoverinfo: 'skip',
         name: `fill_${filterVal}`
       });
       
       // Add main trend line
+      const lineColor = usesSingleColor 
+        ? `rgba(136, 132, 216, ${baseAlpha})`
+        : color;
+      
       traces.push({
         x: xValues,
         y: trendData.map(d => d[`trend_mean_${filterVal}`]),
         type: 'scatter',
         mode: 'lines',
-        line: { color: color, width: 2 },
+        line: { color: lineColor, width: 2 },
         name: filterVal,
+        showlegend: !usesSingleColor,
         hovertemplate: `<b>${filterVal}</b><br>Date: %{x}<br>Stance: %{y:.2f}<extra></extra>`
       });
     });
     
     // Volume chart traces
-    const volumeTraces = limitedFilterValues.map((filterVal, index) => ({
-      x: trendData.map(d => new Date(d.x)),
-      y: trendData.map(d => d[`volume_${filterVal}`]),
-      type: 'scatter',
-      mode: 'lines',
-      line: { color: getFilterColor(filterVal, index) },
-      name: filterVal,
-      hovertemplate: `<b>${filterVal}</b><br>Date: %{x}<br>Volume: %{y}<extra></extra>`
-    }));
+    const volumeTraces = limitedFilterValues.map((filterVal, index) => {
+      const volumeColor = usesSingleColor 
+        ? `rgba(136, 132, 216, ${baseAlpha})`
+        : getFilterColor(filterVal, index);
+      
+      return {
+        x: trendData.map(d => new Date(d.x)),
+        y: trendData.map(d => d[`volume_${filterVal}`]),
+        type: 'scatter',
+        mode: 'lines',
+        line: { color: volumeColor },
+        name: filterVal,
+        showlegend: !usesSingleColor,
+        hovertemplate: `<b>${filterVal}</b><br>Date: %{x}<br>Volume: %{y}<extra></extra>`
+      };
+    });
     
     return (
       <>
@@ -289,8 +329,8 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
               },
               height: 300,
               margin: { l: 60, r: 40, t: 40, b: 40 },
-              showlegend: true,
-              legend: { orientation: 'h', y: -0.2 },
+              showlegend: !usesSingleColor,
+              legend: usesSingleColor ? {} : { orientation: 'h', y: -0.2 },
             }}
             config={{ responsive: true, displayModeBar: true }}
             style={{ width: '100%', height: '300px' }}
@@ -309,8 +349,8 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
               yaxis: { title: 'Volume', fixedrange: true },
               height: 150,
               margin: { l: 60, r: 40, t: 40, b: 40 },
-              showlegend: true,
-              legend: { orientation: 'h', y: -0.4 }
+              showlegend: !usesSingleColor,
+              legend: usesSingleColor ? {} : { orientation: 'h', y: -0.4 }
             }}
             config={{ responsive: true, displayModeBar: true }}
             style={{ width: '100%', height: '150px' }}
@@ -475,17 +515,32 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
           </div>
           
           {filterType !== 'all' && (
-            <div className="filter-group">
+            <div className="filter-group searchable-filter">
               <label>Select value:</label>
-              <select 
-                value={filterValue} 
-                onChange={handleFilterValueChange}
-                disabled={filterType === 'all'}
-              >
-                {availableFilterValues.map(value => (
-                  <option key={value} value={value}>{value}</option>
-                ))}
-              </select>
+              <div className="search-container">
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={handleSearchChange}
+                  onFocus={() => setShowSuggestions(searchTerm.length > 0)}
+                  onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                  placeholder={filterValue === 'all' ? 'Search for a value...' : `Current: ${filterValue}`}
+                  disabled={filterType === 'all'}
+                />
+                {showSuggestions && filteredSuggestions.length > 0 && (
+                  <div className="suggestions-dropdown">
+                    {filteredSuggestions.map(value => (
+                      <div 
+                        key={value} 
+                        className="suggestion-item"
+                        onClick={() => handleSuggestionSelect(value)}
+                      >
+                        {value}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
