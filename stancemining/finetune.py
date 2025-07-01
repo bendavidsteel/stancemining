@@ -28,7 +28,7 @@ def load_split_data(dataset_name: str, split: str, task: str, generation_method:
     return stancemining.datasets.load_dataset(
         dataset_name, 
         split=split, 
-        group=(generation_method=='list') and (task=='topic-extraction'), 
+        group=(generation_method=='list') and (task in ['topic-extraction', 'claim-extraction']), 
         remove_synthetic_neutral=task!="stance-classification"
     )
 
@@ -58,6 +58,8 @@ def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_t
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-argument-detection"
     elif task == "topic-extraction":
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-topic-extraction"
+    elif task == "claim-extraction":
+        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-extraction"
     else:
         raise ValueError("Task not found")
     if isinstance(dataset_name, str):
@@ -90,6 +92,8 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
                 raise ValueError("Generation method not found")
         else:
             raise ValueError("Prompting method not found")
+    elif task == "claim-extraction":
+        file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -112,6 +116,8 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
             file_path = top_dir / 'models/stancemining/prompt_parent_stance_target.txt'
         else:
             raise ValueError("Prompting method not found")
+    elif task == "claim-extraction":
+        file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -258,9 +264,9 @@ class ChatTemplateTokenizer:
     
     def create_input_sequence_for_training(self, sample):
         text = sample['text']
-        if self.task == 'stance-classification' or (self.task == 'topic-extraction' and self.generation_method == 'beam'):
+        if self.task == 'stance-classification' or (self.task in ['topic-extraction', 'claim-extraction'] and self.generation_method == 'beam'):
             label = sample['labels'].strip()
-        elif self.task == 'topic-extraction' and self.generation_method == 'list':
+        elif self.task in ['topic-extraction', 'claim-extraction'] and self.generation_method == 'list':
             label = convert_list_to_quoted_str(sample['topic'])
         else:
             raise ValueError()
@@ -331,7 +337,7 @@ class DataProcessor:
         """Process dataframe into a format suitable for model input"""
         if self.model_config.task == "stance-classification":
             df = self._process_stance_classification(df, classification_method)
-        elif self.model_config.task == "topic-extraction":
+        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
             df = self._process_topic_extraction(df, generation_method)
         else:
             raise ValueError(f"Unknown task: {self.model_config.task}")
@@ -405,7 +411,7 @@ class DataProcessor:
                 },
                 batched=True
             )
-        elif self.model_config.task == "topic-extraction":
+        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
             return dataset.map(
                 lambda examples: {
                     "text": stance_target_examples_to_prompt(prompt, examples)
@@ -430,8 +436,8 @@ class DataProcessor:
                     dataset = dataset.map(tokenizer.create_input_sequence_for_training, num_proc=num_proc)
             else:
                 dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=num_proc)
-            
-        elif self.model_config.task == "topic-extraction":
+
+        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
             if train:
                 dataset = dataset.map(tokenizer.create_input_sequence_for_training, num_proc=num_proc)
             else:
@@ -452,7 +458,7 @@ class ModelEvaluator:
                 'precision': evaluate.load("precision"),
                 'recall': evaluate.load("recall")
             }
-        elif self.task == "topic-extraction":
+        elif self.task in ["topic-extraction", "claim-extraction"]:
             return {
                 'bertscore': evaluate.load("bertscore"),
                 'bleu': evaluate.load("bleu")
@@ -581,7 +587,7 @@ class ModelTrainer:
                 lora_kwargs['modules_to_save'] = ['score']
             elif self.model_config.classification_method == 'generation':
                 lora_kwargs['task_type'] = "CAUSAL_LM"
-        elif self.model_config.task == "topic-extraction":
+        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
             lora_kwargs['task_type'] = "CAUSAL_LM"
 
         if self.model_config.quantization is None:
@@ -752,7 +758,7 @@ class ModelTrainer:
                         state_str = f"Step {step},"
                         if self.model_config.task == 'stance-classification':
                             report_keys = ['f1_macro', 'precision', 'recall']
-                        elif self.model_config.task == 'topic-extraction':
+                        elif self.model_config.task in ['topic-extraction', 'claim-extraction']:
                             report_keys = ['bertscore_f1', 'bleu_f1']
                         for key in report_keys:
                             val = metrics[key]
@@ -837,7 +843,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwa
             )
         else:
             raise ValueError("Classification method not found")
-    elif task == "topic-extraction":
+    elif task in ["topic-extraction", "claim-extraction"]:
         if model_save_path:
             create_fn = peft.AutoPeftModelForCausalLM.from_pretrained
         else:
@@ -855,7 +861,7 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwa
             model.config.pad_token_id = tokenizer.pad_token_id
         elif classification_method == 'generation':
             model.generation_config.pad_token_id = tokenizer.pad_token_id
-    elif task == "topic-extraction":
+    elif task in ["topic-extraction", "claim-extraction"]:
         model.generation_config.pad_token_id = tokenizer.pad_token_id
         
     return model, tokenizer
@@ -956,7 +962,7 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
         prompt=prompt,
         parent_prompt=parent_prompt,
         classification_method=config['classification_method'] if task == 'stance-classification' else None,
-        generation_method=config['generation_method'] if task == 'topic-extraction' else None,
+        generation_method=config['generation_method'] if task in ['topic-extraction', 'claim-extraction'] else None,
     )
     
     data_config = DataConfig(

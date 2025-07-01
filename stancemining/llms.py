@@ -184,7 +184,7 @@ def get_vllm_predictions(task, df, config, verbose=False):
         prompt=prompt,
         parent_prompt=parent_prompt,
         classification_method=config['classification_method'] if task == 'stance-classification' else None,
-        generation_method=config['generation_method'] if task == 'topic-extraction' else None,
+        generation_method=config['generation_method'] if task in ['topic-extraction', 'claim-extraction'] else None,
     )
     
     data_config = DataConfig(
@@ -201,7 +201,7 @@ def get_vllm_predictions(task, df, config, verbose=False):
         raise NotImplementedError()
 
     llm_kwargs = {}
-    if task == 'topic-extraction' or (task == 'stance-classification' and model_config.classification_method == 'generation'):
+    if task in ['topic-extraction', 'claim-extraction'] or (task == 'stance-classification' and model_config.classification_method == 'generation'):
         llm_kwargs['task'] = 'generate'
         llm_kwargs['generation_config'] = 'auto'
 
@@ -257,14 +257,14 @@ def get_vllm_predictions(task, df, config, verbose=False):
 
     # greedy decoding
     sampling_params = vllm.SamplingParams(temperature=0.0)
-    if task == 'topic-extraction':
+    if task in ['topic-extraction', 'claim-extraction']:
         lora_request = vllm.lora.request.LoRARequest(
             f"{task}_adapter",
             1,
             adapter_path
         )
 
-    if task == 'topic-extraction' or (task == 'stance-classification' and model_config.classification_method == 'generation'):
+    if task in ['topic-extraction', 'claim-extraction'] or (task == 'stance-classification' and model_config.classification_method == 'generation'):
         outputs = llm.chat(messages=prompts, sampling_params=sampling_params, use_tqdm=verbose, lora_request=lora_request)
         predictions = [o.outputs[0].text for o in outputs]
         predictions = parse_list_completions(predictions)

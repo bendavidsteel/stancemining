@@ -37,6 +37,8 @@ def _main(config, args):
         project_name = 'stance-detection'
     elif args.task == "topic-extraction":
         project_name = 'stance-target-extraction'
+    elif args.task == 'claim-extraction':
+        project_name = 'claim-extraction'
     else:
         raise ValueError(f"Invalid task: {args.task}")
 
@@ -197,7 +199,7 @@ def _main(config, args):
             metadata['parent_prompt'] = model_config.parent_prompt
         if model_config.task == 'stance-classification':
             metadata['classification_method'] = model_config.classification_method
-        elif model_config.task == 'topic-extraction':
+        elif model_config.task in ['topic-extraction', 'claim-extraction']:
             metadata['generation_method'] = model_config.generation_method
         else:
             raise ValueError()

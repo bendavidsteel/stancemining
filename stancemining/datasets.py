@@ -172,6 +172,34 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
             'AGAINST': 'against',
             'NEITHER': 'neutral'
         }
+    elif name == 'romain_claims':
+        path = 'romain_claims/train-v1-valid.jsonl'
+        with open(os.path.join(datasets_path, path)) as f:
+            items = [json.loads(line) for line in f]
+
+        data = []
+        for item in items:
+            user_message = [msg for msg in item['messages'] if msg['role'] == 'user'][0]
+            assistant_message = [msg for msg in item['messages'] if msg['role'] == 'assistant'][0]
+            
+            # Extract original text from user message
+            user_content = user_message['content']
+            # Find the input text section
+            if '## Input Text\n' in user_content:
+                original_text = user_content.split('## Input Text\n')[1].strip()
+            else:
+                continue
+            
+            # Extract claims from JSON response
+            try:
+                response_json = json.loads(assistant_message['content'].split('```json\n')[1].split('\n```')[0])
+                claims = response_json['claims']
+                for claim in claims:
+                    data.append({'Text': original_text, 'Target': claim, 'Stance': None})
+            except:
+                continue
+        df = pl.DataFrame(data)
+        mapping = {}
     else:
         raise ValueError(f'Unknown dataset: {name}')
     
