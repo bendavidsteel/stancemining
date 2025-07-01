@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   ResponsiveContainer,
   Area,
@@ -37,6 +37,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
   const [panOffset, setPanOffset] = useState(0);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState(null);
+  const [panStartOffset, setPanStartOffset] = useState(0);
   const [fullDomain, setFullDomain] = useState(null);
   
   // Refs for charts to sync zoom
@@ -99,7 +100,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
   };
 
   // Calculate visible domain for chart (for zooming/panning)
-  const getVisibleDomain = useCallback(() => {
+  const visibleDomain = useMemo(() => {
     if (!fullDomain || zoomLevel === 1) {
       return fullDomain;
     }
@@ -133,8 +134,9 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
     if (zoomLevel > 1) {
       setIsPanning(true);
       setPanStart(e.clientX);
+      setPanStartOffset(panOffset);
     }
-  }, [zoomLevel]);
+  }, [zoomLevel, panOffset]);
 
   // Handle mouse move for panning
   const handleMouseMove = useCallback((e) => {
@@ -144,29 +146,25 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
       // Calculate pan amount based on domain range and chart width
       const domainRange = fullDomain[1] - fullDomain[0];
       const panRatio = deltaX / 500; // Approximate chart width factor
-      const panAmount = -panRatio * (domainRange / zoomLevel) * 0.5;
+      const totalPanAmount = -panRatio * (domainRange / zoomLevel) * 0.5;
       
-      // Update pan offset
-      setPanOffset(prevOffset => {
-        // Calculate new offset
-        const newOffset = prevOffset + panAmount;
-        
-        // Calculate boundaries to prevent panning too far
-        const maxPanRange = (domainRange * (1 - 1/zoomLevel)) / 2;
-        
-        // Clamp pan offset within bounds
-        return Math.max(-maxPanRange, Math.min(maxPanRange, newOffset));
-      });
+      // Calculate new offset from the original starting position
+      const newOffset = panStartOffset + totalPanAmount;
       
-      // Update pan start position
-      setPanStart(e.clientX);
+      // Calculate boundaries to prevent panning too far
+      const maxPanRange = (domainRange * (1 - 1/zoomLevel)) / 2;
+      
+      // Clamp pan offset within bounds and set directly
+      const clampedOffset = Math.max(-maxPanRange, Math.min(maxPanRange, newOffset));
+      setPanOffset(clampedOffset);
     }
-  }, [isPanning, panStart, fullDomain, zoomLevel]);
+  }, [isPanning, panStart, panStartOffset, fullDomain, zoomLevel]);
 
   // Handle mouse up to end panning
   const handleMouseUp = useCallback(() => {
     setIsPanning(false);
     setPanStart(null);
+    setPanStartOffset(0);
   }, []);
   
   // Reset zoom
@@ -245,11 +243,16 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             
             const formattedData = response.data.data.map(item => {
               const timestamp = new Date(item.createtime).getTime();
+              const trendMean = parseFloat(item.trend_mean) || 0;
+              const trendLower = parseFloat(item.trend_lower) || 0;
+              const trendUpper = parseFloat(item.trend_upper) || 0;
               return {
                 x: timestamp,
-                [`trend_mean_${value}`]: parseFloat(item.trend_mean) || 0,
-                [`trend_lower_${value}`]: parseFloat(item.trend_lower) || 0,
-                [`trend_upper_${value}`]: parseFloat(item.trend_upper) || 0,
+                [`trend_mean_${value}`]: trendMean,
+                [`trend_lower_${value}`]: trendLower,
+                [`trend_upper_${value}`]: trendUpper,
+                [`ci_base_${value}`]: trendLower,
+                [`ci_fill_${value}`]: trendUpper - trendLower,
                 [`volume_${value}`]: parseInt(item.volume) || 0
               };
             });
@@ -270,6 +273,8 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
               existingPoint[`trend_mean_${timeline.filterValue}`] = point[`trend_mean_${timeline.filterValue}`];
               existingPoint[`trend_lower_${timeline.filterValue}`] = point[`trend_lower_${timeline.filterValue}`];
               existingPoint[`trend_upper_${timeline.filterValue}`] = point[`trend_upper_${timeline.filterValue}`];
+              existingPoint[`ci_base_${timeline.filterValue}`] = point[`ci_base_${timeline.filterValue}`];
+              existingPoint[`ci_fill_${timeline.filterValue}`] = point[`ci_fill_${timeline.filterValue}`];
               existingPoint[`volume_${timeline.filterValue}`] = point[`volume_${timeline.filterValue}`];
             });
           });
@@ -297,11 +302,16 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
           
           const formattedData = response.data.data.map(item => {
             const timestamp = new Date(item.createtime).getTime();
+            const trendMean = parseFloat(item.trend_mean) || 0;
+            const trendLower = parseFloat(item.trend_lower) || 0;
+            const trendUpper = parseFloat(item.trend_upper) || 0;
             return {
               x: timestamp,
-              trend_mean: parseFloat(item.trend_mean) || 0,
-              trend_lower: parseFloat(item.trend_lower) || 0,
-              trend_upper: parseFloat(item.trend_upper) || 0,
+              trend_mean: trendMean,
+              trend_lower: trendLower,
+              trend_upper: trendUpper,
+              ci_base: trendLower,
+              ci_fill: trendUpper - trendLower,
               volume: parseInt(item.volume) || 0
             };
           });
@@ -380,6 +390,10 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
       const filterVal = name.replace('trend_upper_', '');
       return [value !== undefined ? value.toFixed(2) : 'N/A', `Upper CI (${filterVal})`];
     }
+    if (name.startsWith('ci_base_') || name.startsWith('ci_fill_')) {
+      // Hide these computed fields from tooltip
+      return null;
+    }
     if (name.startsWith('volume_')) {
       const filterVal = name.replace('volume_', '');
       return [value !== undefined ? value : 'N/A', `Volume (${filterVal})`];
@@ -389,7 +403,6 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
 
   // Render multiple timelines chart with confidence intervals
   const renderMultipleTimelinesChart = () => {
-    const visibleDomain = getVisibleDomain();
     
     return (
       <>
@@ -430,20 +443,54 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
                 return (
                   <React.Fragment key={filterVal}>
                     <defs>
-                      <linearGradient id={areaId} x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={color} stopOpacity={0.2}/>
-                        <stop offset="95%" stopColor={color} stopOpacity={0.1}/>
-                      </linearGradient>
+                      <radialGradient id={areaId} cx="50%" cy="50%" r="50%">
+                        <stop offset="0%" stopColor={color} stopOpacity={0.8}/>
+                        <stop offset="70%" stopColor={color} stopOpacity={0.4}/>
+                        <stop offset="100%" stopColor={color} stopOpacity={0.1}/>
+                      </radialGradient>
                     </defs>
                     
                     <Area 
-                      dataKey={`trend_lower_${filterVal}`}
-                      dataKey1={`trend_upper_${filterVal}`}
+                      dataKey={`ci_base_${filterVal}`}
+                      stackId={`confidence_${filterVal}`}
                       stroke="none"
-                      fill={`url(#${areaId})`}
-                      fillOpacity={0.3}
+                      fill="transparent"
+                      name={`CI Base (${filterVal})`}
+                      activeDot={false}
+                    />
+                    
+                    <Area 
+                      dataKey={`ci_fill_${filterVal}`}
+                      stackId={`confidence_${filterVal}`}
+                      stroke="none"
+                      fill={color}
+                      fillOpacity={0.2}
                       name={`CI (${filterVal})`}
                       activeDot={false}
+                    />
+                    
+                    <Line 
+                      type="monotone" 
+                      dataKey={`trend_lower_${filterVal}`}
+                      name={`Lower CI (${filterVal})`}
+                      stroke={color}
+                      strokeWidth={1}
+                      strokeDasharray="5 5"
+                      dot={false}
+                      activeDot={false}
+                      connectNulls={true}
+                    />
+                    
+                    <Line 
+                      type="monotone" 
+                      dataKey={`trend_upper_${filterVal}`}
+                      name={`Upper CI (${filterVal})`}
+                      stroke={color}
+                      strokeWidth={1}
+                      strokeDasharray="5 5"
+                      dot={false}
+                      activeDot={false}
+                      connectNulls={true}
                     />
                     
                     <Line 
@@ -502,7 +549,6 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
 
   // Render single timeline chart
   const renderSingleTimelineChart = () => {
-    const visibleDomain = getVisibleDomain();
     
     return (
       <>
@@ -533,35 +579,61 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
                 labelFormatter={formatTooltipDate}
                 formatter={(value, name) => {
                   if (name === 'trend_mean') return [value.toFixed(2), 'Stance'];
+                  if (name === 'trend_lower') return [value.toFixed(2), 'Lower CI'];
+                  if (name === 'trend_upper') return [value.toFixed(2), 'Upper CI'];
+                  if (name === 'CI Base' || name === 'Confidence Interval') return null;
                   return [value, name];
                 }}
               />
               <ReferenceLine y={0} stroke="#666" strokeDasharray="3 3" />
               
               <defs>
-                <linearGradient id="colorConfidence" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#8884d8" stopOpacity={0.2}/>
-                  <stop offset="95%" stopColor="#8884d8" stopOpacity={0.1}/>
-                </linearGradient>
+                <radialGradient id="colorConfidence" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stopColor="#8884d8" stopOpacity={0.8}/>
+                  <stop offset="70%" stopColor="#8884d8" stopOpacity={0.4}/>
+                  <stop offset="100%" stopColor="#8884d8" stopOpacity={0.1}/>
+                </radialGradient>
               </defs>
               
               <Area 
                 type="monotone" 
-                dataKey="trend_lower"
+                dataKey="ci_base"
+                stackId="confidence"
                 stroke="none"
-                fillOpacity={1}
-                fill="url(#colorConfidence)"
-                name="Lower bound"
-                stackId="1"
+                fill="transparent"
+                name="CI Base"
               />
+              
               <Area 
                 type="monotone" 
-                dataKey="trend_upper"
+                dataKey="ci_fill"
+                stackId="confidence"
                 stroke="none"
-                fillOpacity={1}
-                fill="url(#colorConfidence)"
-                name="Upper bound"
-                stackId="2"
+                fillOpacity={0.3}
+                fill="#8884d8"
+                name="Confidence Interval"
+              />
+              
+              <Line 
+                type="monotone" 
+                dataKey="trend_lower"
+                stroke="#8884d8" 
+                strokeWidth={1}
+                strokeDasharray="5 5"
+                dot={false}
+                activeDot={false}
+                name="Lower CI"
+              />
+              
+              <Line 
+                type="monotone" 
+                dataKey="trend_upper"
+                stroke="#8884d8" 
+                strokeWidth={1}
+                strokeDasharray="5 5"
+                dot={false}
+                activeDot={false}
+                name="Upper CI"
               />
               
               <Line 
@@ -710,7 +782,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
         ref={chartContainerRef} 
         className="charts-container"
         onMouseDown={handleMouseDown}
-        style={{ cursor: isZoomed ? 'grab' : 'default' }}
+        style={{ cursor: isPanning ? 'grabbing' : (isZoomed ? 'grab' : 'default') }}
       >
         {showingMultipleTimelines ? 
           renderMultipleTimelinesChart() : 
