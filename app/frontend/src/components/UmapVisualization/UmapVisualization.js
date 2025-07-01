@@ -1,7 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import DeckGL from '@deck.gl/react';
-import { ScatterplotLayer } from '@deck.gl/layers';
+import Plot from 'react-plotly.js';
 import './UmapVisualization.css';
 import { getUmapData } from '../../services/api';
 import { formatNumber } from '../../utils/formatting';
@@ -14,18 +13,26 @@ const UmapVisualization = () => {
   const [colorBy, setColorBy] = useState('avg_stance');
   const [sizeBy, setSizeBy] = useState('count');
   const [filterValue, setFilterValue] = useState('');
-  const [tooltip, setTooltip] = useState({
-    visible: false,
-    x: 0,
-    y: 0,
-    target: null
-  });
-  const [viewState, setViewState] = useState({
-    target: [0, 0, 0],
-    zoom: 0
-  });
+  
   
   const navigate = useNavigate();
+  
+  // Color mappings
+  const platformColors = {
+    'twitter': '#1da1f2',
+    'instagram': '#c32aa3',
+    'tiktok': '#000000'
+  };
+  
+  const partyColors = {
+    'Conservative': '#0000ff',
+    'Liberal': '#ff0000',
+    'NDP': '#ff8c00',
+    'Green': '#00ff00',
+    'Bloc': '#6495ed',
+    'PPC': '#800080',
+    'None': '#aaaaaa'
+  };
   
   // Load UMAP data
   useEffect(() => {
@@ -51,15 +58,16 @@ const UmapVisualization = () => {
   }, []);
   
   // Filter data based on search input
-  const filteredData = useCallback(() => {
+  const filteredData = useMemo(() => {
     if (!data.length) return [];
     if (!filterValue.trim()) return data;
     
     const searchTerm = filterValue.toLowerCase();
     return data.filter(item => 
-      item.Target.toLowerCase().includes(searchTerm)
+      item && item.Target && item.Target.toLowerCase().includes(searchTerm)
     );
   }, [data, filterValue]);
+  
   
   // Calculate color scale for points
   const getColor = useCallback((item) => {
@@ -87,116 +95,82 @@ const UmapVisualization = () => {
     }
     
     if (colorBy === 'top_platform') {
-      // Different color for each platform
-      const platformColors = {
-        'twitter': '#1da1f2',
-        'instagram': '#c32aa3',
-        'tiktok': '#000000'
-      };
       return platformColors[item.top_platform] || '#aaaaaa';
     }
     
     if (colorBy === 'top_party') {
-      // Different color for each party
-      const partyColors = {
-        'Conservative': '#0000ff',
-        'Liberal': '#ff0000',
-        'NDP': '#ff8c00',
-        'Green': '#00ff00',
-        'Bloc': '#6495ed',
-        'PPC': '#800080',
-        'None': '#aaaaaa'
-      };
       return partyColors[item.top_party] || '#aaaaaa';
     }
     
     return '#aaaaaa';
   }, [colorBy]);
   
-  // Calculate point size
-  const getPointSize = useCallback((item) => {
-    if (!item || typeof item[sizeBy] === 'undefined') return 5;
+  // Calculate point size for Plotly
+  const getPointSize = (item) => {
+    if (!item || typeof item[sizeBy] === 'undefined') return 8;
     
-    // Base size on the selected metric
     if (sizeBy === 'count') {
       const count = item.count || 0;
-      return Math.max(3, Math.min(15, 3 + Math.sqrt(count) / 10));
+      return Math.max(4, Math.min(20, 4 + Math.sqrt(count) / 5));
     }
     
-    return 5; // Default size
-  }, [sizeBy]);
-  
-  // Update view state when data changes
-  useEffect(() => {
-    if (loading || error || !data.length) return;
-    
-    const filtered = filteredData();
-    if (!filtered.length) return;
-    
-    // Calculate bounds for initial view
-    const xValues = filtered.map(d => d.x);
-    const yValues = filtered.map(d => d.y);
-    const xMin = Math.min(...xValues);
-    const xMax = Math.max(...xValues);
-    const yMin = Math.min(...yValues);
-    const yMax = Math.max(...yValues);
-    
-    const centerX = (xMin + xMax) / 2;
-    const centerY = (yMin + yMax) / 2;
-    const rangeX = xMax - xMin;
-    const rangeY = yMax - yMin;
-    const maxRange = Math.max(rangeX, rangeY);
-    
-    setViewState({
-      target: [centerX, centerY, 0],
-      zoom: Math.log2(600 / maxRange) - 1
-    });
-  }, [data, loading, error, filteredData]);
-  
-  // Convert color string to RGB array
-  const hexToRgb = (hex) => {
-    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-    return result ? [
-      parseInt(result[1], 16),
-      parseInt(result[2], 16),
-      parseInt(result[3], 16)
-    ] : [170, 170, 170];
+    return 8;
   };
   
-  // Create deck.gl layers
-  const layers = [
-    new ScatterplotLayer({
-      id: 'umap-points',
-      data: filteredData(),
-      getPosition: d => [d.x, d.y],
-      getRadius: d => getPointSize(d) * 50,
-      getFillColor: d => {
-        const color = hexToRgb(getColor(d));
-        return selectedTarget === d.Target ? [...color, 255] : [...color, 200];
+  
+  
+  // Prepare data for Plotly
+  const plotlyData = useMemo(() => {
+    const x = [];
+    const y = [];
+    const colors = [];
+    const sizes = [];
+    const text = [];
+    const customdata = [];
+    
+    filteredData.forEach(item => {
+      x.push(parseFloat(item.x) || 0);
+      y.push(parseFloat(item.y) || 0);
+      colors.push(getColor(item));
+      sizes.push(getPointSize(item));
+      text.push(
+        `<b>${item.Target}</b><br>` +
+        `Count: ${item.count}<br>` +
+        `Avg. Stance: ${formatNumber(item.avg_stance)}<br>` +
+        `Polarization: ${formatNumber(item.stance_abs)}<br>` +
+        `Platform: ${item.top_platform}<br>` +
+        `Party: ${item.top_party}<br>` +
+        `<i>Click to view trend</i>`
+      );
+      customdata.push(item);
+    });
+    
+    return [{
+      x,
+      y,
+      mode: 'markers',
+      type: 'scatter',
+      marker: {
+        color: colors,
+        size: sizes,
+        line: {
+          color: filteredData.map(item => 
+            selectedTarget === item.Target ? '#000000' : 'rgba(0,0,0,0)'
+          ),
+          width: 2
+        },
+        opacity: 0.8
       },
-      getLineColor: d => selectedTarget === d.Target ? [0, 0, 0, 255] : [0, 0, 0, 0],
-      getLineWidth: d => selectedTarget === d.Target ? 20 : 0,
-      pickable: true,
-      onHover: (info) => {
-        if (info.object && info.x && info.y) {
-          setTooltip({
-            visible: true,
-            x: info.x,
-            y: info.y,
-            target: info.object
-          });
-        } else {
-          setTooltip(prev => ({ ...prev, visible: false }));
-        }
-      },
-      onClick: (info) => {
-        if (info.object) {
-          setSelectedTarget(info.object.Target);
-          navigate(`/?target=${encodeURIComponent(info.object.Target)}`);
-        }
+      text,
+      customdata,
+      hovertemplate: '%{text}<extra></extra>',
+      hoverlabel: {
+        bgcolor: 'rgba(255,255,255,0.95)',
+        bordercolor: '#ddd',
+        font: { size: 12 }
       }
-    })
-  ];
+    }];
+  }, [filteredData, selectedTarget, colorBy, sizeBy, getColor, getPointSize, formatNumber]);
   
   if (loading) {
     return <div className="umap-loading">Loading UMAP visualization...</div>;
@@ -216,10 +190,8 @@ const UmapVisualization = () => {
         <div className="umap-control-group">
           <label>Color by:</label>
           <select value={colorBy} onChange={(e) => setColorBy(e.target.value)}>
-            <option value="avg_stance">Average Stance</option>
+            <option value="mean_stance">Mean Stance</option>
             <option value="stance_abs">Polarization</option>
-            <option value="top_platform">Platform</option>
-            <option value="top_party">Party</option>
           </select>
         </div>
         
@@ -316,34 +288,53 @@ const UmapVisualization = () => {
       </div>
       
       <div className="umap-visualization">
-        <DeckGL
-          viewState={viewState}
-          onViewStateChange={({viewState}) => setViewState(viewState)}
-          controller={true}
-          layers={layers}
-          width="100%"
-          height={600}
+        <Plot
+          data={plotlyData}
+          layout={{
+            showlegend: false,
+            hovermode: 'closest',
+            xaxis: {
+              title: 'UMAP Dimension 1',
+              showgrid: true,
+              zeroline: false
+            },
+            yaxis: {
+              title: 'UMAP Dimension 2',
+              showgrid: true,
+              zeroline: false
+            },
+            plot_bgcolor: '#f9f9f9',
+            paper_bgcolor: 'white',
+            margin: { l: 50, r: 20, t: 20, b: 50 },
+            autosize: true
+          }}
+          style={{
+            width: '100%',
+            height: '600px'
+          }}
+          config={{
+            displayModeBar: true,
+            modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+            displaylogo: false,
+            toImageButtonOptions: {
+              format: 'png',
+              filename: 'umap_visualization',
+              height: 600,
+              width: 1000,
+              scale: 1
+            }
+          }}
+          onClick={(event) => {
+            if (event.points && event.points.length > 0) {
+              const point = event.points[0];
+              const item = point.customdata;
+              if (item) {
+                setSelectedTarget(item.Target);
+                navigate(`/?target=${encodeURIComponent(item.Target)}`);
+              }
+            }
+          }}
         />
-        
-        {tooltip.visible && tooltip.target && (
-          <div 
-            className="umap-tooltip" 
-            style={{ 
-              left: `${tooltip.x}px`, 
-              top: `${tooltip.y}px`,
-              position: 'absolute',
-              pointerEvents: 'none'
-            }}
-          >
-            <h4>{tooltip.target.Target}</h4>
-            <p>Count: {tooltip.target.count}</p>
-            <p>Avg. Stance: {formatNumber(tooltip.target.avg_stance)}</p>
-            <p>Polarization: {formatNumber(tooltip.target.stance_abs)}</p>
-            <p>Platform: {tooltip.target.top_platform}</p>
-            <p>Party: {tooltip.target.top_party}</p>
-            <p className="tooltip-hint">Click to view trend</p>
-          </div>
-        )}
       </div>
       
       <div className="umap-description">
