@@ -44,19 +44,17 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response && error.response.status === 401) {
-      // If unauthorized, clear token but don't redirect automatically
-      // This prevents potential redirect loops
-      deleteCookie('authToken');
+      // Check if auth is disabled
+      const skipAuth = process.env.REACT_APP_SKIP_AUTH === 'true' || process.env.AUTH_URL_PATH === undefined;
       
-      // If we're not already on the login page, we can redirect
-      if (!window.location.pathname.startsWith('/login')) {
-        // Get current path to redirect back after login
-        const currentPath = window.location.pathname + window.location.search;
-        const returnUrl = `?returnUrl=${encodeURIComponent(currentPath)}`;
-        
-        // Redirect to login page
-        window.location.href = `/login${returnUrl}`;
+      if (skipAuth) {
+        // If auth is disabled, just throw the error
+        return Promise.reject(error);
       }
+      
+      // If auth is enabled, clear token and let React Router handle navigation
+      deleteCookie('authToken');
+      console.log('Authentication token cleared due to 401 error');
     }
     return Promise.reject(error);
   }

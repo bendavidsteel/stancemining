@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import DeckGL from '@deck.gl/react';
+import { ScatterplotLayer } from '@deck.gl/layers';
 import './UmapVisualization.css';
 import { getUmapData } from '../../services/api';
 import { formatNumber } from '../../utils/formatting';
@@ -18,10 +20,12 @@ const UmapVisualization = () => {
     y: 0,
     target: null
   });
+  const [viewState, setViewState] = useState({
+    target: [0, 0, 0],
+    zoom: 0
+  });
   
   const navigate = useNavigate();
-  const svgRef = useRef(null);
-  const containerRef = useRef(null);
   
   // Load UMAP data
   useEffect(() => {
@@ -122,19 +126,14 @@ const UmapVisualization = () => {
     return 5; // Default size
   }, [sizeBy]);
   
-  // Render the visualization
+  // Update view state when data changes
   useEffect(() => {
     if (loading || error || !data.length) return;
     
     const filtered = filteredData();
     if (!filtered.length) return;
     
-    // Calculate bounds for scaling
-    const padding = 50;
-    const width = containerRef.current.clientWidth - padding * 2;
-    const height = containerRef.current.clientHeight - padding * 2;
-    
-    // Find min/max values for scaling
+    // Calculate bounds for initial view
     const xValues = filtered.map(d => d.x);
     const yValues = filtered.map(d => d.y);
     const xMin = Math.min(...xValues);
@@ -142,80 +141,62 @@ const UmapVisualization = () => {
     const yMin = Math.min(...yValues);
     const yMax = Math.max(...yValues);
     
-    // Scale functions
-    const scaleX = (x) => (
-      ((x - xMin) / (xMax - xMin)) * width + padding
-    );
+    const centerX = (xMin + xMax) / 2;
+    const centerY = (yMin + yMax) / 2;
+    const rangeX = xMax - xMin;
+    const rangeY = yMax - yMin;
+    const maxRange = Math.max(rangeX, rangeY);
     
-    const scaleY = (y) => (
-      ((y - yMin) / (yMax - yMin)) * height + padding
-    );
-    
-    // Clear the SVG
-    const svg = svgRef.current;
-    while (svg.firstChild) {
-      svg.removeChild(svg.firstChild);
-    }
-    
-    // Add points
-    filtered.forEach(item => {
-      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      const x = scaleX(item.x);
-      const y = scaleY(item.y);
-      const radius = getPointSize(item);
-      
-      circle.setAttribute('cx', x);
-      circle.setAttribute('cy', y);
-      circle.setAttribute('r', radius);
-      circle.setAttribute('fill', getColor(item));
-      circle.setAttribute('stroke', selectedTarget === item.Target ? '#000000' : 'none');
-      circle.setAttribute('stroke-width', selectedTarget === item.Target ? 2 : 0);
-      circle.setAttribute('data-target', item.Target);
-      
-      // Interactivity
-      circle.addEventListener('mouseenter', () => {
-        setTooltip({
-          visible: true,
-          x: x + radius + 5,
-          y: y,
-          target: item
-        });
-        circle.setAttribute('stroke', '#000000');
-        circle.setAttribute('stroke-width', 2);
-      });
-      
-      circle.addEventListener('mouseleave', () => {
-        setTooltip({
-          ...tooltip,
-          visible: false
-        });
-        if (selectedTarget !== item.Target) {
-          circle.setAttribute('stroke', 'none');
-          circle.setAttribute('stroke-width', 0);
-        }
-      });
-      
-      circle.addEventListener('click', () => {
-        setSelectedTarget(item.Target);
-        // Navigate to main tab with this target selected
-        navigate(`/?target=${encodeURIComponent(item.Target)}`);
-      });
-      
-      svg.appendChild(circle);
+    setViewState({
+      target: [centerX, centerY, 0],
+      zoom: Math.log2(600 / maxRange) - 1
     });
-    
-  }, [data, loading, error, filteredData, getColor, getPointSize, selectedTarget, tooltip, navigate]);
+  }, [data, loading, error, filteredData]);
   
-  // Handle resize
-  useEffect(() => {
-    const handleResize = () => {
-      // Trigger re-render on resize
-      setData([...data]);
-    };
-    
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [data]);
+  // Convert color string to RGB array
+  const hexToRgb = (hex) => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? [
+      parseInt(result[1], 16),
+      parseInt(result[2], 16),
+      parseInt(result[3], 16)
+    ] : [170, 170, 170];
+  };
+  
+  // Create deck.gl layers
+  const layers = [
+    new ScatterplotLayer({
+      id: 'umap-points',
+      data: filteredData(),
+      getPosition: d => [d.x, d.y],
+      getRadius: d => getPointSize(d) * 50,
+      getFillColor: d => {
+        const color = hexToRgb(getColor(d));
+        return selectedTarget === d.Target ? [...color, 255] : [...color, 200];
+      },
+      getLineColor: d => selectedTarget === d.Target ? [0, 0, 0, 255] : [0, 0, 0, 0],
+      getLineWidth: d => selectedTarget === d.Target ? 20 : 0,
+      pickable: true,
+      onHover: (info) => {
+        if (info.object && info.x && info.y) {
+          setTooltip({
+            visible: true,
+            x: info.x,
+            y: info.y,
+            target: info.object
+          });
+        } else {
+          setTooltip(prev => ({ ...prev, visible: false }));
+        }
+      },
+      onClick: (info) => {
+        if (info.object) {
+          setSelectedTarget(info.object.Target);
+          navigate(`/?target=${encodeURIComponent(info.object.Target)}`);
+        }
+      }
+    })
+  ];
   
   if (loading) {
     return <div className="umap-loading">Loading UMAP visualization...</div>;
@@ -230,7 +211,7 @@ const UmapVisualization = () => {
   }
   
   return (
-    <div className="umap-container" ref={containerRef}>
+    <div className="umap-container">
       <div className="umap-controls">
         <div className="umap-control-group">
           <label>Color by:</label>
@@ -335,14 +316,23 @@ const UmapVisualization = () => {
       </div>
       
       <div className="umap-visualization">
-        <svg ref={svgRef} width="100%" height="600"></svg>
+        <DeckGL
+          viewState={viewState}
+          onViewStateChange={({viewState}) => setViewState(viewState)}
+          controller={true}
+          layers={layers}
+          width="100%"
+          height={600}
+        />
         
         {tooltip.visible && tooltip.target && (
           <div 
             className="umap-tooltip" 
             style={{ 
               left: `${tooltip.x}px`, 
-              top: `${tooltip.y}px` 
+              top: `${tooltip.y}px`,
+              position: 'absolute',
+              pointerEvents: 'none'
             }}
           >
             <h4>{tooltip.target.Target}</h4>
