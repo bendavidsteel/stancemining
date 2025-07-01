@@ -2,10 +2,13 @@ services:
   backend:
     build: ./backend
     volumes:
-      - ${HOST_DATA_PATH:-./data}:/app/data
+      ${STANCE_DATA_PATH:-./data}: /app/data
     ports:
       - "5000:5000"
     environment:
-      - DATA_DIR_PATH=/app/data
+      AUTH_URL_PATH: ${STANCE_AUTH_URL}
+      DATA_DIR_PATH: /app/data
   frontend:
-    build: ./frontend
+    build: ./frontend,
+    environment:
+      AUTH_URL_PATH: ${STANCE_AUTH_URL}

@@ -1,9 +1,15 @@
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+import datetime
+import glob
 import os
+import logging
 import random
 import re
 import requests
+import secrets
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('stancemining')
 
 import numpy as np
 import polars as pl
@@ -34,12 +40,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Accept"],
     expose_headers=["Authorization"]
 )
-
-# Load environment variables
-EXTERNAL_API_BASE_URL = os.getenv("API_BASE_URL", "https://api.meoinsightshub.net")
-API_USERNAME = os.getenv("MEO_USERNAME")
-API_PASSWORD = os.getenv("MEO_PASSWORD")
-DATA_DIR_PATH = os.getenv('DATA_DIR_PATH')
 
 # Bearer token security
 security = HTTPBearer()
@@ -82,8 +82,6 @@ class RawDataPoint(BaseModel):
     document_text: str
     Stance: float
     createtime: str
-    platform: str
-    Party: str
 
 class SearchResponse(BaseModel):
     results: List[Target]
@@ -100,16 +98,12 @@ class UmapPoint(BaseModel):
     x: float
     y: float
     count: Optional[int] = None
-    avg_stance: Optional[float] = None
+    mean_stance: Optional[float] = None
     stance_std: Optional[float] = None
     stance_abs: Optional[float] = None
-    n_positive: Optional[int] = None
-    n_negative: Optional[int] = None
+    n_favor: Optional[int] = None
+    n_against: Optional[int] = None
     n_neutral: Optional[int] = None
-    top_platform: Optional[str] = None
-    top_party: Optional[str] = None
-    top_main_type: Optional[str] = None
-    secondary_targets: Optional[str] = None
 
 class UmapResponse(BaseModel):
     data: List[UmapPoint]
@@ -118,17 +112,23 @@ class UmapResponse(BaseModel):
 target_df = None
 all_trends_df = None
 target_embeddings_df = None
-unique_platforms = []
-unique_parties = []
 embedding_model = None
 nn_index = None
+
+def load_env_vars():
+    global STANCE_AUTH_URL_PATH, DATA_DIR_PATH
+    # Load environment variables
+    STANCE_AUTH_URL_PATH = os.getenv("AUTH_URL_PATH")
+    DATA_DIR_PATH = os.getenv('DATA_DIR_PATH')
+    if '~' in DATA_DIR_PATH:
+        DATA_DIR_PATH = os.path.expanduser(DATA_DIR_PATH)
 
 # --- Authentication Helper Functions ---
 def get_token(username: str, password: str):
     """Get authentication token from the external API"""
     try:
         res = requests.get(
-            f"{EXTERNAL_API_BASE_URL}/meologin", 
+            STANCE_AUTH_URL_PATH, 
             params={"username": username, "password": password}, 
             verify=True
         )
@@ -139,7 +139,7 @@ def get_token(username: str, password: str):
         token = res.json().get("access_token")
         return token
     except Exception as e:
-        print(f"Error getting token: {e}")
+        logger.error(f"Error getting token: {e}")
         return None
 
 def verify_token(token: str):
@@ -153,75 +153,23 @@ def verify_token(token: str):
             return True
         return False
     except Exception as e:
-        print(f"Error verifying token: {e}")
+        logger.error(f"Error verifying token: {e}")
         return False
     
-
-def process_data():
-    """Load and process the main data from files using efficient Polars operations"""
-    print("Loading and processing data files...")
-    # Load data with fewer columns
-    dir_path = './data/'
-    
-    # Collect all file paths first, then read them in a single operation
-    file_paths = [
-        os.path.join(dir_path, file) 
-        for file in os.listdir(dir_path)
-        if re.search(r'\d{4}_\d{1,2}_doc_targets_with_stance.parquet.zstd', file)
-    ]
-    
-    if not file_paths:
-        raise ValueError("No stance data files found in the data directory")
-    
-    # Use a scan to potentially improve memory usage
-    dfs = [pl.read_parquet(file_path) for file_path in file_paths]
-    
-    # Concatenate the scanned DataFrames
-    df = pl.concat(dfs, how='diagonal_relaxed')
-    
-    # Filter for consistent list lengths, then explode
-    df = (df
-          .filter(pl.col('Targets').list.len() == pl.col('Stances').list.len())
-          .explode(['Targets', 'Stances'])
-          .rename({'Targets': 'Target', 'Stances': 'Stance'})
-    )
-
-    # Get ordered list of all targets in a single pipeline
-    target_count_df = df.group_by('Target').agg(pl.count().alias('count')).sort('count', descending=True)
-    
-    # Get unique filter values in a single pipeline
-    filter_cols = os.environ['FILTER_COLUMNS'].split(',')
-    unique_values = (df
-        .select(filter_cols)
-        .unique()
-    )
-    # Save all processed data
-    os.makedirs('./data/precomputed', exist_ok=True)
-    
-    # Use optimized write options
-    write_options = {"compression": "zstd", "compression_level": 3}
-    
-    df.write_parquet('./data/precomputed/processed_stance_data.parquet.zstd', **write_options)
-    target_count_df.write_parquet('./data/precomputed/targets_list.parquet.zstd', **write_options)
-    
-    print(f"Processed {len(df)} records for {len(target_count_df)} targets")
-    return df, target_count_df
-
 
 def compute_target_embeddings(target_count_df: pl.DataFrame):
     """Compute embeddings for targets efficiently"""
     
-    embeddings_dir = './data/precomputed'
-    embeddings_path = f'{embeddings_dir}/target_embeddings.parquet.zstd'
+    embeddings_path = os.path.join(DATA_DIR_PATH, 'cache', 'target_embeddings.parquet.zstd')
     
     # Initialize embeddings dataframe
     embeddings_df = None
     
     # Load cached embeddings if they exist
     if os.path.exists(embeddings_path):
-        print(f"Loading cached embeddings from {embeddings_path}")
+        logger.info(f"Loading cached embeddings from {embeddings_path}")
         embeddings_df = pl.read_parquet(embeddings_path)
-        print(f"Loaded {len(embeddings_df)} cached embeddings")
+        logger.info(f"Loaded {len(embeddings_df)} cached embeddings")
     else:
         # Create empty dataframe if no cache exists
         embeddings_df = pl.DataFrame(schema={'Target': pl.Utf8, 'Embedding': pl.Array(pl.Float32, 384)})
@@ -244,10 +192,10 @@ def compute_target_embeddings(target_count_df: pl.DataFrame):
     
     # If we have targets that need embedding
     if missing_targets:
-        print(f"Computing embeddings for {len(missing_targets)} new targets...")
+        logger.info(f"Computing embeddings for {len(missing_targets)} new targets...")
         if isinstance(embedding_model, sentence_transformers.SentenceTransformer):
             new_embeddings = embedding_model.encode(missing_targets, show_progress_bar=True)
-        elif str(type(embedding_model)) == "<class 'vllm.LLM'>":
+        elif str(type(embedding_model)) == "<class 'vllm.entrypoints.llm.LLM'>":
             outputs = embedding_model.embed(missing_targets, use_tqdm=True)
             new_embeddings = np.stack([np.array(o.outputs.embedding) for o in outputs])
         else:
@@ -263,15 +211,15 @@ def compute_target_embeddings(target_count_df: pl.DataFrame):
         embeddings_df = pl.concat([embeddings_df, new_embeddings_df])
         
         # Save the complete embeddings
-        os.makedirs(embeddings_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(embeddings_path), exist_ok=True)
         embeddings_df.write_parquet(
             embeddings_path,
             compression="zstd"
         )
-        print(f"Updated target embeddings saved to {embeddings_path}")
+        logger.info(f"Updated target embeddings saved to {embeddings_path}")
     else:
-        print("All targets already have embeddings")
-    
+        logger.info("All targets already have embeddings")
+
     # Join embeddings back to the target_count_df
     result_df = target_count_df.join(
         embeddings_df,
@@ -279,85 +227,40 @@ def compute_target_embeddings(target_count_df: pl.DataFrame):
         how="left"
     )
     
-    return model, result_df
+    return result_df
 
-def calculate_stance_statistics(df, valid_targets: pl.DataFrame):
-    """Calculate average stance statistics for each target using efficient Polars operations"""
-    target_stats = []
-    
-    for target_info in valid_targets.to_dicts():
-        target_name = target_info['Target']
-        
-        # Filter data and calculate all statistics in one pipeline
-        target_df = df.filter(pl.col('Target') == target_name)
-        
-        if len(target_df) > 0:
-            # Calculate most metrics in a single aggregation
-            stats = (target_df
-                .select([
-                    pl.col('Stance').mean().alias('avg_stance'),
-                    pl.col('Stance').std().alias('stance_std'),
-                    pl.col('Stance').abs().mean().alias('stance_abs'),
-                    pl.when(pl.col('Stance') > 0.1).then(1).otherwise(0).sum().alias('n_positive'),
-                    pl.when(pl.col('Stance') < -0.1).then(1).otherwise(0).sum().alias('n_negative'),
-                    pl.count().alias('total_count')
-                ])
-                .with_columns(
-                    (pl.col('total_count') - pl.col('n_positive') - pl.col('n_negative')).alias('n_neutral')
-                )
-                .to_dicts()[0]
-            )
-            
-            # Get top values for categorical fields in one operation
-            top_values = {}
-            for field, name in [('platform', 'top_platform'), ('Party', 'top_party'), ('MainType', 'top_main_type')]:
-                # Get the most common value
-                top = target_df.group_by(field).count().sort('count', descending=True).head(1)
-                if len(top) > 0:
-                    top_values[name] = top[0, field]
-                else:
-                    top_values[name] = "Unknown"
-            
-            # Combine all metrics
-            target_stat = {
-                'Target': target_name,
-                'count': target_info.get('count', 0),
-                'avg_stance': float(stats['avg_stance']),
-                'stance_std': float(stats['stance_std']),
-                'stance_abs': float(stats['stance_abs']),
-                'n_positive': int(stats['n_positive']),
-                'n_negative': int(stats['n_negative']),
-                'n_neutral': int(stats['n_neutral']),
-                'top_platform': top_values['top_platform'],
-                'top_party': top_values['top_party'],
-                'top_main_type': top_values['top_main_type'],
-            }
-            
-            target_stats.append(target_stat)
-    
-    # Create dataframe and save in a single operation
-    target_stats_df = pl.DataFrame(target_stats)
-    target_stats_df.write_parquet('./data/precomputed/target_statistics.parquet.zstd', compression="zstd")
-    print(f"Saved stance statistics for {len(target_stats)} targets")
-    
-    return target_stats_df
 
-def compute_umap_embeddings(valid_targets_df, target_embeddings_df: pl.DataFrame):
+def compute_umap_embeddings(target_df: pl.DataFrame, target_embeddings_df: pl.DataFrame):
     """Compute UMAP embeddings for visualization with optimized memory usage"""
-    print("Computing UMAP embeddings...")
+
+    umap_path = os.path.join(DATA_DIR_PATH, 'cache', 'umap_embeddings.parquet.zstd')
+    # Check if UMAP embeddings already exist
+    if os.path.exists(umap_path):
+        logger.info(f"Loading cached UMAP embeddings from {umap_path}")
+        umap_df = pl.read_parquet(umap_path)
+        logger.info(f"Loaded {len(umap_df)} UMAP embeddings")
+        return umap_df
+
+    logger.info("Computing UMAP embeddings...")
     
     # Extract target names and get corresponding embeddings
-    valid_embeddings_df = valid_targets_df.join(target_embeddings_df, on='Target')
+    valid_embeddings_df = target_df.join(target_embeddings_df, on='Target')
     target_names = valid_embeddings_df['Target'].to_list()
     embeddings = valid_embeddings_df['Embedding'].to_numpy()
     
     # Set up UMAP with parameters suitable for visualization
-    reducer = umap.UMAP(
+    try:
+        from cuml.manifold.umap import UMAP
+    except ImportError:
+        logger.info("cuml not found, falling back to umap-learn")
+        from umap import UMAP
+    reducer = UMAP(
         n_components=2,
         n_neighbors=15,
         min_dist=0.1,
         metric='cosine',
-        random_state=42
+        random_state=42,
+        verbose=True
     )
     
     # Fit UMAP and transform the embeddings
@@ -372,23 +275,20 @@ def compute_umap_embeddings(valid_targets_df, target_embeddings_df: pl.DataFrame
     
     # Optimize the join operations
     cols_to_join = ['Target', 'count']
-    umap_df = umap_df.join(valid_targets_df.select(cols_to_join), on='Target', how='left')
+    umap_df = umap_df.join(target_df.select(cols_to_join), on='Target', how='left')
     
     # Add stance statistics in a single join operation
-    try:
-        stats_df = calculate_stance_statistics(df, valid_targets_df)
-        stats_cols = [col for col in stats_df.columns if col not in ['Target', 'count', 'secondary_targets']]
-        
-        umap_df = umap_df.join(
-            stats_df.select(['Target'] + stats_cols),
-            on='Target', how='left'
-        )
-    except Exception as e:
-        print(f"Warning: Could not add stance statistics to UMAP data: {e}")
+    umap_df = umap_df.join(
+        target_df,
+        on='Target', 
+        how='left'
+    )
+
     
+
     # Save UMAP embeddings
-    umap_df.write_parquet('./data/precomputed/umap_embeddings.parquet.zstd', compression="zstd")
-    print(f"UMAP embeddings saved to ./data/precomputed/umap_embeddings.parquet.zstd")
+    umap_df.write_parquet(umap_path, compression="zstd")
+    logger.info(f"UMAP embeddings saved to {umap_path}")
 
 
 async def authenticate_request(request: Request):
@@ -396,7 +296,7 @@ async def authenticate_request(request: Request):
     # Handle authentication (with development mode flexibility)
     try:
         # Check if we're in development mode with authentication skipping enabled
-        skip_auth = os.getenv("REACT_APP_SKIP_AUTH") == "true" and os.getenv("NODE_ENV") == "development"
+        skip_auth = os.getenv("REACT_APP_SKIP_AUTH") == "true" or STANCE_AUTH_URL_PATH is None
         if skip_auth:
             # Skip authentication in development mode if configured
             return User(username="dev-user")
@@ -415,7 +315,7 @@ async def authenticate_request(request: Request):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"Authentication error: {e}")
+        logger.error(f"Authentication error: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed",
@@ -444,52 +344,21 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     # to get user details
     return User(username="authenticated_user")
 
-# Alternative option to get current user with optional authentication for development
-async def get_current_user_flexible(request: Request):
-    """More flexible authentication handler that works with development mode"""
-    # Check if we're in development mode with auth skipping enabled
-    if os.getenv("NODE_ENV") == "development" and os.getenv("REACT_APP_SKIP_AUTH") == "true":
-        return User(username="dev-user")
-    
-    # Get the Authorization header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing authorization header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Extract the token
-    scheme, token = auth_header.split()
-    if scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication scheme",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    if not verify_token(token):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    return User(username="authenticated_user")
-
 # --- Authentication Routes ---
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     """Login endpoint that forwards authentication to the external API"""
-    token = get_token(form_data.username, form_data.password)
-    
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    if STANCE_AUTH_URL_PATH is not None:
+        token = get_token(form_data.username, form_data.password)
+        
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    else:
+        token = secrets.token_urlsafe()
     
     return {"access_token": token, "token_type": "bearer"}
 
@@ -505,40 +374,91 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 @app.on_event("startup")
 async def startup_event():
     """Load all precomputed data on startup"""
-    global target_df, all_trends_df, target_embeddings_df, unique_platforms, unique_parties, unique_main_types, embedding_model
+    global target_df, all_trends_df, target_embeddings_df, filter_types, embedding_model
     
-    print("Loading precomputed data...")
+    load_env_vars()
+
+    logger.info("Loading precomputed data...")
     
     try:
         # Initialize embedding model
-        print("Initialized semantic search model")
+        logger.info("Initialized semantic search model")
         embedding_model_name = 'sentence-transformers/all-MiniLM-L12-v2'
         try:
             import vllm
+
+            import torch
+            torch.cuda.init()
+
             embedding_model = vllm.LLM(model=embedding_model_name)
         except Exception:
             embedding_model = sentence_transformers.SentenceTransformer(embedding_model_name)
 
         # Load filtered targets list
-        target_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed/valid_targets_list.parquet.zstd'))
+        stance_dir_path = os.path.join(DATA_DIR_PATH, 'doc_stance')
+        if not os.path.exists(stance_dir_path):
+            raise FileNotFoundError(f"Stance data directory must be accessible at {stance_dir_path}")
+        stance_file_paths = glob.glob(os.path.join(stance_dir_path, '*.parquet.zstd'))
+        if len(stance_file_paths) == 0:
+            raise FileNotFoundError(f"No stance files found in {stance_dir_path}, some must be present.")
+        stance_df = pl.DataFrame({'Targets': [], 'Stances': []}, schema={'Targets': pl.List(pl.String), 'Stances': pl.List(pl.Int64)})
+        for stance_file_path in stance_file_paths:
+            try:
+                file_stance_df = pl.read_parquet(stance_file_path, columns=['Targets', 'Stances'])
+                stance_df = pl.concat([stance_df, file_stance_df])  
+            except Exception as ex:
+                logger.error(f"Error loading stance file {stance_file_path}: {ex}")
+        if len(stance_df) == 0:
+            raise ValueError("No stance data found in the provided directory")
+        # Compute target counts
+        target_df = stance_df.explode(['Targets', 'Stances'])\
+            .drop_nulls('Targets')\
+            .rename({'Targets': 'Target', 'Stances': 'Stance'})\
+            .group_by('Target')\
+            .agg([
+                pl.len().alias('count'), 
+                pl.col('Stance').mean().alias('mean_stance'),
+                pl.col('Stance').std().alias('stance_std'),
+                pl.col('Stance').abs().mean().alias('stance_abs'),
+                pl.when(pl.col('Stance') == 1).then(1).otherwise(0).sum().alias('n_favor'),
+                pl.when(pl.col('Stance') == -1).then(1).otherwise(0).sum().alias('n_against'),
+                pl.when(pl.col('Stance') == 0).then(1).otherwise(0).sum().alias('n_neutral')
+            ])
+            
+        target_df = target_df.filter(pl.col('count') > 2).sort('count', descending=True)
         
-        # Check if 'len' field exists and rename it to 'count' to match our model
-        if 'len' in target_df.columns and 'count' not in target_df.columns:
-            target_df = target_df.rename({'len': 'count'})
-
-        target_df = target_df.sort('count', descending=True)
-        
-        print(f"Loaded {len(target_df)} valid targets with ≥50 data points")
+        # TODO filter or remove this line
+        logger.info(f"Loaded {len(target_df)} valid targets with ≥3 data points")
         
         # Load trends data
-        all_trends_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed', 'all_targets_trends.parquet.zstd'))
-        print(f"Loaded unified trends dataframe with {len(all_trends_df)} rows")
-        
+        target_trends_dir_path = os.path.join(DATA_DIR_PATH, 'target_trends')
+        if not os.path.exists(target_trends_dir_path):
+            raise FileNotFoundError(f"Target trends directory must be accessible at {target_trends_dir_path}")
+        trend_file_paths = glob.glob(os.path.join(target_trends_dir_path, '*.parquet.zstd'))
+        if len(trend_file_paths) == 0:
+            raise FileNotFoundError(f"No trend files found in {target_trends_dir_path}, some must be present for the app to work")
+        all_trends_df = None
+        for trend_file_path in trend_file_paths:
+            try:
+                file_df = pl.read_parquet(trend_file_path)
+                if 'trend_mean' not in file_df.columns:
+                    # dataframe is interpolator output, skip
+                    continue
+
+                if all_trends_df is None:
+                    all_trends_df = file_df
+                else:
+                    all_trends_df = pl.concat([all_trends_df, file_df])
+            except Exception as e:
+                logger.error(f"Error loading trend file {trend_file_path}: {e}")
+
+        logger.info(f"Loaded unified trends dataframe with {len(all_trends_df)} rows")
+
         # Note: Raw data will be loaded on-demand, not at startup
         
         # Load embeddings for semantic search
         target_embeddings_df = compute_target_embeddings(target_df)
-        print(f"Loaded embeddings for {len(target_embeddings_df)} targets")
+        logger.info(f"Loaded embeddings for {len(target_embeddings_df)} targets")
 
         # Convert dictionary to a list of embeddings in the same order as all_targets
         embeddings_list = target_df.join(target_embeddings_df, on='Target')['Embedding'].to_numpy()
@@ -547,33 +467,18 @@ async def startup_event():
             # Create the NNDescent index
             global nn_index
             nn_index = pynndescent.NNDescent(embeddings_list)
-            print("Initialized PyNNDescent index for fast similarity search")
+            logger.info("Initialized PyNNDescent index for fast similarity search")
         except Exception as ex:
-            print(f"PyNNDescent failed with error: {ex}")
-            
-        # Load unique platforms, parties, and main types
-        platforms_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed', 'platforms.parquet.zstd'))
-        parties_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed', 'parties.parquet.zstd'))
-        
-        unique_platforms = platforms_df['platform'].to_list()
-        unique_parties = parties_df['party'].to_list()
-        
-        # Load main types if available
-        try:
-            main_types_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed', 'main_types.parquet.zstd'))
-            unique_main_types = main_types_df['main_type'].to_list()
-            print(f"Loaded {len(unique_main_types)} main types")
-        except Exception as e:
-            print(f"Warning: Could not load main types: {e}")
-            unique_main_types = []
-        
-        print(f"Loaded {len(unique_platforms)} platforms and {len(unique_parties)} parties")
-        
+            logger.error(f"PyNNDescent failed with error: {ex}")
+
+        unique_filter_types = all_trends_df['filter_type'].unique().to_list()
+        logger.info(f"Loaded {len(unique_filter_types)} unique filter types: {unique_filter_types}")
+
         
         umap_df = compute_umap_embeddings(target_df, target_embeddings_df)
     
     except Exception as e:
-        print(f"Error during startup: {e}")
+        logger.error(f"Error during startup: {e}")
         # Re-raise to prevent the app from starting with incomplete data
         raise e
 
@@ -584,14 +489,17 @@ async def get_umap_data(request: Request):
     await authenticate_request(request)
     try:
         # Load UMAP embedding data
-        umap_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed', 'umap_embeddings.parquet.zstd'))
+        umap_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'cache', 'umap_embeddings.parquet.zstd'))
         
+        if len(umap_df) > 10000:
+            umap_df = umap_df.sort('count', descending=True).head(10000)
+
         # Convert to list of dicts for JSON response
         umap_data = umap_df.to_dicts()
         
         return {"data": umap_data}
     except Exception as e:
-        print(f"Error loading UMAP data: {e}")
+        logger.error(f"Error loading UMAP data: {e}")
         return {"data": []}
 
 # --- Protected Routes (require authentication) ---
@@ -701,6 +609,33 @@ async def get_target_trends(
     # Convert to list of dicts for JSON response
     return {"data": filtered_trends.to_dicts()}
 
+@app.get("/target/{target_name}/trends/batch")
+async def get_target_trends(
+    request: Request,
+    target_name: str, 
+    filter_type: str = Query(), 
+    filter_values: str = Query()
+):
+    """Get trend data for a specific target with optional filtering (requires authentication)"""
+    # Authenticate the request
+    await authenticate_request(request)
+    
+    # Filter precomputed data for this target
+    target_trends = all_trends_df.filter(pl.col('target') == target_name)
+    
+    if len(target_trends) == 0:
+        return {"data": []}
+    
+    filter_values = filter_values.split(',')
+    
+    # Apply additional filtering
+    filtered_trends = target_trends.filter((pl.col('filter_type') == filter_type) & (pl.col('filter_value').is_in(filter_values)))
+
+    filtered_trends = filtered_trends.drop_nans()
+    
+    # Convert to list of dicts for JSON response
+    return {"data": [{'data': df.to_dicts()} for df in filtered_trends.partition_by('filter_value')]}
+
 @app.get("/target/{target_name}/raw")
 async def get_target_raw_data(
     request: Request,
@@ -713,7 +648,7 @@ async def get_target_raw_data(
     await authenticate_request(request)
     try:
         # Load raw data for just this target on-demand
-        print(f"Loading raw data for target: {target_name}")
+        logger.info(f"Loading raw data for target: {target_name}")
         
         # Load the full raw data file
         # In a production environment, you might want to store individual target files 
@@ -727,20 +662,16 @@ async def get_target_raw_data(
             return {"data": []}
         
         # Apply additional filtering
-        if filter_type == "platform" and filter_value != "all":
-            target_raw = target_raw.filter(pl.col('platform') == filter_value)
-        elif filter_type == "party" and filter_value != "all":
-            target_raw = target_raw.filter(pl.col('Party') == filter_value)
-        elif filter_type == "main_type" and filter_value != "all":
-            target_raw = target_raw.filter(pl.col('MainType') == filter_value)
+        if filter_value != "all":
+            target_raw = target_raw.filter(pl.col(filter_type) == filter_value)
         
-        print(f"Returning {len(target_raw)} raw data points for {target_name}")
+        logger.info(f"Returning {len(target_raw)} raw data points for {target_name}")
         
         # Convert to list of dicts for JSON response
         return {"data": target_raw.to_dicts()}
     
     except Exception as e:
-        print(f"Error loading raw data for {target_name}: {e}")
+        logger.error(f"Error loading raw data for {target_name}: {e}")
         return {"data": [], "error": str(e)}
 
 @app.get("/filters")
@@ -748,11 +679,7 @@ async def get_filters(request: Request):
     """Get available filter options (requires authentication)"""
     # Authenticate the request
     await authenticate_request(request)
-    return {
-        "platforms": unique_platforms,
-        "parties": unique_parties,
-        "main_types": unique_main_types
-    }
+    return {filter_type: [] for filter_type in []}
 
 @app.get("/target/{target_name}/filters")
 async def get_target_filters(
@@ -764,23 +691,12 @@ async def get_target_filters(
     await authenticate_request(request)
     target_trends = all_trends_df.filter(pl.col('target') == target_name)
     
-    available_platforms = target_trends.filter(
-        pl.col('filter_type') == 'platform'
-    )['filter_value'].unique().to_list()
-    
-    available_parties = target_trends.filter(
-        pl.col('filter_type') == 'party'
-    )['filter_value'].unique().to_list()
-    
-    available_main_types = target_trends.filter(
-        pl.col('filter_type') == 'main_type'
-    )['filter_value'].unique().to_list()
-    
-    return {
-        "platforms": available_platforms,
-        "parties": available_parties,
-        "main_types": available_main_types
-    }
+    filters = target_trends.group_by('filter_type')\
+        .agg(pl.col('filter_value'))\
+        .with_columns(pl.col('filter_value').list.unique())\
+        .to_dicts()
+
+    return {f['filter_type']: f['filter_value'] for f in filters}
 
 if __name__ == "__main__":
     import uvicorn

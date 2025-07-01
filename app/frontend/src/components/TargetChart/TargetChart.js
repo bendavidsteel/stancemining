@@ -68,21 +68,19 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
         
         // Determine if we need to load multiple timelines or a single timeline
         if (filterType !== 'all' && filterValue === 'all' && availableFilterValues.length > 0) {
-          // Load multiple timelines for comparison
-          const promises = availableFilterValues.map(value => 
-            api.get(`/target/${targetName}/trends`, {
-              params: { filter_type: filterType, filter_value: value }
-            })
-          );
+          // Load all timelines in a single batch request
+          const response = await api.get(`/target/${targetName}/trends/batch`, {
+            params: { 
+              filter_type: filterType,
+              filter_values: availableFilterValues.join(',')
+            }
+          });
           
-          const responses = await Promise.all(promises);
-          
-          // Process responses and prepare data for chart
-          const allTimelines = responses.map((response, index) => {
-            const value = availableFilterValues[index];
+          // Process batch response and prepare data for chart
+          const allTimelines = Object.entries(response.data.data).map(([value, data], index) => {
             const color = getFilterColor(value, index);
             
-            const formattedData = response.data.data.map(item => {
+            const formattedData = data.data.map(item => {
               const timestamp = new Date(item.createtime).getTime();
               const trendMean = parseFloat(item.trend_mean) || 0;
               const trendLower = parseFloat(item.trend_lower) || 0;
