@@ -1,6 +1,5 @@
 import logging
 
-from cuml import DBSCAN
 from nltk.corpus import stopwords
 import numpy as np
 import polars as pl

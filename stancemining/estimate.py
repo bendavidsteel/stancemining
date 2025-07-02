@@ -201,7 +201,19 @@ def get_stance_normal(stance_df):
     
     return user_stances.item(), user_stance_vars.item()
 
-def get_stance_normal_for_target(target_df, min_count=5, filter_cols=[], verbose=False):
+def infer_stance_normal_for_target(target_df: pl.DataFrame, min_count: int = 5, filter_cols: List[str] = [], verbose: bool = False) -> pl.DataFrame:
+    """
+    Get the stance normal for a specific target DataFrame.
+
+    Args:
+        target_df (pl.DataFrame): DataFrame containing stance data for a specific target.
+        min_count (int): Minimum number of samples required to calculate stance.
+        filter_cols (List[str]): List of columns to filter by unique values.
+        verbose (bool): If True, print progress messages.
+
+    Returns:
+        pl.DataFrame: DataFrame containing the stance normal for the target.
+    """
     stance_values = []
 
     for filter_col in filter_cols:
@@ -227,14 +239,25 @@ def get_stance_normal_for_target(target_df, min_count=5, filter_cols=[], verbose
         'stance_var': all_stance_var
     })
 
-    return stance_values
+    return pl.DataFrame(stance_values)
 
-def get_stance_normal_for_all_targets(document_df, filter_cols=[], min_count=5, verbose=False) -> pl.DataFrame:
-    
+def infer_stance_normal_for_all_targets(document_df: pl.DataFrame, filter_cols: List[str] = [], min_count: int = 5, verbose: bool = False) -> pl.DataFrame:
+    """
+    Get the stance normal for all targets in the document DataFrame.
+
+    Args:
+        document_df (pl.DataFrame): DataFrame containing document data with stance information.
+        filter_cols (List[str]): List of columns to filter by unique values.
+        min_count (int): Minimum number of samples required to calculate stance.
+        verbose (bool): If True, print progress messages.
+
+    Returns:
+        pl.DataFrame: DataFrame containing the stance normal for all targets.
+    """
 
     targets_df, target_names = _document_to_targets(document_df, min_count)
 
-    all_value_stances = []
+    all_value_stance_df = None
     for target_name in target_names:
         target_df = targets_df.filter(pl.col('Target') == target_name)
         if target_df.shape[0] < min_count:
@@ -242,12 +265,14 @@ def get_stance_normal_for_all_targets(document_df, filter_cols=[], min_count=5, 
             continue
         if verbose:
             logger.info(f"Calculating stance for target '{target_name}' with {target_df.shape[0]} samples.")
-        target_value_stances = get_stance_normal_for_target(target_df, min_count=min_count, filter_cols=filter_cols, verbose=verbose)
-        all_value_stances += target_value_stances
+        target_value_stance_df = infer_stance_normal_for_target(target_df, min_count=min_count, filter_cols=filter_cols, verbose=verbose)
 
-    value_stance_df = pl.DataFrame(all_value_stances)
+        if all_value_stance_df is None:
+            all_value_stance_df = target_value_stance_df
+        else:
+            all_value_stance_df = pl.concat([all_value_stance_df, target_value_stance_df])
 
-    return value_stance_df
+    return all_value_stance_df
 
 class GPClassificationModel(gpytorch.models.ApproximateGP):
     def __init__(self, inducing_points, learn_inducing_locations=False, lengthscale_loc=1.0, lengthscale_scale=0.5, variational_dist='natural'):
@@ -1179,7 +1204,7 @@ def _calculate_trends_for_filtered_df(
 
     return trend_df, interpolation_outputs
 
-def get_trends_for_target(
+def infer_stance_trends_for_target(
         df: pl.DataFrame, 
         target_name, 
         filter_columns: List[str], 
@@ -1338,7 +1363,7 @@ def _document_to_targets(document_df: pl.DataFrame, min_count):
     
     return targets_df, target_names
 
-def get_trends_for_all_targets(
+def infer_stance_trends_for_all_targets(
         document_df: pl.DataFrame, 
         time_column: str = 'createtime', 
         filter_columns: List[str] = [], 
@@ -1380,7 +1405,7 @@ def get_trends_for_all_targets(
         logger.info(f"Processing primary target: {target_name}")
             
         # Process the target with grouping
-        target_trend_df, interpolation_outputs = get_trends_for_target(
+        target_trend_df, interpolation_outputs = infer_stance_trends_for_target(
             targets_df, 
             target_name, 
             filter_columns, 

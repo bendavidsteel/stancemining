@@ -19,6 +19,12 @@ def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) ->
     frequency represented by circle size.
     
     Args:
+        doc_target_df (pl.DataFrame): DataFrame containing document stance data with columns:
+            'Target', 'Stance' (numeric stance value), and optionally 'Targets' and 'Stances'.
+        top_num_targets (int): Number of top targets to visualize based on frequency.
+    
+    Returns:
+        plt.Figure: The figure containing the semantic map.
     """
     if 'Target' not in doc_target_df.columns and 'Targets' in doc_target_df.columns:
         doc_target_df = doc_target_df.explode(['Targets', 'Stances']).drop_nulls('Targets').rename({'Targets': 'Target', 'Stances': 'Stance'})
@@ -625,12 +631,21 @@ def plot_trend_map(
         filter_col: Optional[str] = None,
         max_stream_width=4.0,
         min_transition_count=4
-    ):
+    ) -> plt.Figure:
     """
     Plot the continuous stance stream diagram with enhanced features.
 
     Args:
-        document_df (pl.DataFrame): DataFrame containing document stance data with columns:
+        document_df (pl.DataFrame): DataFrame containing document stance data.
+        trend_df (pl.DataFrame): DataFrame containing trend data with columns: 'createtime', 'Target', 'Stance', 'volume', 'trend_mean'.
+        figsize (tuple): Size of the figure.
+        plot_stream_transitions (bool): Whether to plot significant user transitions.
+        filter_col (str, optional): Column to filter by (e.g., 'user_id'). If None, no filtering is applied.
+        max_stream_width (float): Maximum width of the streams.
+        min_transition_count (int): Minimum number of transitions to consider significant.
+
+    Returns:
+        plt.Figure: The figure containing the continuous stance stream diagram.
 
     """
     viz = StanceTrendDiagram(figsize=figsize)

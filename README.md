@@ -28,7 +28,7 @@ trend_df = stancemining.get_trends_for_all_targets(document_df)
 ```
 
 ## To deploy stancemining app
-If you need authentication for the app, you can set the environment variable `STANCE_AUTH_URL_PATH` to the URL of your authentication service (e.g., `/login`). That path must accept a POST request with a JSON body containing `username` and `password` fields, and return a JSON response with a `token` field.
+If you need authentication for the app, you can set the environment variable `STANCE_AUTH_URL_PATH` to the URL of your authentication service (e.g., `myauth.com/login`). That path must accept a POST request with a JSON body containing `username` and `password` fields, and return a JSON response with a `token` field.
 If you do not need authentication, you can leave the environment variable unset.
 ```
 STANCE_DATA_PATH=<your-data-path> STANCE_AUTH_URL_PATH=<your-auth-url/login> docker compose up -f ./app/compose.yaml

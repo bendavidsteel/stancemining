@@ -20,6 +20,24 @@ logger.addHandler(sh)
 logger.propagate = False
 
 class StanceMining:
+    """
+    Initialize the StanceMining class.
+
+    Args:
+        llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
+        model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
+        model_name (str): Name of the LLM model to use.
+        model_kwargs (dict): Additional keyword arguments for the LLM model.
+        tokenizer_kwargs (dict): Additional keyword arguments for the tokenizer.
+        stance_detection_finetune_kwargs (dict): Keyword arguments for the fine-tuned stance detection model.
+        stance_detection_model_kwargs (dict): Keyword arguments for stance detection model inference.
+        target_extraction_finetune_kwargs (dict): Keyword arguments for the fine-tuned target extraction model.
+        target_extraction_model_kwargs (dict): Keyword arguments for target extraction model inference.
+        embedding_model (str): Name of the embedding model to use for target extraction.
+        embedding_model_inference (str): Inference method for the embedding model, either 'vllm' or 'transformers'.
+        verbose (bool): Whether to enable verbose logging. Defaults to False.
+    """
+
     def __init__(
             self, 
             llm_method='finetuned',
@@ -35,16 +53,6 @@ class StanceMining:
             embedding_model_inference='vllm',
             verbose=False
         ):
-        """
-        Initialize the StanceMining class.
-
-        Args:
-            llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
-            model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
-            model_name (str): Name of the LLM model to use.
-            model_kwargs (dict): Additional keyword arguments for the LLM model.
-            
-        """
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
         self.llm_method = llm_method
         self.model_inference = model_inference
@@ -516,7 +524,27 @@ class StanceMining:
         return cluster_layer_labels, cluster_df
 
 
-    def get_base_targets(self, docs, embedding_model=None, text_column='text', parent_text_column='parent_text'):
+    def get_base_targets(
+            self, 
+            docs: Union[List[str], pl.DataFrame], 
+            embedding_model=None, 
+            text_column='text', 
+            parent_text_column='parent_text'
+        ) -> pl.DataFrame:
+        """
+        Generate stance targets from the given documents.
+        
+        Args:
+            docs (Union[List[str], pl.DataFrame]): List of documents or a DataFrame containing documents.
+            embedding_model: Embedding model to use for computing embeddings. If None, uses the default embedding model.
+            text_column (str): Name of the column containing the text in the DataFrame,
+                if `docs` is a DataFrame. Defaults to 'text'.
+            parent_text_column (str): Name of the column containing the parent text in the DataFrame
+                if `docs` is a DataFrame. Defaults to 'parent_text'.
+
+        Returns:
+            pl.DataFrame: DataFrame containing the documents with their stance targets.
+        """
         if embedding_model is None:
             embedding_model = self._get_embedding_model()
 
@@ -545,9 +573,26 @@ class StanceMining:
         
         return documents_df
 
-    
-    
-    def get_stance(self, document_df: pl.DataFrame, text_column='text', parent_text_column='parent_text') -> pl.DataFrame:
+
+    def get_stance(
+            self, 
+            document_df: pl.DataFrame, 
+            text_column='text', 
+            parent_text_column='parent_text'
+        ) -> pl.DataFrame:
+        """
+        Get stance classifications for the targets in the documents.
+
+        Args:
+            document_df (pl.DataFrame): DataFrame containing documents with 'Targets' column.
+            text_column (str): Name of the column containing the text in the DataFrame.
+                Defaults to 'text'.
+            parent_text_column (str): Name of the column containing the parent text in the DataFrame
+                Defaults to 'parent_text'.
+        
+        Returns:
+            pl.DataFrame: DataFrame containing the documents with their stance targets and classifications.
+        """
         if 'ID' not in document_df.columns:
             document_df = document_df.with_row_index(name='ID')
 
@@ -570,6 +615,7 @@ class StanceMining:
     def get_target_info(self):
         """
         Get information about the stance targets.
+        
         Returns:
             pl.DataFrame: DataFrame containing target information, including counts and topic associations.
         """
