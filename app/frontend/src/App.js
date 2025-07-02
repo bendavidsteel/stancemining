@@ -13,6 +13,7 @@ import './App.css';
 // Navigation component
 const Navbar = ({ onLogout }) => {
   const location = useLocation();
+  const { authEnabled } = useAuth();
   
   return (
     <nav className="App-navbar">
@@ -32,9 +33,11 @@ const Navbar = ({ onLogout }) => {
         </Link>
       </div>
       <div className="navbar-actions">
-        <button onClick={onLogout} className="logout-button">
-          Logout
-        </button>
+        {authEnabled && (
+          <button onClick={onLogout} className="logout-button">
+            Logout
+          </button>
+        )}
       </div>
     </nav>
   );

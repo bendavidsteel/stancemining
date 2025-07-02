@@ -1,6 +1,7 @@
 numpy<2.2
 bokeh
 sentence_transformers
+vllm
 pynndescent
 scikit-learn
 pandas

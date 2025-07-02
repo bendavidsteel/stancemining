@@ -10,23 +10,22 @@ export const AuthProvider = ({ children }) => {
     const [loading, setLoading] = useState(true);
     const [authenticated, setAuthenticated] = useState(false);
     
-    // Check if we should skip authentication in development
-    const skipAuth = process.env.REACT_APP_SKIP_AUTH === 'true';
-  
+    // Skip auth if explicitly disabled or no auth URL configured
+    const skipAuth = process.env.REACT_APP_SKIP_AUTH === 'true' || process.env.AUTH_URL_PATH === undefined;
+    
     useEffect(() => {
       const checkAuthStatus = async () => {
   setLoading(true);
   
-  // Skip auth check in development if enabled
-  if (skipAuth && process.env.NODE_ENV === 'development') {
-    console.log("Development mode: Skipping authentication");
+  if (skipAuth) {
+    console.log("Authentication disabled");
     setAuthenticated(true);
     setUser({ username: 'dev-user', full_name: 'Development User' });
     setLoading(false);
     return;
   }
   
-  // Normal authentication flow for production
+  // Normal authentication flow
   const authStatus = isAuthenticated();
   
   if (authStatus) {
@@ -36,13 +35,11 @@ export const AuthProvider = ({ children }) => {
         setUser(response.user);
         setAuthenticated(true);
       } else {
-        // Don't automatically redirect, just update the auth state
         setUser(null);
         setAuthenticated(false);
       }
     } catch (err) {
       console.error('Error fetching user data:', err);
-      // Don't automatically redirect, just update the auth state
       setUser(null);
       setAuthenticated(false);
     }
@@ -55,7 +52,7 @@ export const AuthProvider = ({ children }) => {
 };
       
       checkAuthStatus();
-    }, [skipAuth]);
+    }, []);
 
   // Function to update authentication status after login
   const handleLogin = async () => {
@@ -86,6 +83,7 @@ export const AuthProvider = ({ children }) => {
     user,
     loading,
     authenticated,
+    authEnabled: !skipAuth,
     login: handleLogin,
     logout: handleLogout
   };
