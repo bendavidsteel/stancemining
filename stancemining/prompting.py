@@ -203,16 +203,16 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
     # Stance Target Topic Generalization Prompt
     prompts = []
     for topic in topics:
-        repr_docs = topic['Representative_Docs']
-        keywords = topic['Representation']
+        repr_docs = topic['Exemplars']
+        keyphrases = topic['Keyphrases']
         repr_docs_s = ', '.join(f'"{d}"' for d in repr_docs)
-        keywords_s = ', '.join(f'"{k}"' for k in keywords)
+        keyphrases_s = ', '.join(f'"{k}"' for k in keyphrases)
         prompt = [
             "You are an expert at analyzing and categorizing topics.",
             f"""Your task is to generate a list of appropriately specific generalized stance targets that best represent a cluster of related stance targets.
 
             Instructions:
-            1. Review the provided stance targets and keywords that characterize the stance target cluster
+            1. Review the provided stance targets and keyphrases that characterize the stance target cluster
             2. Identify the common specific stance issues these targets relate to
             3. Generate 1-3 appropriately specific noun phrases that:
             - Are specific enough to meaningfully represent the stance being taken
@@ -223,7 +223,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: [list of stance targets]
-            Top keywords: [list of high tf-idf terms]
+            Top keyphrases: [list of high tf-idf terms]
 
             Output format:
             Generalized target: ["appropriately specific noun phrase 1", "appropriately specific noun phrase 2", "appropriately specific noun phrase 3"]
@@ -233,7 +233,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["EU vaccine passports", "mandatory covid shots", "provincial immunization requirements"]
-            Top keywords: ["mandatory", "requirement", "public health", "immunization", "vaccination"]
+            Top keyphrases: ["mandatory", "requirement", "public health", "immunization", "vaccination"]
 
             Output:
             Generalized target: ["mandatory healthcare worker vaccination", "cross-border vaccination verification", "regional immunization requirements"]
@@ -241,7 +241,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["London congestion charge", "Oslo car-free zones", "Paris emissions restrictions"]
-            Top keywords: ["emissions", "vehicles", "urban", "electric", "pollution"]
+            Top keyphrases: ["emissions", "electric vehicles", "urban", "pollution"]
 
             Output:
             Generalized target: ["urban vehicle restriction zones", "metropolitan emissions policies", "city center traffic regulations"]
@@ -249,15 +249,15 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["o canada", "canada #canada", "2/3 of canadians", "canada 🍁", "canada canadians"]
-            Top keywords: ["canadians", "canada", "canadas", "canadian", "canadianpolling", "screwed", "uscanada", "canadaus", "broken", "canadianace001"]
+            Top keyphrases: ["canadians", "canada", "canadas", "canadian", "canadianpolling", "screwed", "canadaus", "broken"]
 
             Output:
-            Generalized target: ["canada"]
-            Reasoning: The inputs are all basically just the stance target canada, so just output that. 
+            Generalized target: ["canada", "current state of canada"]
+            Reasoning: The inputs are all basically just the stance target canada, so output that and a related target.
 
             Input:
             Representative stance targets: ["content moderation", "online censorship", "platform guidelines"]
-            Top keywords: ["social media", "guidelines", "content", "moderation", "posts"]
+            Top keyphrases: ["social media", "guidelines", "content", "moderation", "posts"]
 
             Output:
             Generalized target: ["political content removal policies", "international platform regulations", "global speech moderation standards"]
@@ -265,7 +265,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["Mediterranean migration crisis", "Canadian immigration system", "Schengen border controls"]
-            Top keywords: ["migration", "borders", "refugees", "policy", "asylum"]
+            Top keyphrases: ["migration", "borders", "refugees", "policy", "asylum"]
 
             Output:
             Generalized target: ["refugee processing protocols", "international border management", "asylum application systems"]
@@ -273,7 +273,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["Ontario teacher contracts", "Ontario education spending", "Ontario school funding"]
-            Top keywords: ["education", "funding", "teachers", "schools", "budget"]
+            Top keyphrases: ["education", "funding", "teachers", "schools", "budget"]
 
             Output:
             Generalized target: ["Ontario public education funding models", "Ontario teacher collective agreements", "Ontario classroom resource availability"]
@@ -281,7 +281,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["😂😂😂", "@JohnDoe2023", "@RealUserXYZ", "lol omg"]
-            Top keywords: ["lol", "omg", "user", "haha"]
+            Top keyphrases: ["lol", "omg", "user", "haha"]
 
             Output:
             Generalized target: []
@@ -289,7 +289,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["just saying", "idk maybe", "whatever", "cool story"]
-            Top keywords: ["just", "maybe", "whatever", "cool", "story"]
+            Top keyphrases: ["just", "maybe", "whatever", "cool", "story"]
 
             Output:
             Generalized target: []
@@ -297,15 +297,15 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
 
             Input:
             Representative stance targets: ["ndp leader jagmeet singh", "jagmeet singh and j", "the jagmeet singh", "jagmeet singh", "@jagmeet singh"]
-            Top keywords: ["singh", "khan", "dr", "jagmeet", "mohammed", "manana", "khans", "abdulla", "abu", "nan"]
+            Top keyphrases: ["jagmeet singh", "khan", "dr", "jagmeet", "mohammed", "manana", "khans", "abdulla", "abu", "nan"]
 
             Output:
-            Generalized target: ["jagmeet singh"]
-            Reasoning: The inputs are all about one person, the common stance target is jagmeet singh.
+            Generalized target: ["jagmeet singh", "jagmeet singh's policies", "jagmeet singh's leadership"]
+            Reasoning: The inputs are all about one person, so the outputs are all about that person, but generalized to include his policies and leadership style.
 
             Input:
-            Representative stance targets: ["rent control rent", "rent housing", "rent de l\'écart", "rent", "rent room rental rental"]
-            Top keywords: ["rent", "rental", "landlord", "tenant", "lease", "renters", "landlords", "shortterm", "rentals", "tenants"]
+            Representative stance targets: ["rent control", "rent housing", "rent de l\'écart", "rent"]
+            Top keyphrases: ["rent control", "rental", "landlord", "tenant", "lease", "renters", "landlords", "shortterm", "rentals", "tenants"]
 
             Output:
             Generalized target: ["rent control", "rent increase caps", "renter protections"]
@@ -313,7 +313,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
             
             Input:
             Representative stance targets: ["israeli", "israeli israeli,", "israeli israeli israeli", "israeli israeli", "israeli israel"]
-            Top keywords: ["israeli", "palestinian", "israel", "gaza", "palestine", "israels", "palestinians", "conflict", "war", "attacks"]
+            Top keyphrases: ["israeli", "palestinian", "israel", "gaza", "palestine", "israels", "palestinians", "conflict", "gaza war", "attacks"]
 
             Output:
             Generalized target: ["state of israel", "ceasefire in palestine", "ceasefire in gaza"]
@@ -321,7 +321,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
             
             Input:
             Representative stance targets: [{repr_docs_s}]
-            Top keywords: [{keywords_s}]
+            Top keyphrases: [{keyphrases_s}]
 
             Output:
             Generalized target: """

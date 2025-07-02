@@ -6,11 +6,11 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from sentence_transformers import SentenceTransformer
+import toponymy.embedding_wrappers
 from tqdm import tqdm
 import torch
 
 from stancemining import llms, finetune, prompting, utils
-from stancemining.ngram_gen import NGramGeneration
 
 logger = logging.getLogger('StanceMining')
 logger.setLevel('WARNING')
@@ -32,7 +32,7 @@ class StanceMining:
             stance_detection_model_kwargs={},
             target_extraction_finetune_kwargs={},
             target_extraction_model_kwargs={},
-            embedding_model='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
+            embedding_model='intfloat/multilingual-e5-small',
             embedding_model_inference='vllm',
             get_stance=True,
             verbose=False,
@@ -92,8 +92,7 @@ class StanceMining:
 
     def _get_embedding_model(self):
         if self.embedding_model_inference == 'vllm':
-            import vllm
-            model = vllm.LLM(model=self.embedding_model)
+            model = toponymy.embedding_wrappers.VLLMEmbedder(model=self.embedding_model)
         elif self.embedding_model_inference == 'transformers':
             model = SentenceTransformer(self.embedding_model)
         else:
@@ -111,13 +110,7 @@ class StanceMining:
         document_df = document_df.join(self.embedding_cache_df, on='text', how='left', maintain_order='left')
         missing_docs = document_df.unique('text').filter(pl.col('embedding').is_null())
         if len(missing_docs) > 0:
-            if self.embedding_model_inference == 'vllm':
-                outputs = model.embed(missing_docs['text'].to_list(), use_tqdm=self.verbose)
-                new_embeddings = np.stack([np.array(o.outputs.embedding) for o in outputs])
-            elif self.embedding_model_inference == 'transformers':
-                new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose)
-            else:
-                raise ValueError(f"Embedding model inference method '{self.embedding_model_inference}' not implemented")
+            new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose)
             
             missing_docs = missing_docs.with_columns(pl.Series(name='embedding', values=new_embeddings))
             # cache embeddings
@@ -137,7 +130,12 @@ class StanceMining:
             targets = prompting.ask_llm_zero_shot_stance_target(self.generator, docs, {'num_samples': num_samples})
         elif self.llm_method == 'finetuned':
             df = pl.DataFrame({'Text': docs})
-            
+
+            # TODO add guided decoding to generate list
+            sampling_params = {
+                'repetition_penalty': 1.2
+            }
+
             if self.model_inference == 'transformers':
                 results = finetune.get_predictions("topic-extraction", df, self.target_extraction_finetune_kwargs, model_kwargs=self.target_extraction_model_kwargs)
             elif self.model_inference == 'vllm':
@@ -241,7 +239,10 @@ class StanceMining:
     def _topic_model(self, targets, embeddings, embedding_model, kwargs):
         if 'show_progress_bars' not in kwargs:
             kwargs['show_progress_bars'] = self.verbose
-        clusterer = toponymy.ToponymyClusterer(min_clusters=4)
+        clusterer = toponymy.ToponymyClusterer(
+            min_clusters=2,
+            verbose=self.verbose
+        )
         topic_model = toponymy.Toponymy(
             llm_wrapper=None,
             text_embedding_model=embedding_model,
@@ -250,12 +251,19 @@ class StanceMining:
             corpus_description="document corpus",
             **kwargs
         )
+        umap_kwargs = {
+            "n_neighbors": 15,
+            "min_dist": 0.1,
+            "n_components": 10, # higher dimensionality for more sparse clusters
+            "metric": "cosine"
+        }
         try:
             from cuml.manifold.umap import UMAP
-            clusterable_vectors = UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric='cosine').fit_transform(embeddings)
+            umap_model = UMAP(**umap_kwargs)
         except ImportError:
             from umap import UMAP
-            clusterable_vectors = UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric='cosine').fit_transform(embeddings)
+            umap_model = UMAP(**umap_kwargs)
+        clusterable_vectors = umap_model.fit_transform(embeddings)
 
         # running toponymy fit method except topic naming step which we do ourselves
         exemplar_method = "central"
@@ -270,7 +278,7 @@ class StanceMining:
         )
 
         # Initialize other data structures
-        self.topic_names_ = [[]] * len(topic_model.cluster_layers_)
+        topic_model.topic_names_ = [[]] * len(topic_model.cluster_layers_)
         topic_model.topic_name_vectors_ = [np.array([])] * len(topic_model.cluster_layers_)
         detail_levels = np.linspace(
             topic_model.lowest_detail_level,
@@ -323,6 +331,9 @@ class StanceMining:
                 show_progress_bar=topic_model.show_progress_bars,
             )
 
+        cluster_layer_labels = []
+        clusters = []
+        num_prev_clusters = 0
         # Iterate through the layers and build the topic names
         for i, layer in tqdm(
             enumerate(topic_model.cluster_layers_),
@@ -346,21 +357,17 @@ class StanceMining:
                 method=keyphrase_method,
             )
 
-            if i > 0:
-                if not hasattr(topic_model.cluster_layers_[0], "topic_name_embeddings"):
-                    topic_model.cluster_layers_[0].embed_topic_names(topic_model.embedding_model)
+            cluster_layer_labels.append(layer.cluster_labels + num_prev_clusters)
+            for j, (exemplars, keyphrases) in enumerate(zip(layer.exemplars, layer.keyphrases)):
+                clusters.append({
+                    'Cluster': j + num_prev_clusters,
+                    'Exemplars': exemplars,
+                    'Keyphrases': keyphrases,
+                })
+            num_prev_clusters += len(layer.exemplars)
+        cluster_df = pl.DataFrame(clusters)
 
-                layer.make_subtopics(
-                    topic_model.topic_names_[0],
-                    topic_model.cluster_layers_[0].cluster_labels,
-                    topic_model.cluster_layers_[0].topic_name_embeddings,
-                    topic_model.embedding_model,
-                    method=subtopic_method,
-                )
-
-            topic_model.topic_name_vectors_[i] = layer.make_topic_name_vector()
-
-        return topic_model.topic_name_vectors_
+        return cluster_layer_labels, cluster_df
 
 
     def get_base_targets(self, docs, embedding_model=None, text_column='text', parent_text_column='parent_text'):
@@ -416,43 +423,45 @@ class StanceMining:
             document_df = self.get_base_targets(docs, embedding_model=embed_model, text_column=text_column, parent_text_column=parent_text_column)
 
             # cluster initial stance targets
-            base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls()[['Targets']]
+            base_target_df = document_df.explode('Targets').rename({'Targets':'Target'}).unique('Target').drop_nulls()[['Target']]
         else:
             assert isinstance(document_df.schema['Targets'], pl.List), "Targets column must be a list of strings"
-            base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls('Targets')[['Targets']]
-        
+            base_target_df = document_df.explode('Targets').rename({'Targets':'Target'}).unique('Target').drop_nulls('Target')[['Target']]
+
         logger.info("Fitting topic model")
-        targets = base_target_df['Targets'].to_list()
+        targets = base_target_df['Target'].to_list()
         embeddings = self._get_embeddings(targets, model=embed_model)
-        topics = self._topic_model(targets, embeddings, embed_model, toponymy_kwargs)
-        no_outliers_df = topic_info.filter(pl.col('Topic') != -1)
-        if len(no_outliers_df) > 0:
+        cluster_layers, cluster_df = self._topic_model(targets, embeddings, embed_model, toponymy_kwargs)
+        if len(cluster_df) > 0:
+            base_target_cluster_df = base_target_df.with_columns(
+                pl.Series(name='Clusters', values=np.stack(cluster_layers, axis=-1), dtype=pl.Array(pl.Int64, len(cluster_layers)))\
+                    .cast(pl.List(pl.Int64))\
+                    .list.filter(pl.element() != -1)  # filter out -1 clusters
+            ).explode('Clusters').rename({'Clusters': 'Cluster'})
             logger.info("Getting higher level stance targets")
-            stance_targets = prompting.ask_llm_target_aggregate(self.generator, no_outliers_df.select(['Representative_Docs', 'Representation']).to_dicts())
-            no_outliers_df = no_outliers_df.with_columns(
-                pl.Series(name='noun_phrases', values=stance_targets, dtype=pl.List(pl.String))
+            stance_targets = prompting.ask_llm_target_aggregate(self.generator, cluster_df.select(['Exemplars', 'Keyphrases']).to_dicts())
+            cluster_df = cluster_df.with_columns(
+                pl.Series(name='ClusterTargets', values=stance_targets, dtype=pl.List(pl.String))
             )
-            no_outliers_df = no_outliers_df.with_columns(self._filter_document_similar_targets(no_outliers_df['noun_phrases'], embedding_model=embed_model))
-            
-            topic_info = pl.concat([topic_info.filter(pl.col('Topic') == -1), no_outliers_df], how='diagonal_relaxed')\
-                .with_columns(pl.col('noun_phrases').fill_null([]))
+            cluster_df = cluster_df.with_columns(self._filter_document_similar_targets(cluster_df['ClusterTargets'], embedding_model=embed_model))
+
+            cluster_df = cluster_df.with_columns(pl.col('ClusterTargets').fill_null([]))
 
             logger.info("Mapping targets to topics")
             # map documents to new noun phrases via topics
-            target_df = document_df.explode('Targets')
-            target_df = target_df.join(base_target_df, on='Targets', how='left')
-            target_df = target_df.filter(pl.col('Topic') != -1)
-            target_df = target_df.join(topic_info, on='Topic', how='left')
+            target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
+            target_df = target_df.join(base_target_cluster_df, on='Target', how='left')
+            target_df = target_df.join(cluster_df.select(['Cluster', 'ClusterTargets']), on='Cluster', how='left')
 
             logger.info("Joining new targets to documents")
             document_df = document_df.join(
                     target_df.group_by('ID')\
-                        .agg(pl.col('noun_phrases').flatten())\
-                        .with_columns(pl.col('noun_phrases').list.drop_nulls().alias('NewTargets')),
+                        .agg(pl.col('ClusterTargets').flatten())\
+                        .with_columns(pl.col('ClusterTargets').list.drop_nulls().alias('NewTargets')),
                 on='ID', 
                 how='left',
                 maintain_order='left'
-            ).drop('noun_phrases')
+            ).drop('ClusterTargets')
             
             logger.info("Combining base and topic targets")
             document_df = document_df.with_columns(
@@ -478,9 +487,9 @@ class StanceMining:
             .len()\
             .rename({'len': 'Count'})
         # join to topic df to get topic info
-        if len(no_outliers_df) > 0:
+        if len(cluster_df) > 0:
             self.target_info = self.target_info.join(
-                no_outliers_df.drop(['Name', 'Count']).explode('noun_phrases').drop_nulls('noun_phrases').rename({'noun_phrases': 'Target'}),
+                cluster_df.drop(['Cluster']).explode('ClusterTargets').drop_nulls('ClusterTargets').rename({'ClusterTargets': 'Target'}),
                 on='Target',
                 how='left'
             )
