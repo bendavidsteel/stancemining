@@ -1106,12 +1106,32 @@ def compute_trends_for_target(
 
 def get_stance_trends(
         document_df: pl.DataFrame, 
-        time_column: str = None, 
+        interpolation_method: str = 'gp',
+        time_column: str = 'createtime', 
         filter_columns: List[str] = [], 
         min_count: int = 5, 
         time_scale: str = '1mo',
         verbose: bool = False
     ) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    Compute trends for all targets in the document DataFrame.
+    
+    Args:
+        document_df (pl.DataFrame): DataFrame containing the document data with 'Targets' and 'Stances' columns.
+        interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process and 'lowess' for LOWESS. Defaults to 'gp'.
+        time_column (str): Column name for the time data. Defaults to 'createtime'.
+        filter_columns (List[str]): List of columns to filter by for trend calculation (i.e. 'Source', 'Author', etc.).
+        min_count (int): Minimum count of occurrences for a filter value to be considered.
+        time_scale (str): Time scale for the trends, e.g., '1mo', '1w'.
+        verbose (bool): Whether to print progress information.
+        
+    Returns:
+        Tuple[pl.DataFrame, pl.DataFrame]: A tuple containing:
+            - A DataFrame with trend data for each target and filter value.
+            - A DataFrame with interpolation method outputs, useful for Gaussian Process outputs.
+    """
+
+
     all_trend_gps_data = []
     all_trend_df = None
 

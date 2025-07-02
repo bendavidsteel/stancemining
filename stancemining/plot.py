@@ -13,6 +13,14 @@ from scipy.ndimage import gaussian_filter1d
 import vllm
 
 def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) -> plt.Figure:
+    """
+    Create a semantic map of targets based on stance and frequency.
+    This function uses UMAP to reduce the dimensionality of target embeddings
+    and visualizes them in a scatter plot with stance represented by color and
+    frequency represented by circle size.
+    
+    Args:
+    """
     target_df = doc_target_df.group_by('Target').agg([
         pl.col('Stance').mean().alias('stance_mean'),
         pl.col('Stance').count().alias('count')
@@ -121,7 +129,7 @@ def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) ->
 
 
 
-def sort_by_similarity_bidirectional(items, similarity_func, start_item=None):
+def _sort_by_similarity_bidirectional(items, similarity_func, start_item=None):
     """
     Alternative approach that builds the chain from both ends.
     
@@ -178,8 +186,9 @@ def sort_by_similarity_bidirectional(items, similarity_func, start_item=None):
     return chain
 
 
-def identify_significant_transitions(
+def _identify_significant_transitions(
         df: pl.DataFrame, 
+        filter_col: str,
         min_flow_count=15, 
         min_posts_per_user=10
     ):
@@ -189,17 +198,9 @@ def identify_significant_transitions(
     Parameters:
     -----------
     df : polars.DataFrame
-        DataFrame with columns: PlatformHandleID, createtime, Target, Stance
+        DataFrame with columns: <filter_col>, createtime, Target, Stance
     min_flow_count : int
         Minimum number of users making similar transitions to consider significant
-    detection_method : str
-        Changepoint detection method: 'pelt', 'dynp', 'binseg', 'window'
-    model : str
-        Cost model: 'l1', 'l2', 'rbf', 'normal', 'ar'
-    penalty : str or float
-        Penalty for changepoint detection: 'bic', 'aic', or numeric value
-    min_segment_length : int
-        Minimum length between changepoints
     
     Returns:
     --------
@@ -210,14 +211,14 @@ def identify_significant_transitions(
     # Process each user individually
     transitions_df = pl.DataFrame()
     
-    for user_df in tqdm(df.partition_by('PlatformHandleID'), desc="Processing users transitions"):
+    for user_df in tqdm(df.partition_by(filter_col), desc="Processing users transitions"):
         user_df = user_df.sort('createtime')
         
         if len(user_df) < min_posts_per_user:
             continue
             
         user_transitions = user_df.group_by_dynamic('createtime', every='1mo', period='2mo')\
-            .agg([pl.col('PlatformHandleID').first(), pl.col('Target').mode()])\
+            .agg([pl.col(filter_col).first(), pl.col('Target').mode()])\
             .with_columns(pl.col('Target').list.get(0))\
             .with_columns(pl.col('Target').shift(1).alias('from_target'))\
             .rename({'Target': 'to_target'})\
@@ -233,7 +234,7 @@ def identify_significant_transitions(
     
     # Aggregate transitions to find significant patterns
     significant_transitions = transitions_df.group_by(['createtime', 'to_target', 'from_target'])\
-        .agg(pl.col('PlatformHandleID').count().alias('transition_count'))\
+        .agg(pl.col(filter_col).count().alias('transition_count'))\
         .filter(pl.col('transition_count') >= min_flow_count)
     
     print(f"Identified {len(significant_transitions)} significant transition patterns")
@@ -256,10 +257,10 @@ class StanceTrendDiagram:
         # Neutral color for transitions
         self.transition_color = (0.6, 0.6, 0.6, 0.5)  # Light gray with transparency
 
-    def load_data(self, df: pl.DataFrame, trend_df: pl.DataFrame):
+    def load_data(self, df: pl.DataFrame, trend_df: pl.DataFrame, filter_col: str):
         """
         Load and process stance data. 
-        Expected columns: PlatformHandleID, createtime, Target, Stance
+        Expected columns: <filter_col>, createtime, Target, Stance
         """
         self.df = df
 
@@ -272,7 +273,7 @@ class StanceTrendDiagram:
         self.trend_data = trend_data
             
         # Ensure we have the required columns
-        required_cols = ['PlatformHandleID', 'createtime', 'Target', 'Stance']
+        required_cols = [filter_col, 'createtime', 'Target', 'Stance']
         missing_cols = [col for col in required_cols if col not in self.df.columns]
         if missing_cols:
             raise ValueError(f"Missing required columns: {missing_cols}")
@@ -314,7 +315,7 @@ class StanceTrendDiagram:
             transition_sim = target_transitions.get(frozenset([a, b]), 0)
             return transition_sim + cos_sim
 
-        ordered_targets = sort_by_similarity_bidirectional(
+        ordered_targets = _sort_by_similarity_bidirectional(
             targets, 
             get_similarity
         )
@@ -442,7 +443,7 @@ class StanceTrendDiagram:
         
         # Prepare stream data
         stream_data = self.prepare_stream_data()
-        significant_transitions = identify_significant_transitions(
+        significant_transitions = _identify_significant_transitions(
             self.df,
             min_flow_count=min_transition_count,
             min_posts_per_user=10
@@ -610,11 +611,17 @@ def plot_trend_map(
         document_df: pl.DataFrame,
         trend_df: pl.DataFrame,
         figsize=(20, 14),
+        plot_stream_transitions=True,
+        filter_col: Optional[str] = None,
         max_stream_width=4.0,
         min_transition_count=4
     ):
     """
     Plot the continuous stance stream diagram with enhanced features.
+
+    Args:
+        document_df (pl.DataFrame): DataFrame containing document stance data with columns:
+
     """
     viz = StanceTrendDiagram(figsize=figsize)
     viz.load_data(document_df, trend_df)
