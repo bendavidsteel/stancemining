@@ -24,4 +24,4 @@ def test_integration():
     fig.savefig('./tests/semantic_map.png', dpi=300, bbox_inches='tight')
 
 if __name__ == '__main__':
-    test_integration()
+    test_trend_integration()

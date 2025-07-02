@@ -820,7 +820,7 @@ def calculate_trends_for_filtered_df_with_batching(
 
     assert isinstance(target_df.schema[time_column], pl.Datetime), f"Column {time_column} must be of type DateTime"
 
-    batch_gp_params = []
+    batch_interpolation_outputs = []
     all_trends_df = None
 
     unique_df = target_df.group_by(filter_type)\
@@ -835,7 +835,7 @@ def calculate_trends_for_filtered_df_with_batching(
         pbar = tqdm(total=unique_df.shape[0], desc='Training GPs')
     for batch in batched_values:
         try:
-            batch_trend_df, batch_gp_params_batch = batch_calculate_trends_for_filtered_df(
+            batch_trend_df, batch_interpolation_outputs_batch = batch_calculate_trends_for_filtered_df(
                 target_df, 
                 target_name, 
                 filter_type, 
@@ -859,9 +859,9 @@ def calculate_trends_for_filtered_df_with_batching(
                 all_trends_df = batch_trend_df
             else:
                 all_trends_df = pl.concat([all_trends_df, batch_trend_df])
-            batch_gp_params.extend(batch_gp_params_batch)
+            batch_interpolation_outputs.extend(batch_interpolation_outputs_batch)
 
-    return all_trends_df, batch_gp_params
+    return all_trends_df, batch_interpolation_outputs
 
 def batch_calculate_trends_for_filtered_df(
         target_df: pl.DataFrame, 
@@ -878,7 +878,7 @@ def batch_calculate_trends_for_filtered_df(
         verbose: bool
     ) -> Tuple[pl.DataFrame, List[Dict[str, Any]]]:
 
-    batch_gp_params = []
+    batch_interpolation_outputs = []
     all_trends_df = None
 
     all_timestamps, all_stance, all_classifier_ids, all_test_x, all_day_dfs = [], [], [], [], []
@@ -925,7 +925,7 @@ def batch_calculate_trends_for_filtered_df(
             all_trends_df = trend_df
         else:
             all_trends_df = pl.concat([all_trends_df, trend_df])
-        gp_params = {
+        interpolation_outputs = {
             'lengthscale': lengthscale,
             'sigma': likelihood_sigma,
             'loss': None, # cannot retrieve individual losses from batch training
@@ -933,8 +933,8 @@ def batch_calculate_trends_for_filtered_df(
             'filter_type': filter_type,
             'filter_value': filter_value
         }
-        batch_gp_params.append(gp_params)
-    return all_trends_df, batch_gp_params
+        batch_interpolation_outputs.append(interpolation_outputs)
+    return all_trends_df, batch_interpolation_outputs
 
 
 def calculate_trends_for_filtered_df(
@@ -945,12 +945,13 @@ def calculate_trends_for_filtered_df(
         classifier_profiles,
         time_column,
         time_scale,
+        interpolation_method='gp',
         lengthscale_loc = 2.0, # mode at ~7.5 months
         lengthscale_scale = 0.1,
         sigma_loc = 1.0,
         sigma_scale = 0.2,
         verbose=False
-    ):
+    ) -> Tuple[pl.DataFrame, Dict[str, Any]]:
     """Calculate trends for a filtered DataFrame with optimized operations"""
     # First sort by createtime - ensures consistent results
     start_date = filtered_df[time_column].min().date()
@@ -964,32 +965,40 @@ def calculate_trends_for_filtered_df(
 
     timestamps, stance, classifier_ids, test_x, trend_df = get_time_series_data(filtered_df, time_column, time_scale)
     
-    try:
-        lengthscale, likelihood_sigma, losses, pred, lower, upper = get_gp_timeseries(timestamps, stance, classifier_ids, classifier_profiles, test_x, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, verbose)
-    except Exception as ex:
-        logger.error(f"Failed for target {target_name} filter_type {filter_type} filter_value {filter_value} ex: {ex}")
-        return None, None
-    
-    trend_df = combine_trend_df(trend_df, pred, lower, upper, target_name, filter_type, filter_value)
+    if interpolation_method == 'gp':
+        try:
+            lengthscale, likelihood_sigma, losses, pred, lower, upper = get_gp_timeseries(timestamps, stance, classifier_ids, classifier_profiles, test_x, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, verbose)
+        except Exception as ex:
+            logger.error(f"Failed for target {target_name} filter_type {filter_type} filter_value {filter_value} ex: {ex}")
+            return None, None
+        
+        trend_df = combine_trend_df(trend_df, pred, lower, upper, target_name, filter_type, filter_value)
 
-    # write data to this
-    gp_params = {
-        'lengthscale': lengthscale,
-        'sigma': likelihood_sigma,
-        'loss': losses[-1],
-        'target_name': target_name,
-        'filter_type': filter_type,
-        'filter_value': filter_value
-    }
+        # write data to this
+        interpolation_outputs = {
+            'lengthscale': lengthscale,
+            'sigma': likelihood_sigma,
+            'loss': losses[-1],
+            'target_name': target_name,
+            'filter_type': filter_type,
+            'filter_value': filter_value
+        }
+    else:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+        pred = lowess(stance, timestamps, xvals=test_x, is_sorted=True, return_sorted=False)
 
-    return trend_df, gp_params
+        trend_df = combine_trend_df(trend_df, pred, np.full_like(pred, np.nan), np.full_like(pred, np.nan), target_name, filter_type, filter_value)
+        interpolation_outputs = {}
+
+    return trend_df, interpolation_outputs
 
 def compute_trends_for_target(
         df: pl.DataFrame, 
         target_name, 
-        classifier_profiles, 
         filter_columns: List[str], 
         time_column,
+        interpolation_method='gp',
+        classifier_profiles=None,
         min_filter_count=5,
         time_scale='1mo',
         verbose=False,
@@ -1006,7 +1015,7 @@ def compute_trends_for_target(
     
     # Calculate all trends
     
-    all_gp_params = []
+    all_interpolation_outputs = []
     all_trend_df = None    
 
     # For each filter type, calculate trends for each unique value
@@ -1014,18 +1023,23 @@ def compute_trends_for_target(
         # Get all unique values for this filter
         all_unique_value_df = target_df.group_by(filter_column).len().filter(pl.col('len') >= min_filter_count)
 
-        if all_unique_value_df.filter(pl.col('len') < MAX_FULL_GP_BATCH).shape[0] > 1:
-            batch_unique_values = all_unique_value_df.filter(pl.col('len') < MAX_FULL_GP_BATCH)[filter_column].to_list()
-            sequential_unique_values = all_unique_value_df.filter(pl.col('len') >= MAX_FULL_GP_BATCH)[filter_column].to_list()
+        if interpolation_method == 'gp':
+            if all_unique_value_df.filter(pl.col('len') < MAX_FULL_GP_BATCH).shape[0] > 1:
+                batch_unique_values = all_unique_value_df.filter(pl.col('len') < MAX_FULL_GP_BATCH)[filter_column].to_list()
+                sequential_unique_values = all_unique_value_df.filter(pl.col('len') >= MAX_FULL_GP_BATCH)[filter_column].to_list()
+            else:
+                batch_unique_values = []
+                sequential_unique_values = all_unique_value_df[filter_column].to_list()
         else:
+            # For non-GP methods, we can process all unique values sequentially
             batch_unique_values = []
             sequential_unique_values = all_unique_value_df[filter_column].to_list()
-        
+            
         # Apply filtering and trend calculation for each value
         if len(batch_unique_values) > 0:
             # compute in parallel
             filtered_df = target_df.filter(pl.col(filter_column).is_in(batch_unique_values))
-            batch_trend_df, batch_gp_params = calculate_trends_for_filtered_df_with_batching(
+            batch_trend_df, batch_interpolation_outputs = calculate_trends_for_filtered_df_with_batching(
                 filtered_df, 
                 target_name, 
                 filter_column, 
@@ -1038,7 +1052,7 @@ def compute_trends_for_target(
                 time_scale,
                 verbose
             )
-            all_gp_params += batch_gp_params
+            all_interpolation_outputs += batch_interpolation_outputs
             if batch_trend_df is not None:
                 if all_trend_df is None:
                     all_trend_df = batch_trend_df
@@ -1050,7 +1064,7 @@ def compute_trends_for_target(
             for filter_value in sequential_unique_values:
                 filtered_df = target_df.filter(pl.col(filter_column) == filter_value)
                 try:
-                    trend_df, gp_params = calculate_trends_for_filtered_df(
+                    trend_df, interpolation_outputs = calculate_trends_for_filtered_df(
                         filtered_df, 
                         target_name, 
                         filter_column, 
@@ -1058,6 +1072,7 @@ def compute_trends_for_target(
                         classifier_profiles,
                         time_column,
                         time_scale,
+                        interpolation_method=interpolation_method,
                         lengthscale_loc=lengthscale_loc,
                         lengthscale_scale=lengthscale_scale,
                         sigma_loc=sigma_loc,
@@ -1068,19 +1083,20 @@ def compute_trends_for_target(
                     logger.error(f"Failed to calculate trends for {target_name} {filter_column} {filter_value}: {ex}")
                     continue
                 
-                if gp_params is None:
+                if interpolation_outputs is None:
                     continue
 
                 if all_trend_df is None:
                     all_trend_df = trend_df
                 else:
                     all_trend_df = pl.concat([all_trend_df, trend_df])
-                all_gp_params.append(gp_params)
+                all_interpolation_outputs.append(interpolation_outputs)
 
                 logger.info(f"Processed {filter_column} {filter_value}: {len(filtered_df)} points")
+        
 
     # First, the overall trend
-    trend_df, gp_params = calculate_trends_for_filtered_df(
+    trend_df, interpolation_outputs = calculate_trends_for_filtered_df(
         target_df, 
         target_name, 
         'all', 
@@ -1094,15 +1110,15 @@ def compute_trends_for_target(
         sigma_scale=sigma_scale,
         verbose=verbose
     )
-    if gp_params is not None:
-        all_gp_params.append(gp_params)
+    if interpolation_outputs is not None:
+        all_interpolation_outputs.append(interpolation_outputs)
     if trend_df is not None:
         if all_trend_df is None:
             all_trend_df = trend_df
         else:
             all_trend_df = pl.concat([all_trend_df, trend_df])
 
-    return all_trend_df, all_gp_params
+    return all_trend_df, all_interpolation_outputs
 
 def get_stance_trends(
         document_df: pl.DataFrame, 
@@ -1111,6 +1127,7 @@ def get_stance_trends(
         filter_columns: List[str] = [], 
         min_count: int = 5, 
         time_scale: str = '1mo',
+        interpolation_method: str = 'gp',
         verbose: bool = False
     ) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """
@@ -1137,25 +1154,33 @@ def get_stance_trends(
 
     targets_df = document_df.explode(['Targets', 'Stances']).rename({'Targets': 'Target', 'Stances': 'Stance'})
 
-    target_names = targets_df.group_by('Target').len().sort('len', descending=True)['Target'].to_list()
+    target_names = targets_df.group_by('Target')\
+        .len()\
+        .filter(pl.col('len') > min_count)\
+        .drop_nulls('Target')\
+        .sort('len', descending=True)['Target'].to_list()
 
-    classifier_profiles = get_classifier_profiles()
+    if interpolation_method == 'gp':
+        classifier_profiles = get_classifier_profiles()
+    else:
+        classifier_profiles = None
 
     for target_name in target_names:
         logger.info(f"Processing primary target: {target_name}")
             
         # Process the target with grouping
-        target_trend_df, gp_params = compute_trends_for_target(
+        target_trend_df, interpolation_outputs = compute_trends_for_target(
             targets_df, 
             target_name, 
-            classifier_profiles, 
             filter_columns, 
-            time_column, 
+            time_column,
+            interpolation_method=interpolation_method,
+            classifier_profiles=classifier_profiles,
             min_filter_count=min_count,
             time_scale=time_scale,
             verbose=verbose
         )
-        all_trend_gps_data.append(gp_params)
+        all_trend_gps_data += interpolation_outputs
         if target_trend_df is not None:
             if all_trend_df is None:
                 all_trend_df = target_trend_df

@@ -116,8 +116,11 @@ class VLLM(BaseLLM):
     def load_model(self):
         import vllm
         self.model = vllm.LLM(model=self.model_name, enable_prefix_caching=True)
-        self.sampling_params = vllm.SamplingParams(temperature=0.0)
-    
+        self.sampling_params = vllm.SamplingParams(
+            temperature=0.0,
+            stop=['\n', '<|endoftext|>', '<|im_end|>']
+        )
+
     def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
         conversations = []
         for prompt in prompts:
@@ -255,8 +258,21 @@ def get_vllm_predictions(task, df, config, verbose=False):
         else:
             raise
 
+    if task == 'stance-classification' and model_config.classification_method == 'generation':
+        max_new_tokens = 1
+    elif task == 'topic-extraction':
+        max_new_tokens = 30
+    elif task == 'claim-extraction':
+        max_new_tokens = 200
+    else:
+        max_new_tokens = None
+
     # greedy decoding
-    sampling_params = vllm.SamplingParams(temperature=0.0)
+    sampling_params = vllm.SamplingParams(
+        temperature=0.0,
+        stop=['\n', '<|endoftext|>', '<|im_end|>'] if task in ['topic-extraction', 'claim-extraction'] else None,
+        max_tokens=max_new_tokens
+    )
     if task in ['topic-extraction', 'claim-extraction']:
         lora_request = vllm.lora.request.LoRARequest(
             f"{task}_adapter",

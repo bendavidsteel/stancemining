@@ -1,7 +1,6 @@
 
 from typing import List, Optional
 
-from adjustText import adjust_text
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import Normalize, LinearSegmentedColormap
@@ -21,12 +20,15 @@ def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) ->
     
     Args:
     """
+    if 'Target' not in doc_target_df.columns and 'Targets' in doc_target_df.columns:
+        doc_target_df = doc_target_df.explode(['Targets', 'Stances']).drop_nulls('Targets').rename({'Targets': 'Target', 'Stances': 'Stance'})
+    
     target_df = doc_target_df.group_by('Target').agg([
         pl.col('Stance').mean().alias('stance_mean'),
         pl.col('Stance').count().alias('count')
     ]).sort('count', descending=True).head(top_num_targets)
 
-    encoder = vllm.LLM('paraphrase-multilingual-MiniLM-L12-v2', task='embed')
+    encoder = vllm.LLM('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', task='embed')
     outputs = encoder.embed(target_df['Target'].to_list())
     embeddings = np.stack([o.outputs.embedding for o in outputs], axis=0)
     
@@ -44,7 +46,11 @@ def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) ->
     # Define custom green to red color map and normalization
     colors = [(0.7, 0.0, 0.0), (0.9, 0.9, 0.9), (0.0, 0.7, 0.0)]  # green, light gray, red
     cmap = LinearSegmentedColormap.from_list("red_to_green", colors)
-    norm = Normalize(vmin=-1, vmax=1)  # Assuming stance ranges from -1 to 1
+
+    max_abs_stance = target_df['stance_mean'].abs().max()
+    if max_abs_stance > 0.5:
+        max_abs_stance = 1.0
+    norm = Normalize(vmin=-max_abs_stance, vmax=max_abs_stance)  # Assuming stance ranges from -1 to 1
     
     # Define size scaling based on count
     count_values = target_df['count'].to_numpy()
@@ -78,11 +84,15 @@ def plot_semantic_map(doc_target_df: pl.DataFrame, top_num_targets: int = 30) ->
         texts.append(text)
     
     # Use adjustText to prevent label overlap
-    adjust_text(texts, 
-                force_points=0.2, 
-                force_text=0.5,
-                expand_points=(1.5, 1.5),
-                arrowprops=dict(arrowstyle='-', color='gray', lw=0.5))
+    try:
+        from adjustText import adjust_text
+        adjust_text(texts, 
+                    force_points=0.2, 
+                    force_text=0.5,
+                    expand_points=(1.5, 1.5),
+                    arrowprops=dict(arrowstyle='-', color='gray', lw=0.5))
+    except ImportError:
+        print("adjustText not installed. Labels may overlap.")
     
     # Add colorbar for stance
     cbar = plt.colorbar(scatter, ax=ax, fraction=0.02, pad=0.01, aspect=40)
