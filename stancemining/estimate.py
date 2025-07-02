@@ -14,6 +14,10 @@ import huggingface_hub
 from linear_operator.utils.errors import NotPSDError
 import numpy as np
 import polars as pl
+import pyro
+import pyro.distributions
+import pyro.infer
+import pyro.poutine
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
@@ -23,8 +27,142 @@ from stancemining.main import logger
 
 MAX_FULL_GP_BATCH = 10000
 
-def get_inferred_normal(dataset, opinion_sequences, all_classifier_indices):
-    estimator = StanceEstimation(dataset.all_classifier_profiles)
+class StanceEstimation:
+    def __init__(self, all_classifier_profiles):
+        self.predictor_confusion_probs = _get_predictor_confusion_probs(all_classifier_profiles)
+        
+    def set_stance(self, stance):
+        self.stance = stance
+
+    def model(self, opinion_sequences, predictor_ids, mask, prior=False):
+        
+        with pyro.plate("batched_data", opinion_sequences.shape[0], dim=-2):
+            if prior:
+                user_stance_loc = pyro.param("user_stance_loc", torch.tensor(0.0).unsqueeze(0).tile((opinion_sequences.shape[0],1)).to(mask.device), constraint=pyro.distributions.constraints.interval(-1, 1))
+                user_stance_loc_var = pyro.param("user_stance_loc_var", torch.tensor(0.1).unsqueeze(0).tile((opinion_sequences.shape[0],1)).to(mask.device), constraint=pyro.distributions.constraints.positive)
+                user_stance = pyro.sample("user_stance", pyro.distributions.Normal(user_stance_loc, user_stance_loc_var))
+                user_stance_var = pyro.sample(
+                    "user_stance_var", 
+                    pyro.distributions.LogNormal(
+                        torch.full(((opinion_sequences.shape[0], 1)), 0.1).to(mask.device), 
+                        torch.full(((opinion_sequences.shape[0], 1)), 0.2).to(mask.device)
+                    )
+                )
+                
+            else:
+                user_stance_var = pyro.param("user_stance_var", torch.tensor(0.1).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=dist.constraints.positive)
+                # # sample stance from the uniform prior
+                user_stance = pyro.param("user_stance", torch.tensor(0.0).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=dist.constraints.interval(-1, 1))
+
+            # loop over the observed data
+            with pyro.plate("observed_data", opinion_sequences.shape[1], dim=-1):
+                with pyro.poutine.mask(mask=mask):
+                    # User creates comments with latent stance
+                    # Standard deviation should be half the distance between categories
+                    # comment_var = (1/2) ** 2
+                    
+                    comment_stances = pyro.sample("latent_comment_stance", pyro.distributions.Normal(user_stance, user_stance_var).expand(opinion_sequences.shape))
+
+                    # Quantize comment stance into 3 categories
+                    comment_stance_cats = torch.zeros_like(comment_stances, dtype=torch.int).to(opinion_sequences.device)
+                    comment_stance_cats[comment_stances > 1/2] = 2
+                    comment_stance_cats[comment_stances < -1/2] = 0
+                    comment_stance_cats[(comment_stances >= -1/2) & (comment_stances <= 1/2)] = 1
+
+                    # Get prediction probabilities based on the confusion matrix
+                    # Assume self.predictor_confusion_probs is properly vectorized to handle batched inputs
+                    predict_probs = self.predictor_confusion_probs[self.stance]['predict_probs'][predictor_ids, comment_stance_cats, :]
+
+                    pyro.sample("predicted_comment_stance", pyro.distributions.Categorical(probs=predict_probs), obs=opinion_sequences)
+
+    def guide(self, opinion_sequences, predictor_ids, mask, prior=False):
+        # comment_stance_var_loc = pyro.param("comment_stance_var_loc", torch.tensor(0.1))
+        # comment_stance_var_scale = pyro.param("comment_stance_var_scale", torch.tensor(1.0), constraint=dist.constraints.positive)
+        # comment_stance_var = pyro.sample("comment_stance_var", dist.LogNormal(comment_stance_var_loc, comment_stance_var_scale), infer={'is_auxiliary': True})
+        # # sample stance from the uniform prior
+        
+        # loop over the observed data
+        with pyro.plate("batched_data", opinion_sequences.shape[0], dim=-2):
+            if prior:
+                user_stance_q = pyro.param("user_stance_loc_q", torch.tensor(0.0).unsqueeze(0).tile((opinion_sequences.shape[0],1)).to(mask.device), constraint=pyro.distributions.constraints.interval(-1, 1))
+                user_stance_var_q = pyro.param("user_stance_var_q", torch.tensor(0.001).unsqueeze(0).tile((opinion_sequences.shape[0],1)).to(mask.device), constraint=pyro.distributions.constraints.positive)
+                user_stance = pyro.sample("user_stance", pyro.distributions.Delta(user_stance_q))
+                user_stance_var = pyro.sample("user_stance_var", pyro.distributions.Delta(user_stance_var_q))
+            with pyro.plate("observed_data", opinion_sequences.shape[1], dim=-1):
+                with pyro.poutine.mask(mask=mask):
+
+                    # Get true probabilities from the confusion matrix
+                    true_probs = self.predictor_confusion_probs[self.stance]['true_probs'][predictor_ids, opinion_sequences, :]
+
+                    # Sample latent comment stance categories
+                    comment_stance_cats = pyro.sample("latent_comment_stance_category", pyro.distributions.Categorical(probs=true_probs), infer={'is_auxiliary': True})
+
+                    # Determine latent locations based on categories
+                    latent_locs = torch.zeros_like(comment_stance_cats, dtype=torch.float).to(opinion_sequences.device)
+                    latent_locs[comment_stance_cats == 1] = 0
+                    latent_locs[comment_stance_cats == 2] = 1
+                    latent_locs[comment_stance_cats == 0] = -1
+
+                    # Sample latent comment stances
+                    # comment_stances = pyro.sample("latent_comment_stance", dist.Normal(latent_locs, comment_var))
+                    comment_stances = pyro.sample("latent_comment_stance", pyro.distributions.Delta(latent_locs))
+
+def _train_pyro_model(model_func, guide_func, optim, stance_opinion_sequences, classifier_indices, mask, prior, num_steps):
+    pyro.clear_param_store()
+    # do gradient steps
+    svi = pyro.infer.SVI(model_func, guide_func, optim, loss=pyro.infer.Trace_ELBO())
+    losses = []
+    for step in range(num_steps):
+        loss = svi.step(stance_opinion_sequences, classifier_indices, mask, prior=prior)
+        losses.append(loss)
+
+def _get_op_seqs(opinion_sequences, stance_idx, all_classifier_indices):
+    op_seqs = []
+    lengths = []
+    all_predictor_ids = []
+    for user_idx in range(opinion_sequences.shape[0]):
+        seq = []
+        length = 0
+        predictor_ids = []
+        for i in range(opinion_sequences.shape[1]):
+            if not np.isnan(opinion_sequences[user_idx, i, stance_idx]):
+                seq.append(opinion_sequences[user_idx, i, stance_idx])
+                length += 1
+                predictor_ids.append(all_classifier_indices[user_idx, i].astype(int))
+
+        op_seqs.append(np.array(seq))
+        lengths.append(length)
+        all_predictor_ids.append(np.array(predictor_ids))
+
+    max_length = max(lengths)
+
+    return op_seqs, lengths, all_predictor_ids, max_length
+
+def _get_op_seq_with_mask(opinion_sequences, max_length, op_seqs, lengths, all_predictor_ids):
+    stance_opinion_sequences = np.zeros((opinion_sequences.shape[0], max_length))
+    classifier_indices = np.zeros((opinion_sequences.shape[0], max_length))
+    mask = np.zeros((opinion_sequences.shape[0], max_length))
+    for i in range(opinion_sequences.shape[0]):
+        stance_opinion_sequences[i, :lengths[i]] = op_seqs[i]
+        classifier_indices[i, :lengths[i]] = all_predictor_ids[i]
+        mask[i, :lengths[i]] = 1
+
+    return stance_opinion_sequences, classifier_indices, mask
+
+def _data_to_torch_device(stance_opinion_sequences, classifier_indices, device):
+    stance_opinion_sequences = torch.tensor(stance_opinion_sequences).int() + 1
+    classifier_indices = torch.tensor(classifier_indices).int()
+    mask = torch.tensor(mask).bool()
+
+    stance_opinion_sequences = stance_opinion_sequences.to(device)
+    classifier_indices = classifier_indices.to(device)
+    mask = mask.to(device)
+
+    return stance_opinion_sequences, classifier_indices, mask
+
+def get_stance_normal(document_df, filter_cols=[]):
+    classifier_profiles = _get_classifier_profiles()
+    estimator = StanceEstimation(classifier_profiles)
 
     user_stances = np.zeros((opinion_sequences.shape[0], len(dataset.stance_columns)))
     user_stance_vars = np.zeros((opinion_sequences.shape[0], len(dataset.stance_columns)))
@@ -53,7 +191,7 @@ def get_inferred_normal(dataset, opinion_sequences, all_classifier_indices):
         estimator.predictor_confusion_probs[stance_column]['true_probs'] = estimator.predictor_confusion_probs[stance_column]['true_probs'].to(device)
 
         prior = True
-        _train_model(estimator.model, estimator.guide, optim, stance_opinion_sequences, classifier_indices, mask, prior, num_steps)
+        _train_pyro_model(estimator.model, estimator.guide, optim, stance_opinion_sequences, classifier_indices, mask, prior, num_steps)
 
         # grab the learned variational parameters
         if prior:
@@ -94,7 +232,7 @@ class GPClassificationModel(gpytorch.models.ApproximateGP):
         return latent_pred
 
 @torch.jit.script
-def inv_probit(x, jitter: float = 1e-3):
+def _inv_probit(x, jitter: float = 1e-3):
     """
     Inverse probit function (standard normal CDF) with jitter for numerical stability.
     
@@ -107,7 +245,7 @@ def inv_probit(x, jitter: float = 1e-3):
     """
     return 0.5 * (1.0 + torch.erf(x / torch.sqrt(torch.tensor(2.0)))) * (1 - 2 * jitter) + jitter
 
-def get_predict_probs(true_cat, confusion_profile):
+def _get_predict_probs(true_cat, confusion_profile):
     predict_sum = sum(v for k, v in confusion_profile[true_cat].items())
     if predict_sum == 0:
         return torch.tensor([1/3, 1/3, 1/3])  # Uniform distribution if no predictions
@@ -118,7 +256,7 @@ def get_predict_probs(true_cat, confusion_profile):
     ])
     return predict_probs
 
-def get_true_probs(predicted_cat, confusion_profile):
+def _get_true_probs(predicted_cat, confusion_profile):
     true_sum = sum(v[predicted_cat] for k, v in confusion_profile.items())
     if true_sum == 0:
         return torch.tensor([1/3, 1/3, 1/3])
@@ -129,7 +267,7 @@ def get_true_probs(predicted_cat, confusion_profile):
     ])
     return true_probs
 
-def get_target_predictor_confusion_probs(classifier_profiles):
+def _get_target_predictor_confusion_probs(classifier_profiles):
     predict_probs = torch.zeros(len(classifier_profiles), 3, 3)
     true_probs = torch.zeros(len(classifier_profiles), 3, 3)
 
@@ -147,10 +285,10 @@ def get_target_predictor_confusion_probs(classifier_profiles):
             continue
 
         for true_idx, true_cat in enumerate(["true_against", "true_neutral", "true_favor"]):
-            predict_probs[predictor_id, true_idx, :] = get_predict_probs(true_cat, confusion_profile)
+            predict_probs[predictor_id, true_idx, :] = _get_predict_probs(true_cat, confusion_profile)
 
         for predicted_idx, predicted_cat in enumerate(["predicted_against", "predicted_neutral", "predicted_favor"]):
-            true_probs[predictor_id, predicted_idx, :] = get_true_probs(predicted_cat, confusion_profile)
+            true_probs[predictor_id, predicted_idx, :] = _get_true_probs(predicted_cat, confusion_profile)
 
     return {
         'predict_probs': predict_probs,
@@ -158,7 +296,7 @@ def get_target_predictor_confusion_probs(classifier_profiles):
     }
 
 @torch.jit.script
-def get_ordinal_probs(function_samples, bin_edges, sigma, predictor_predict_probs):
+def _get_ordinal_probs(function_samples, bin_edges, sigma, predictor_predict_probs):
     function_samples = torch.tanh(function_samples)
 
     # Compute scaled bin edges
@@ -172,7 +310,7 @@ def get_ordinal_probs(function_samples, bin_edges, sigma, predictor_predict_prob
     scaled_function_samples = function_samples / sigma
     scaled_edges_left = scaled_edges_left.reshape(1, 1, -1)
     scaled_edges_right = scaled_edges_right.reshape(1, 1, -1)
-    probs = inv_probit(scaled_edges_left - scaled_function_samples) - inv_probit(scaled_edges_right - scaled_function_samples)
+    probs = _inv_probit(scaled_edges_left - scaled_function_samples) - _inv_probit(scaled_edges_right - scaled_function_samples)
     
     # Apply confusion matrix
     predict_probs = torch.einsum('sxc,xco->sxo', probs, predictor_predict_probs)
@@ -188,7 +326,7 @@ class BoundedOrdinalWithErrorLikelihood(gpytorch.likelihoods._OneDimensionalLike
             sigma_constraint: Optional[Interval] = None,
         ):
         super().__init__()
-        predictor_predict_probs = get_target_predictor_confusion_probs(classifier_profiles)['predict_probs']
+        predictor_predict_probs = _get_target_predictor_confusion_probs(classifier_profiles)['predict_probs']
         self.register_parameter('predictor_predict_probs', torch.nn.Parameter(predictor_predict_probs, requires_grad=False))
         
         self.num_bins = len(bin_edges) + 1
@@ -222,7 +360,7 @@ class BoundedOrdinalWithErrorLikelihood(gpytorch.likelihoods._OneDimensionalLike
         classifier_ids = kwargs['classifier_ids']
         predictor_predict_probs = self.predictor_predict_probs[classifier_ids]
 
-        predict_probs = get_ordinal_probs(function_samples, self.bin_edges, self.sigma, predictor_predict_probs)
+        predict_probs = _get_ordinal_probs(function_samples, self.bin_edges, self.sigma, predictor_predict_probs)
 
         return torch.distributions.Categorical(probs=predict_probs)
 
@@ -317,7 +455,7 @@ class LikelihoodList(LikelihoodList):
             for likelihood, args_, *k_vals in length_safe_zip(self.likelihoods, _get_tuple_args_(*args), *kwargs.values())
         ]
 
-def get_inducing_points(train_x):
+def _get_inducing_points(train_x):
     max_inducing_points = 1000
     if train_x.size(0) > max_inducing_points:
         learn_inducing_locations = True
@@ -330,13 +468,13 @@ def get_inducing_points(train_x):
 
     return inducing_points, learn_inducing_locations
 
-def get_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=1.0, lengthscale_scale=0.5, sigma_loc=1.0, sigma_scale=0.5):
+def _get_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=1.0, lengthscale_scale=0.5, sigma_loc=1.0, sigma_scale=0.5):
     bin_edges = torch.tensor([-0.5, 0.5])
     # likelihood = OrdinalLikelihood(bin_edges)
     sigma_prior = NormalPrior(sigma_loc, sigma_scale)
     likelihood = BoundedOrdinalWithErrorLikelihood(bin_edges, classifier_profiles, sigma_prior=sigma_prior)
     
-    inducing_points, learn_inducing_locations = get_inducing_points(train_x)
+    inducing_points, learn_inducing_locations = _get_inducing_points(train_x)
 
     model = GPClassificationModel(
         inducing_points, 
@@ -347,26 +485,26 @@ def get_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=
     )
     return model, likelihood
 
-def inputs_np_to_torch(timestamps, stance, classifier_ids):
+def _inputs_np_to_torch(timestamps, stance, classifier_ids):
     timestamps = torch.as_tensor(timestamps, dtype=torch.float32)
     stance = torch.as_tensor(stance, dtype=torch.float32) + 1
     classifier_ids = torch.as_tensor(classifier_ids, dtype=torch.int)
     return timestamps, stance, classifier_ids
 
-def setup_ordinal_gp_model(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc=1.0, sigma_scale=0.1):
-    timestamps, stance, classifier_ids = inputs_np_to_torch(timestamps, stance, classifier_ids)
+def _setup_ordinal_gp_model(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc=1.0, sigma_scale=0.1):
+    timestamps, stance, classifier_ids = _inputs_np_to_torch(timestamps, stance, classifier_ids)
 
-    model, likelihood = get_ordinal_gp_model(timestamps, stance, classifier_profiles, lengthscale_loc=lengthscale_loc, lengthscale_scale=lengthscale_scale, sigma_loc=sigma_loc, sigma_scale=sigma_scale)
+    model, likelihood = _get_ordinal_gp_model(timestamps, stance, classifier_profiles, lengthscale_loc=lengthscale_loc, lengthscale_scale=lengthscale_scale, sigma_loc=sigma_loc, sigma_scale=sigma_scale)
 
     return model, likelihood, timestamps, stance, classifier_ids
 
-def get_batchable_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=1.0, lengthscale_scale=0.5, sigma_loc=1.0, sigma_scale=0.5):
+def _get_batchable_ordinal_gp_model(train_x, train_y, classifier_profiles, lengthscale_loc=1.0, lengthscale_scale=0.5, sigma_loc=1.0, sigma_scale=0.5):
     bin_edges = torch.tensor([-0.5, 0.5])
     # likelihood = OrdinalLikelihood(bin_edges)
     sigma_prior = NormalPrior(sigma_loc, sigma_scale)
     likelihood = BoundedOrdinalWithErrorLikelihood(bin_edges, classifier_profiles, sigma_prior=sigma_prior)
     
-    inducing_points, learn_inducing_locations = get_inducing_points(train_x)
+    inducing_points, learn_inducing_locations = _get_inducing_points(train_x)
 
     model = ApproximateGPModelListModel(
         inducing_points, 
@@ -380,14 +518,14 @@ def get_batchable_ordinal_gp_model(train_x, train_y, classifier_profiles, length
     )
     return model
 
-def setup_batchable_ordinal_gp_model(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc=1.0, sigma_scale=0.1):
-    timestamps, stance, classifier_ids = inputs_np_to_torch(timestamps, stance, classifier_ids)
+def _setup_batchable_ordinal_gp_model(timestamps, stance, classifier_ids, classifier_profiles, lengthscale_loc, lengthscale_scale, sigma_loc=1.0, sigma_scale=0.1):
+    timestamps, stance, classifier_ids = _inputs_np_to_torch(timestamps, stance, classifier_ids)
 
-    model = get_batchable_ordinal_gp_model(timestamps, stance, classifier_profiles, lengthscale_loc=lengthscale_loc, lengthscale_scale=lengthscale_scale, sigma_loc=sigma_loc, sigma_scale=sigma_scale)
+    model = _get_batchable_ordinal_gp_model(timestamps, stance, classifier_profiles, lengthscale_loc=lengthscale_loc, lengthscale_scale=lengthscale_scale, sigma_loc=sigma_loc, sigma_scale=sigma_scale)
     
     return model, classifier_ids
 
-def optimize_step(optimizers, model, mll, likelihood, batch_X, batch_y, batch_classifier_ids):
+def _optimize_step(optimizers, model, mll, likelihood, batch_X, batch_y, batch_classifier_ids):
     for optimizer in optimizers:
         optimizer.zero_grad()
     with gpytorch.settings.variational_cholesky_jitter(1e-4):
@@ -401,7 +539,7 @@ def optimize_step(optimizers, model, mll, likelihood, batch_X, batch_y, batch_cl
         optimizer.step()
     return loss
 
-def get_optimizer(model, likelihood, num_data=None):
+def _get_optimizer(model, likelihood, num_data=None):
     adam_params = []
     if isinstance(model, gpytorch.models.IndependentModelList):
         variational_distribution = model.models[0].variational_strategy._variational_distribution
@@ -433,7 +571,7 @@ def get_optimizer(model, likelihood, num_data=None):
     
     return optimizers
 
-def batch_train_ordinal_likelihood_gp(
+def _batch_train_ordinal_likelihood_gp(
         models: List[ApproximateGPModelListModel], 
         all_classifier_ids: torch.Tensor,
         verbose=True
@@ -451,7 +589,7 @@ def batch_train_ordinal_likelihood_gp(
     mll = SumVariationalELBO(likelihood, model)
 
     # TODO check that num_data makes sense here
-    optimizers = get_optimizer(model, likelihood)
+    optimizers = _get_optimizer(model, likelihood)
 
     model.train()
     likelihood.train()
@@ -504,11 +642,11 @@ def batch_train_ordinal_likelihood_gp(
     return model
 
 
-def train_ordinal_likelihood_gp(model: GPClassificationModel, likelihood: BoundedOrdinalWithErrorLikelihood, train_X: torch.Tensor, train_y: torch.Tensor, classifier_ids: torch.Tensor, verbose=True):
+def _train_ordinal_likelihood_gp(model: GPClassificationModel, likelihood: BoundedOrdinalWithErrorLikelihood, train_X: torch.Tensor, train_y: torch.Tensor, classifier_ids: torch.Tensor, verbose=True):
     mll = gpytorch.mlls.VariationalELBO(likelihood, model, train_y.size(0))
-    return train_ordinal_likelihood_gp_with_mll(model, likelihood, mll, train_X, train_y, classifier_ids, verbose=verbose)
+    return _train_ordinal_likelihood_gp_with_mll(model, likelihood, mll, train_X, train_y, classifier_ids, verbose=verbose)
 
-def train_ordinal_likelihood_gp_with_mll(
+def _train_ordinal_likelihood_gp_with_mll(
         model: GPClassificationModel, 
         likelihood: BoundedOrdinalWithErrorLikelihood, 
         mll: MarginalLogLikelihood,
@@ -521,7 +659,7 @@ def train_ordinal_likelihood_gp_with_mll(
     model.train()
     likelihood.train()
     losses = []
-    optimizers = get_optimizer(model, likelihood, num_data=train_y.size(0))
+    optimizers = _get_optimizer(model, likelihood, num_data=train_y.size(0))
 
     model.compile(fullgraph=True, mode='reduce-overhead')
     likelihood.compile(fullgraph=True, mode='reduce-overhead')
@@ -546,7 +684,7 @@ def train_ordinal_likelihood_gp_with_mll(
 
             pbar = tqdm(total=training_iter, desc='Training GP Model') if verbose else None
             for k in range(training_iter):
-                loss = optimize_step(optimizers, model, mll, likelihood, train_X, train_y, classifier_ids)
+                loss = _optimize_step(optimizers, model, mll, likelihood, train_X, train_y, classifier_ids)
 
                 if pbar is not None:
                     pbar.update(1)
@@ -576,7 +714,7 @@ def train_ordinal_likelihood_gp_with_mll(
                         batch_X = batch_X.cuda()
                         batch_y = batch_y.cuda()
                         batch_classifier_ids = batch_classifier_ids.cuda()
-                    loss = optimize_step(optimizers, model, mll, likelihood, batch_X, batch_y, batch_classifier_ids)
+                    loss = _optimize_step(optimizers, model, mll, likelihood, batch_X, batch_y, batch_classifier_ids)
                     if pbar is not None:
                         pbar.update(1)
                         pbar.set_description('Iter %d/%d - Loss: %.3f' % (k * len(train_loader) + i + 1, training_iter * len(train_loader), loss.item()))
@@ -600,7 +738,7 @@ def train_ordinal_likelihood_gp_with_mll(
 
     return model, likelihood, losses
 
-def get_likelihood_prediction(model, likelihood, test_x):
+def _get_likelihood_prediction(model, likelihood, test_x):
     if not isinstance(test_x, torch.Tensor):
         test_x = torch.as_tensor(test_x).float()
     classifier_ids = torch.zeros_like(test_x, dtype=torch.int, device=test_x.device)
@@ -617,7 +755,7 @@ def get_likelihood_prediction(model, likelihood, test_x):
             observed_pred = likelihood(model_pred, classifier_ids=classifier_ids) # returns samples that are run through the likelihood
     return observed_pred
 
-def get_model_prediction(model: GPClassificationModel, test_x):
+def _get_model_prediction(model: GPClassificationModel, test_x):
     test_x = torch.as_tensor(test_x).float()
 
     model.eval()
@@ -636,7 +774,7 @@ def get_model_prediction(model: GPClassificationModel, test_x):
 
     return torch.tanh(model_pred.loc).cpu().numpy(), torch.tanh(lower).cpu().numpy(), torch.tanh(upper).cpu().numpy()
 
-def get_batch_model_predictions(model: gpytorch.models.IndependentModelList, test_xs):
+def _get_batch_model_predictions(model: gpytorch.models.IndependentModelList, test_xs):
     test_xs = [torch.as_tensor(test_x).float() for test_x in test_xs]
 
     model.eval()
@@ -661,9 +799,12 @@ def get_batch_model_predictions(model: gpytorch.models.IndependentModelList, tes
 
     return preds, lowers, uppers
 
-def get_classifier_profiles(confusion_matrix=None):
+def _get_classifier_profiles(
+        model_name: str = 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection', 
+        confusion_matrix=None
+    ):
     if confusion_matrix is None:
-        file_path = huggingface_hub.hf_hub_download(repo_id='bendavidsteel/SmolLM2-360M-Instruct-stance-detection', filename='metadata.json')
+        file_path = huggingface_hub.hf_hub_download(repo_id=model_name, filename='metadata.json')
         with open(file_path, 'r') as f:
             metadata = json.load(f)
 
@@ -691,7 +832,7 @@ def get_classifier_profiles(confusion_matrix=None):
     }
     return classifier_profiles
 
-def get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column, time_scale):
+def _get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column, time_scale):
     
     numerator_match = re.search('^\d', time_scale)
     assert numerator_match is not None, "time_scale must begin with an integer number of units"
@@ -723,11 +864,11 @@ def get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column,
     return df.select(((pl.col(time_column) - start_date).dt.total_hours() / num_hours).alias('timestamps'))['timestamps'].to_numpy()
 
 
-def get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
+def _get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
     sorted_df = filtered_df.sort(time_column)
     start_date = filtered_df[time_column].min().date()
     end_date = filtered_df[time_column].max().date()
-    timestamps = get_timestamps(sorted_df, start_date, time_column, time_scale)
+    timestamps = _get_timestamps(sorted_df, start_date, time_column, time_scale)
 
     days = []
     current_date = start_date
@@ -750,7 +891,7 @@ def get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
         .agg(pl.col('volume').sum())\
         .sort(time_column)
 
-    test_x = get_timestamps(day_df, start_date, time_column, time_scale)
+    test_x = _get_timestamps(day_df, start_date, time_column, time_scale)
     
     stance = sorted_df['Stance'].to_numpy()
 
@@ -758,7 +899,7 @@ def get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
 
     return timestamps, stance, classifier_ids, test_x, day_df
 
-def get_gp_timeseries(
+def _get_gp_timeseries(
         timestamps, 
         stance, 
         classifier_ids, 
@@ -771,7 +912,7 @@ def get_gp_timeseries(
         verbose = False
     ):
     
-    model, likelihood, train_x, train_y, classifier_ids = setup_ordinal_gp_model(
+    model, likelihood, train_x, train_y, classifier_ids = _setup_ordinal_gp_model(
         timestamps, 
         stance, 
         classifier_ids, 
@@ -781,15 +922,15 @@ def get_gp_timeseries(
         sigma_loc=sigma_loc,
         sigma_scale=sigma_scale
     )
-    model, likelihood, losses = train_ordinal_likelihood_gp(model, likelihood, train_x, train_y, classifier_ids, verbose=verbose)
-    pred, lower, upper = get_model_prediction(model, test_x)
+    model, likelihood, losses = _train_ordinal_likelihood_gp(model, likelihood, train_x, train_y, classifier_ids, verbose=verbose)
+    pred, lower, upper = _get_model_prediction(model, test_x)
 
     lengthscale = model.covar_module.base_kernel.lengthscale.item()
     likelihood_sigma = likelihood.sigma.item()
     
     return lengthscale, likelihood_sigma, losses, pred, lower, upper
 
-def combine_trend_df(trend_df: pl.DataFrame, pred, lower, upper, target_name, filter_type, filter_value):
+def _combine_trend_df(trend_df: pl.DataFrame, pred, lower, upper, target_name, filter_type, filter_value):
     trend_df = trend_df.with_columns([
         pl.Series(name='trend_mean', values=pred),
         pl.Series(name='trend_lower', values=lower),
@@ -804,7 +945,7 @@ def combine_trend_df(trend_df: pl.DataFrame, pred, lower, upper, target_name, fi
     ])
     return trend_df
 
-def calculate_trends_for_filtered_df_with_batching(
+def _calculate_trends_for_filtered_df_with_batching(
         target_df: pl.DataFrame, 
         target_name: str, 
         filter_type: str, 
@@ -835,7 +976,7 @@ def calculate_trends_for_filtered_df_with_batching(
         pbar = tqdm(total=unique_df.shape[0], desc='Training GPs')
     for batch in batched_values:
         try:
-            batch_trend_df, batch_interpolation_outputs_batch = batch_calculate_trends_for_filtered_df(
+            batch_trend_df, batch_interpolation_outputs_batch = _batch_calculate_trends_for_filtered_df(
                 target_df, 
                 target_name, 
                 filter_type, 
@@ -863,7 +1004,7 @@ def calculate_trends_for_filtered_df_with_batching(
 
     return all_trends_df, batch_interpolation_outputs
 
-def batch_calculate_trends_for_filtered_df(
+def _batch_calculate_trends_for_filtered_df(
         target_df: pl.DataFrame, 
         target_name: str, 
         filter_type: str, 
@@ -885,7 +1026,7 @@ def batch_calculate_trends_for_filtered_df(
     for unique_value in unique_values:
         filtered_df = target_df.filter(pl.col(filter_type) == unique_value)
 
-        timestamps, stance, classifier_ids, test_x, day_df = get_time_series_data(filtered_df, time_column, time_scale)
+        timestamps, stance, classifier_ids, test_x, day_df = _get_time_series_data(filtered_df, time_column, time_scale)
         all_timestamps.append(timestamps)
         all_stance.append(stance)
         all_classifier_ids.append(classifier_ids)
@@ -899,7 +1040,7 @@ def batch_calculate_trends_for_filtered_df(
         stance = all_stance[i]
         classifier_ids = all_classifier_ids[i]
 
-        model, classifier_ids = setup_batchable_ordinal_gp_model(
+        model, classifier_ids = _setup_batchable_ordinal_gp_model(
             timestamps, 
             stance, 
             classifier_ids, 
@@ -912,15 +1053,15 @@ def batch_calculate_trends_for_filtered_df(
         models.append(model)
         batch_classifier_ids.append(classifier_ids)
 
-    model = batch_train_ordinal_likelihood_gp(models, batch_classifier_ids, verbose=verbose)
-    preds, lowers, uppers = get_batch_model_predictions(model, all_test_x)
+    model = _batch_train_ordinal_likelihood_gp(models, batch_classifier_ids, verbose=verbose)
+    preds, lowers, uppers = _get_batch_model_predictions(model, all_test_x)
 
     
 
     for filter_value, day_df, model, pred, lower, upper in zip(unique_values, all_day_dfs, models, preds, lowers, uppers):
         lengthscale = model.covar_module.base_kernel.lengthscale.item()
         likelihood_sigma = model.likelihood.sigma.item()
-        trend_df = combine_trend_df(day_df, pred, lower, upper, target_name, filter_type, filter_value)
+        trend_df = _combine_trend_df(day_df, pred, lower, upper, target_name, filter_type, filter_value)
         if all_trends_df is None:
             all_trends_df = trend_df
         else:
@@ -937,7 +1078,7 @@ def batch_calculate_trends_for_filtered_df(
     return all_trends_df, batch_interpolation_outputs
 
 
-def calculate_trends_for_filtered_df(
+def _calculate_trends_for_filtered_df(
         filtered_df: pl.DataFrame, 
         target_name, 
         filter_type, 
@@ -963,16 +1104,16 @@ def calculate_trends_for_filtered_df(
         logger.warning(f"Skipping {target_name} {filter_type} {filter_value} - not enough data")
         return None, None
 
-    timestamps, stance, classifier_ids, test_x, trend_df = get_time_series_data(filtered_df, time_column, time_scale)
+    timestamps, stance, classifier_ids, test_x, trend_df = _get_time_series_data(filtered_df, time_column, time_scale)
     
     if interpolation_method == 'gp':
         try:
-            lengthscale, likelihood_sigma, losses, pred, lower, upper = get_gp_timeseries(timestamps, stance, classifier_ids, classifier_profiles, test_x, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, verbose)
+            lengthscale, likelihood_sigma, losses, pred, lower, upper = _get_gp_timeseries(timestamps, stance, classifier_ids, classifier_profiles, test_x, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, verbose)
         except Exception as ex:
             logger.error(f"Failed for target {target_name} filter_type {filter_type} filter_value {filter_value} ex: {ex}")
             return None, None
         
-        trend_df = combine_trend_df(trend_df, pred, lower, upper, target_name, filter_type, filter_value)
+        trend_df = _combine_trend_df(trend_df, pred, lower, upper, target_name, filter_type, filter_value)
 
         # write data to this
         interpolation_outputs = {
@@ -984,10 +1125,13 @@ def calculate_trends_for_filtered_df(
             'filter_value': filter_value
         }
     else:
-        from statsmodels.nonparametric.smoothers_lowess import lowess
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess
+        except ImportError:
+            raise ImportError("Please install statsmodels to use LOWESS interpolation method: pip install statsmodels")
         pred = lowess(stance, timestamps, xvals=test_x, is_sorted=True, return_sorted=False)
 
-        trend_df = combine_trend_df(trend_df, pred, np.full_like(pred, np.nan), np.full_like(pred, np.nan), target_name, filter_type, filter_value)
+        trend_df = _combine_trend_df(trend_df, pred, np.full_like(pred, np.nan), np.full_like(pred, np.nan), target_name, filter_type, filter_value)
         interpolation_outputs = {}
 
     return trend_df, interpolation_outputs
@@ -996,7 +1140,7 @@ def compute_trends_for_target(
         df: pl.DataFrame, 
         target_name, 
         filter_columns: List[str], 
-        time_column,
+        time_column: str = 'createtime',
         interpolation_method='gp',
         classifier_profiles=None,
         min_filter_count=5,
@@ -1007,7 +1151,27 @@ def compute_trends_for_target(
         sigma_loc = 1.0,
         sigma_scale = 0.2
     ) -> Tuple[pl.DataFrame, List[Dict[str, Any]]]:
-    """Precompute trend data for a specific target with optimized vectorized operations"""
+    """
+    Compute trend data for a specific target.
+    
+    Args:
+        df (pl.DataFrame): DataFrame containing the data with 'Target' and 'Stance' columns.
+        target_name (str): The target name to filter by.
+        filter_columns (List[str]): List of columns to filter by for trend calculation (i.e. 'Source', 'Author', etc.).
+        time_column (str): Column name for the time data, defaults to 'createtime'.
+        interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process and 'lowess' for LOWESS. Defaults to 'gp'.
+        classifier_profiles (Dict): Dictionary containing classifier profiles for ordinal GP.
+        min_filter_count (int): Minimum count of occurrences for a filter value to be considered.
+        time_scale (str): Time scale for the trends, e.g., '1mo', '1w'.
+        verbose (bool): Whether to print progress information.
+        lengthscale_loc (float): Location parameter for the lengthscale prior.
+        lengthscale_scale (float): Scale parameter for the lengthscale prior.
+        sigma_loc (float): Location parameter for the sigma prior.
+        sigma_scale (float): Scale parameter for the sigma prior.
+
+    Returns:
+        Tuple[pl.DataFrame, List[Dict[str, Any]]]: A tuple containing the trend DataFrame and a list of interpolation outputs.
+    """
     # Get target data in one operation
     target_df = df.filter(pl.col('Target') == target_name)
     
@@ -1039,7 +1203,7 @@ def compute_trends_for_target(
         if len(batch_unique_values) > 0:
             # compute in parallel
             filtered_df = target_df.filter(pl.col(filter_column).is_in(batch_unique_values))
-            batch_trend_df, batch_interpolation_outputs = calculate_trends_for_filtered_df_with_batching(
+            batch_trend_df, batch_interpolation_outputs = _calculate_trends_for_filtered_df_with_batching(
                 filtered_df, 
                 target_name, 
                 filter_column, 
@@ -1064,7 +1228,7 @@ def compute_trends_for_target(
             for filter_value in sequential_unique_values:
                 filtered_df = target_df.filter(pl.col(filter_column) == filter_value)
                 try:
-                    trend_df, interpolation_outputs = calculate_trends_for_filtered_df(
+                    trend_df, interpolation_outputs = _calculate_trends_for_filtered_df(
                         filtered_df, 
                         target_name, 
                         filter_column, 
@@ -1096,7 +1260,7 @@ def compute_trends_for_target(
         
 
     # First, the overall trend
-    trend_df, interpolation_outputs = calculate_trends_for_filtered_df(
+    trend_df, interpolation_outputs = _calculate_trends_for_filtered_df(
         target_df, 
         target_name, 
         'all', 
@@ -1122,7 +1286,6 @@ def compute_trends_for_target(
 
 def get_stance_trends(
         document_df: pl.DataFrame, 
-        interpolation_method: str = 'gp',
         time_column: str = 'createtime', 
         filter_columns: List[str] = [], 
         min_count: int = 5, 
@@ -1135,11 +1298,11 @@ def get_stance_trends(
     
     Args:
         document_df (pl.DataFrame): DataFrame containing the document data with 'Targets' and 'Stances' columns.
-        interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process and 'lowess' for LOWESS. Defaults to 'gp'.
         time_column (str): Column name for the time data. Defaults to 'createtime'.
         filter_columns (List[str]): List of columns to filter by for trend calculation (i.e. 'Source', 'Author', etc.).
         min_count (int): Minimum count of occurrences for a filter value to be considered.
         time_scale (str): Time scale for the trends, e.g., '1mo', '1w'.
+        interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process and 'lowess' for LOWESS. Defaults to 'gp'.
         verbose (bool): Whether to print progress information.
         
     Returns:
@@ -1161,7 +1324,7 @@ def get_stance_trends(
         .sort('len', descending=True)['Target'].to_list()
 
     if interpolation_method == 'gp':
-        classifier_profiles = get_classifier_profiles()
+        classifier_profiles = _get_classifier_profiles()
     else:
         classifier_profiles = None
 

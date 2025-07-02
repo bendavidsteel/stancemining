@@ -9,7 +9,15 @@ import sklearn.preprocessing
 def deduplicate_target_embeddings(embeddings):
     normalized_embeddings = sklearn.preprocessing.normalize(embeddings, axis=1, norm='l2')
     max_distance = 0.2
-    embed_clusters = DBSCAN(eps=max_distance, metric='euclidean', algorithm='rbc', min_samples=2).fit_predict(normalized_embeddings)
+    try:
+        from cuml import DBSCAN
+        dbscan_model = DBSCAN(eps=max_distance, metric='euclidean', algorithm='rbc', min_samples=2)
+    except ImportError:
+        logging.warning("cuml not available, using sklearn DBSCAN instead.")
+        from sklearn.cluster import DBSCAN
+        # Use sklearn's DBSCAN if cuml is not available
+        dbscan_model = DBSCAN(eps=max_distance, metric='euclidean', min_samples=2)
+    embed_clusters = dbscan_model.fit_predict(normalized_embeddings)
     return embed_clusters
 
 def get_similar_target_mapper(embeddings: np.ndarray, target_df: pl.DataFrame):

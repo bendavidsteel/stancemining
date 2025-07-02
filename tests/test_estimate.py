@@ -1,9 +1,10 @@
 import datetime
 
 import polars as pl
+from sklearn.preprocessing import scale
 import torch
 
-from stancemining.estimate import calculate_trends_for_filtered_df_with_batching, get_classifier_profiles
+from stancemining.estimate import _calculate_trends_for_filtered_df_with_batching, _get_classifier_profiles, get_stance_normal
 
 def test_batch_train():
 
@@ -28,7 +29,7 @@ def test_batch_train():
 
     target_df = pl.DataFrame(data)
 
-    classifier_profiles = get_classifier_profiles()
+    classifier_profiles = _get_classifier_profiles()
 
     lengthscale_loc = 2.0
     lengthscale_scale = 0.5
@@ -40,7 +41,7 @@ def test_batch_train():
 
     verbose = True
 
-    trend_df, gp_params = calculate_trends_for_filtered_df_with_batching(
+    trend_df, gp_params = _calculate_trends_for_filtered_df_with_batching(
         target_df, 
         target_name,
         filter_type,
@@ -55,5 +56,26 @@ def test_batch_train():
         verbose=verbose
     )
 
+def test_get_stance_normal():
+    target_name = 'target'
+    unique_values = list(range(10))
+    filter_type = 'user'
+    data = []
+    for user in unique_values:
+        loc = torch.rand(()) * 0.5 + 0.5
+        scale = torch.rand(()) * 0.5 + 0.5
+        stances = torch.round(torch.normal(loc, scale))
+        for stance in stances:
+            data.append({
+                'Targets': [target_name],
+                'Stances': [stance.item()],
+                filter_type: user
+            })
+
+
+    doc_target_df = pl.DataFrame(data)
+
+    stance_mean_df = get_stance_normal(doc_target_df, filter_cols=[filter_type])
+
 if __name__ == "__main__":
-    test_batch_train()
+    test_get_stance_normal()

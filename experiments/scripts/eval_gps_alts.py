@@ -9,7 +9,7 @@ import sklearn.preprocessing
 import sklearn.pipeline
 import sklearn.linear_model
 
-from stancemining.estimate import get_gp_timeseries, get_classifier_profiles, get_timestamps
+from stancemining.estimate import _get_gp_timeseries, _get_classifier_profiles, _get_timestamps
 
 def get_mse(predicted, actual):
     """Calculate Mean Squared Error between predicted and actual values."""
@@ -62,7 +62,7 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
     noisy_latent_user_stance = latent_user_stance + noise
 
     # sample time stamps and quantize stance
-    classifier_profile = get_classifier_profiles()
+    classifier_profile = _get_classifier_profiles()
     observe_probs = {
         -1: np.array([classifier_profile[0]['true_against'][k] for k in ['predicted_against', 'predicted_neutral', 'predicted_favor']]),
         0: np.array([classifier_profile[0]['true_neutral'][k] for k in ['predicted_against', 'predicted_neutral', 'predicted_favor']]),
@@ -77,7 +77,7 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
     test_df = pl.DataFrame({
         time_column: [start_date + datetime.timedelta(days=int(t)) for t in days],
     })
-    test_x = get_timestamps(test_df, start_date, time_column, time_scale)
+    test_x = _get_timestamps(test_df, start_date, time_column, time_scale)
 
     # Initialize timing and results lists
     lowess_times = []
@@ -110,7 +110,7 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
         sorted_df = pl.DataFrame({
             time_column: [start_date + datetime.timedelta(days=int(i)) for i in timestamps],
         })
-        base_timestamps = get_timestamps(sorted_df, start_date, time_column, time_scale)
+        base_timestamps = _get_timestamps(sorted_df, start_date, time_column, time_scale)
         user_true_stances = np.round(np.clip(noisy_latent_user_stance[i, idxs], -1, 1))
 
         all_true_stances.append(user_true_stances)
@@ -141,7 +141,7 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
         # GP
         classifier_ids = np.zeros_like(observed_stances, dtype=int)
         start_time = datetime.datetime.now()
-        lengthscale, likelihood_sigma, losses, gp_mean, gp_lower, gp_upper = get_gp_timeseries(base_timestamps, observed_stances, classifier_ids, classifier_profile, test_x)
+        lengthscale, likelihood_sigma, losses, gp_mean, gp_lower, gp_upper = _get_gp_timeseries(base_timestamps, observed_stances, classifier_ids, classifier_profile, test_x)
         # gp_mean, gp_lower, gp_upper = np.zeros_like(test_x), np.zeros_like(test_x), np.zeros_like(test_x)
         end_time = datetime.datetime.now()
         gp_time = (end_time - start_time).total_seconds()

@@ -12,10 +12,10 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 from stancemining.estimate import (
-    setup_ordinal_gp_model, 
-    train_ordinal_likelihood_gp,
-    get_classifier_profiles,
-    get_timestamps
+    _setup_ordinal_gp_model, 
+    _train_ordinal_likelihood_gp,
+    _get_classifier_profiles,
+    _get_timestamps
 )
 
 def generate_synthetic_data(
@@ -134,7 +134,7 @@ def benchmark_gp_training(
     """Benchmark GP training time with different learning rates and schedulers."""
     
     results = []
-    classifier_profiles = get_classifier_profiles()
+    classifier_profiles = _get_classifier_profiles()
     
     # Create progress bar for all combinations
     total_combinations = len(learning_rates) * len(ngd_learning_rates) * len(scheduler_types) * len(data_sizes) * n_trials
@@ -154,7 +154,7 @@ def benchmark_gp_training(
                         )
                     
                         # Setup GP model
-                        model, likelihood, train_x, train_y, classifier_ids = setup_ordinal_gp_model(
+                        model, likelihood, train_x, train_y, classifier_ids = _setup_ordinal_gp_model(
                             timestamps, 
                             observed_stances, 
                             classifier_ids, 
@@ -210,7 +210,7 @@ def benchmark_gp_training(
                     
                         # Monkey patch the training function to use custom optimizer
                         import stancemining.estimate as est_module
-                        original_get_optimizer = est_module.get_optimizer
+                        original_get_optimizer = est_module._get_optimizer
                         
                         
                         

@@ -6,7 +6,7 @@ from torch.nn import ModuleList
 import gpytorch
 
 
-from stancemining.estimate import get_classifier_profiles, GPClassificationModel, NormalPrior, BoundedOrdinalWithErrorLikelihood
+from stancemining.estimate import _get_classifier_profiles, GPClassificationModel, NormalPrior, BoundedOrdinalWithErrorLikelihood
 
 def get_modellist_predictions(models, all_classifier_ids):
     model = gpytorch.models.IndependentModelList(*models)
@@ -87,7 +87,7 @@ def main():
     sigma_loc = 1.0
     sigma_scale = 0.1
 
-    classifier_profiles = get_classifier_profiles()
+    classifier_profiles = _get_classifier_profiles()
     models = []
     all_classifier_ids = []
     num_models = 3
