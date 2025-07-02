@@ -1,8 +1,10 @@
 [project]
 name = "stancemining"
 version = "0.1.0"
-description = "Add your description here"
+description = "A library for stance detection and target extraction in text data."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "accelerate>=1.7.0",
@@ -32,6 +34,18 @@ dependencies = [
     "tqdm>=4.67.1",
     "vllm>=0.7.0",
     "wandb>=0.20.1",
+]
+
+[dependency-groups]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+]
+docs-auto = [
+    "sphinx-autobuild"
+]
+tests = [
+    "pytest"
 ]
 
 [build-system]
