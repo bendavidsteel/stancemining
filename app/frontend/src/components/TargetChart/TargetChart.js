@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Plot from 'react-plotly.js';
 import './TargetChart.css';
-import api from '../../services/api'; 
+import api, { getTargetTrendsBatch } from '../../services/api'; 
 
 const TargetChart = ({ targetName, apiBaseUrl }) => {
   const [trendData, setTrendData] = useState([]);
@@ -69,18 +69,13 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
         // Determine if we need to load multiple timelines or a single timeline
         if (filterType !== 'all' && filterValue === 'all' && availableFilterValues.length > 0) {
           // Load all timelines in a single batch request
-          const response = await api.get(`/target/${targetName}/trends/batch`, {
-            params: { 
-              filter_type: filterType,
-              filter_values: availableFilterValues.join(',')
-            }
-          });
+          const response = await getTargetTrendsBatch(targetName, filterType, availableFilterValues);
           
           // Process batch response and prepare data for chart
-          const allTimelines = Object.entries(response.data.data).map(([value, data], index) => {
+          const allTimelines = Object.entries(response.data).map(([value, data], index) => {
             const color = getFilterColor(value, index);
             
-            const formattedData = data.data.map(item => {
+            const formattedData = data.map(item => {
               const timestamp = new Date(item.createtime).getTime();
               const trendMean = parseFloat(item.trend_mean) || 0;
               const trendLower = parseFloat(item.trend_lower) || 0;

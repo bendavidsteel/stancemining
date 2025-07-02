@@ -634,7 +634,7 @@ async def get_target_trends(
     filtered_trends = filtered_trends.drop_nans()
     
     # Convert to list of dicts for JSON response
-    return {"data": [{'data': df.to_dicts()} for df in filtered_trends.partition_by('filter_value')]}
+    return {"data": {g_vals[0]: df.to_dict(as_series=False) for (g_vals, df) in filtered_trends.partition_by('filter_value', as_dict=True).items()}}
 
 @app.get("/target/{target_name}/raw")
 async def get_target_raw_data(

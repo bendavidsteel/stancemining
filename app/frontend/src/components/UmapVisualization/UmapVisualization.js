@@ -10,29 +10,12 @@ const UmapVisualization = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedTarget, setSelectedTarget] = useState(null);
-  const [colorBy, setColorBy] = useState('avg_stance');
+  const [colorBy, setColorBy] = useState('mean_stance');
   const [sizeBy, setSizeBy] = useState('count');
   const [filterValue, setFilterValue] = useState('');
   
   
   const navigate = useNavigate();
-  
-  // Color mappings
-  const platformColors = {
-    'twitter': '#1da1f2',
-    'instagram': '#c32aa3',
-    'tiktok': '#000000'
-  };
-  
-  const partyColors = {
-    'Conservative': '#0000ff',
-    'Liberal': '#ff0000',
-    'NDP': '#ff8c00',
-    'Green': '#00ff00',
-    'Bloc': '#6495ed',
-    'PPC': '#800080',
-    'None': '#aaaaaa'
-  };
   
   // Load UMAP data
   useEffect(() => {
@@ -73,15 +56,15 @@ const UmapVisualization = () => {
   const getColor = useCallback((item) => {
     if (!item || typeof item[colorBy] === 'undefined') return '#aaaaaa';
     
-    if (colorBy === 'avg_stance') {
+    if (colorBy === 'mean_stance') {
       // Red (negative) to blue (positive) scale for stance
-      const value = item.avg_stance;
+      const value = item.mean_stance;
       if (value <= -0.7) return '#d32f2f';
       if (value <= -0.4) return '#f44336';
       if (value <= -0.1) return '#ffcdd2';
-      if (value >= 0.7) return '#1565c0';
-      if (value >= 0.4) return '#2196f3';
-      if (value >= 0.1) return '#bbdefb';
+      if (value >= 0.7) return '#15c065';
+      if (value >= 0.4) return '#21f396';
+      if (value >= 0.1) return '#bbfbde';
       return '#e0e0e0'; // Neutral
     }
     
@@ -92,14 +75,6 @@ const UmapVisualization = () => {
       if (value >= 0.5) return '#9c27b0';
       if (value >= 0.3) return '#ce93d8';
       return '#e0e0e0';
-    }
-    
-    if (colorBy === 'top_platform') {
-      return platformColors[item.top_platform] || '#aaaaaa';
-    }
-    
-    if (colorBy === 'top_party') {
-      return partyColors[item.top_party] || '#aaaaaa';
     }
     
     return '#aaaaaa';
@@ -138,8 +113,6 @@ const UmapVisualization = () => {
         `Count: ${item.count}<br>` +
         `Avg. Stance: ${formatNumber(item.avg_stance)}<br>` +
         `Polarization: ${formatNumber(item.stance_abs)}<br>` +
-        `Platform: ${item.top_platform}<br>` +
-        `Party: ${item.top_party}<br>` +
         `<i>Click to view trend</i>`
       );
       customdata.push(item);
@@ -214,7 +187,7 @@ const UmapVisualization = () => {
       </div>
       
       <div className="umap-legend">
-        {colorBy === 'avg_stance' && (
+        {colorBy === 'mean_stance' && (
           <div className="legend-items">
             <div className="legend-item">
               <span className="color-sample" style={{ backgroundColor: '#d32f2f' }}></span>
@@ -225,7 +198,7 @@ const UmapVisualization = () => {
               <span>Neutral</span>
             </div>
             <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#1565c0' }}></span>
+              <span className="color-sample" style={{ backgroundColor: '#15c065' }}></span>
               <span>Strongly For</span>
             </div>
           </div>
@@ -240,48 +213,6 @@ const UmapVisualization = () => {
             <div className="legend-item">
               <span className="color-sample" style={{ backgroundColor: '#9c27b0' }}></span>
               <span>Polarizing</span>
-            </div>
-          </div>
-        )}
-        
-        {colorBy === 'top_platform' && (
-          <div className="legend-items">
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#1da1f2' }}></span>
-              <span>Twitter</span>
-            </div>
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#c32aa3' }}></span>
-              <span>Instagram</span>
-            </div>
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#000000' }}></span>
-              <span>TikTok</span>
-            </div>
-          </div>
-        )}
-        
-        {colorBy === 'top_party' && (
-          <div className="legend-items">
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#0000ff' }}></span>
-              <span>Conservative</span>
-            </div>
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#ff0000' }}></span>
-              <span>Liberal</span>
-            </div>
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#ff8c00' }}></span>
-              <span>NDP</span>
-            </div>
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#00ff00' }}></span>
-              <span>Green</span>
-            </div>
-            <div className="legend-item">
-              <span className="color-sample" style={{ backgroundColor: '#6495ed' }}></span>
-              <span>Bloc</span>
             </div>
           </div>
         )}

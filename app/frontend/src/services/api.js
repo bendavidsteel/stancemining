@@ -142,6 +142,40 @@ export const getTargetFilters = async (targetName) => {
   return response.data;
 };
 
+export const getTargetTrendsBatch = async (targetName, filterType, filterValues) => {
+  const response = await api.get(`/target/${targetName}/trends/batch`, {
+    params: { 
+      filter_type: filterType,
+      filter_values: filterValues.join(',')
+    }
+  });
+  
+  // Parse the new data format: {"data": [{filter_value: {column: [values]}}]}
+  const parsedData = {};
+  
+  if (response.data && response.data.data) {
+    const filterData = response.data.data;
+    Object.entries(filterData).forEach(([filterValue, columnData]) => {
+      // Convert column-oriented data to row-oriented
+      const rowData = [];
+      const columns = Object.keys(columnData);
+      const numRows = columns.length > 0 ? columnData[columns[0]].length : 0;
+      
+      for (let i = 0; i < numRows; i++) {
+        const row = {};
+        columns.forEach(column => {
+          row[column] = columnData[column][i];
+        });
+        rowData.push(row);
+      }
+      
+      parsedData[filterValue] = rowData;
+    });
+  }
+  
+  return { data: parsedData };
+};
+
 export const getAllFilters = async () => {
   const response = await api.get('/filters');
   return response.data;
