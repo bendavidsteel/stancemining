@@ -1,2 +1,2 @@
 from stancemining.main import StanceMining
-from stancemining.estimate import get_stance_trends
+from stancemining.estimate import get_trends_for_all_targets

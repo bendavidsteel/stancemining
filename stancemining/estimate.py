@@ -29,11 +29,8 @@ MAX_FULL_GP_BATCH = 10000
 
 class StanceEstimation:
     def __init__(self, all_classifier_profiles):
-        self.predictor_confusion_probs = _get_predictor_confusion_probs(all_classifier_profiles)
+        self.predictor_confusion_probs = _get_target_predictor_confusion_probs(all_classifier_profiles)
         
-    def set_stance(self, stance):
-        self.stance = stance
-
     def model(self, opinion_sequences, predictor_ids, mask, prior=False):
         
         with pyro.plate("batched_data", opinion_sequences.shape[0], dim=-2):
@@ -71,7 +68,7 @@ class StanceEstimation:
 
                     # Get prediction probabilities based on the confusion matrix
                     # Assume self.predictor_confusion_probs is properly vectorized to handle batched inputs
-                    predict_probs = self.predictor_confusion_probs[self.stance]['predict_probs'][predictor_ids, comment_stance_cats, :]
+                    predict_probs = self.predictor_confusion_probs['predict_probs'][predictor_ids, comment_stance_cats, :]
 
                     pyro.sample("predicted_comment_stance", pyro.distributions.Categorical(probs=predict_probs), obs=opinion_sequences)
 
@@ -92,7 +89,7 @@ class StanceEstimation:
                 with pyro.poutine.mask(mask=mask):
 
                     # Get true probabilities from the confusion matrix
-                    true_probs = self.predictor_confusion_probs[self.stance]['true_probs'][predictor_ids, opinion_sequences, :]
+                    true_probs = self.predictor_confusion_probs['true_probs'][predictor_ids, opinion_sequences, :]
 
                     # Sample latent comment stance categories
                     comment_stance_cats = pyro.sample("latent_comment_stance_category", pyro.distributions.Categorical(probs=true_probs), infer={'is_auxiliary': True})
@@ -116,7 +113,7 @@ def _train_pyro_model(model_func, guide_func, optim, stance_opinion_sequences, c
         loss = svi.step(stance_opinion_sequences, classifier_indices, mask, prior=prior)
         losses.append(loss)
 
-def _get_op_seqs(opinion_sequences, stance_idx, all_classifier_indices):
+def _get_op_seqs(opinion_sequences, all_classifier_indices):
     op_seqs = []
     lengths = []
     all_predictor_ids = []
@@ -125,8 +122,8 @@ def _get_op_seqs(opinion_sequences, stance_idx, all_classifier_indices):
         length = 0
         predictor_ids = []
         for i in range(opinion_sequences.shape[1]):
-            if not np.isnan(opinion_sequences[user_idx, i, stance_idx]):
-                seq.append(opinion_sequences[user_idx, i, stance_idx])
+            if not np.isnan(opinion_sequences[user_idx, i]):
+                seq.append(opinion_sequences[user_idx, i])
                 length += 1
                 predictor_ids.append(all_classifier_indices[user_idx, i].astype(int))
 
@@ -149,7 +146,7 @@ def _get_op_seq_with_mask(opinion_sequences, max_length, op_seqs, lengths, all_p
 
     return stance_opinion_sequences, classifier_indices, mask
 
-def _data_to_torch_device(stance_opinion_sequences, classifier_indices, device):
+def _data_to_torch_device(stance_opinion_sequences, classifier_indices, mask, device):
     stance_opinion_sequences = torch.tensor(stance_opinion_sequences).int() + 1
     classifier_indices = torch.tensor(classifier_indices).int()
     mask = torch.tensor(mask).bool()
@@ -160,51 +157,97 @@ def _data_to_torch_device(stance_opinion_sequences, classifier_indices, device):
 
     return stance_opinion_sequences, classifier_indices, mask
 
-def get_stance_normal(document_df, filter_cols=[]):
+def _get_pyro_optimizer(num_steps):
+    
+    gamma = 0.1  # final learning rate will be gamma * initial_lr
+    initial_lr = 0.01
+    lrd = gamma ** (1 / num_steps)
+    optim = pyro.optim.ClippedAdam({'lr': initial_lr, 'lrd': lrd})
+    return optim
+
+def get_stance_normal(stance_df):
     classifier_profiles = _get_classifier_profiles()
     estimator = StanceEstimation(classifier_profiles)
 
-    user_stances = np.zeros((opinion_sequences.shape[0], len(dataset.stance_columns)))
-    user_stance_vars = np.zeros((opinion_sequences.shape[0], len(dataset.stance_columns)))
-
-    # setup the optimizer
     num_steps = 1000
-    optim = _get_optimizer(num_steps)
-    if opinion_sequences.shape[0] > 1000:
-        device = torch.device("cpu") # currently too big for GPU
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    optim = _get_pyro_optimizer(num_steps)
+    user_stances = np.zeros(1)
+    user_stance_vars = np.zeros(1)
+
+    stance_sequence = stance_df['Stance'].to_numpy().reshape(1, -1)
+    all_classifier_indices = np.zeros_like(stance_sequence)
+
+    op_seqs, lengths, all_predictor_ids, max_length = _get_op_seqs(stance_sequence, all_classifier_indices)
+
+    stance_opinion_sequences, classifier_indices, mask = _get_op_seq_with_mask(stance_sequence, max_length, op_seqs, lengths, all_predictor_ids)
+    
+    stance_opinion_sequences, classifier_indices, mask = _data_to_torch_device(stance_opinion_sequences, classifier_indices, mask, device)
+
+    estimator.predictor_confusion_probs['predict_probs'] = estimator.predictor_confusion_probs['predict_probs'].to(device)
+    estimator.predictor_confusion_probs['true_probs'] = estimator.predictor_confusion_probs['true_probs'].to(device)
+
+    prior = True
+    _train_pyro_model(estimator.model, estimator.guide, optim, stance_opinion_sequences, classifier_indices, mask, prior, num_steps)
+
+    # grab the learned variational parameters
+    if prior:
+        user_stances[:] = pyro.param("user_stance_loc_q").cpu().detach().numpy().squeeze(-1)
+        user_stance_vars[:] = pyro.param("user_stance_var_q").cpu().detach().numpy().squeeze(-1)
     else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for stance_idx, stance_column in enumerate(dataset.stance_columns):
+        user_stances[:] = pyro.param("user_stance").detach().numpy().squeeze(-1)
+        user_stance_vars[:, 1] = pyro.param("user_stance_var").detach().numpy().squeeze(-1)
+    
+    return user_stances.item(), user_stance_vars.item()
 
-        op_seqs, lengths, all_predictor_ids, max_length = _get_op_seqs(opinion_sequences, stance_idx, all_classifier_indices)
-        if max_length == 0:
+def get_stance_normal_for_target(target_df, min_count=5, filter_cols=[], verbose=False):
+    stance_values = []
+
+    for filter_col in filter_cols:
+        for unique_value in tqdm(target_df[filter_col].unique(), disable=not verbose, desc=f"Getting stance for unique values in '{filter_col}'"):
+            value_df = target_df.filter(pl.col(filter_col) == unique_value)
+            if value_df.shape[0] < min_count:
+                continue
+            value_stance_loc, value_stance_var = get_stance_normal(value_df)
+            stance_values.append({
+                'Target': target_df['Target'].unique()[0],
+                'filter_type': filter_col,
+                'filter_value': unique_value,
+                'stance_loc': value_stance_loc,
+                'stance_var': value_stance_var
+            })
+
+    all_stance_loc, all_stance_var = get_stance_normal(target_df)
+    stance_values.append({
+        'Target': target_df['Target'].unique()[0],
+        'filter_type': 'all',
+        'filter_value': 'all',
+        'stance_loc': all_stance_loc,
+        'stance_var': all_stance_var
+    })
+
+    return stance_values
+
+def get_stance_normal_for_all_targets(document_df, filter_cols=[], min_count=5, verbose=False) -> pl.DataFrame:
+    
+
+    targets_df, target_names = _document_to_targets(document_df, min_count)
+
+    all_value_stances = []
+    for target_name in target_names:
+        target_df = targets_df.filter(pl.col('Target') == target_name)
+        if target_df.shape[0] < min_count:
+            logger.warning(f"Skipping target '{target_name}' with {target_df.shape[0]} samples, less than min_count {min_count}.")
             continue
+        if verbose:
+            logger.info(f"Calculating stance for target '{target_name}' with {target_df.shape[0]} samples.")
+        target_value_stances = get_stance_normal_for_target(target_df, min_count=min_count, filter_cols=filter_cols, verbose=verbose)
+        all_value_stances += target_value_stances
 
-        stance_opinion_sequences, classifier_indices, mask = _get_op_seq_with_mask(opinion_sequences, max_length, op_seqs, lengths, all_predictor_ids)
-        
-        if stance_column not in estimator.predictor_confusion_probs or len(estimator.predictor_confusion_probs[stance_column]) == 0:
-            continue
-        estimator.set_stance(stance_column)
-        stance_opinion_sequences, classifier_indices, mask = _data_to_torch_device(stance_opinion_sequences, classifier_indices, mask)
+    value_stance_df = pl.DataFrame(all_value_stances)
 
-        estimator.predictor_confusion_probs[stance_column]['predict_probs'] = estimator.predictor_confusion_probs[stance_column]['predict_probs'].to(device)
-        estimator.predictor_confusion_probs[stance_column]['true_probs'] = estimator.predictor_confusion_probs[stance_column]['true_probs'].to(device)
-
-        prior = True
-        _train_pyro_model(estimator.model, estimator.guide, optim, stance_opinion_sequences, classifier_indices, mask, prior, num_steps)
-
-        # grab the learned variational parameters
-        if prior:
-            user_stances[:, stance_idx] = pyro.param("user_stance_loc_q").cpu().detach().numpy().squeeze(-1)
-            user_stance_vars[:, stance_idx] = pyro.param("user_stance_var_q").cpu().detach().numpy().squeeze(-1)
-        else:
-            user_stances[:, stance_idx] = pyro.param("user_stance").detach().numpy().squeeze(-1)
-            user_stance_vars[:, stance_idx, 1] = pyro.param("user_stance_var").detach().numpy().squeeze(-1)
-        # set parameters to nan where no data was available
-        user_stances[lengths == 0, stance_idx, 0] = np.nan
-        user_stance_vars[lengths == 0, stance_idx, 1] = np.nan
-
-    return user_stances, user_stance_vars
+    return value_stance_df
 
 class GPClassificationModel(gpytorch.models.ApproximateGP):
     def __init__(self, inducing_points, learn_inducing_locations=False, lengthscale_loc=1.0, lengthscale_scale=0.5, variational_dist='natural'):
@@ -1136,7 +1179,7 @@ def _calculate_trends_for_filtered_df(
 
     return trend_df, interpolation_outputs
 
-def compute_trends_for_target(
+def get_trends_for_target(
         df: pl.DataFrame, 
         target_name, 
         filter_columns: List[str], 
@@ -1284,7 +1327,18 @@ def compute_trends_for_target(
 
     return all_trend_df, all_interpolation_outputs
 
-def get_stance_trends(
+def _document_to_targets(document_df: pl.DataFrame, min_count):
+    targets_df = document_df.explode(['Targets', 'Stances']).rename({'Targets': 'Target', 'Stances': 'Stance'})
+
+    target_names = targets_df.group_by('Target')\
+        .len()\
+        .filter(pl.col('len') > min_count)\
+        .drop_nulls('Target')\
+        .sort('len', descending=True)['Target'].to_list()
+    
+    return targets_df, target_names
+
+def get_trends_for_all_targets(
         document_df: pl.DataFrame, 
         time_column: str = 'createtime', 
         filter_columns: List[str] = [], 
@@ -1315,13 +1369,7 @@ def get_stance_trends(
     all_trend_gps_data = []
     all_trend_df = None
 
-    targets_df = document_df.explode(['Targets', 'Stances']).rename({'Targets': 'Target', 'Stances': 'Stance'})
-
-    target_names = targets_df.group_by('Target')\
-        .len()\
-        .filter(pl.col('len') > min_count)\
-        .drop_nulls('Target')\
-        .sort('len', descending=True)['Target'].to_list()
+    targets_df, target_names = _document_to_targets(document_df, min_count)
 
     if interpolation_method == 'gp':
         classifier_profiles = _get_classifier_profiles()
@@ -1332,7 +1380,7 @@ def get_stance_trends(
         logger.info(f"Processing primary target: {target_name}")
             
         # Process the target with grouping
-        target_trend_df, interpolation_outputs = compute_trends_for_target(
+        target_trend_df, interpolation_outputs = get_trends_for_target(
             targets_df, 
             target_name, 
             filter_columns, 

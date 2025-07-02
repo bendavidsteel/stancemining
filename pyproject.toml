@@ -20,6 +20,7 @@ dependencies = [
     "pandas",
     "peft>=0.15.2",
     "polars>=1.30.0",
+    "pyro-ppl>=1.9.1",
     "pytest>=8.4.0",
     "sacrebleu>=2.5.1",
     "scikit-learn>=1.7.0",
