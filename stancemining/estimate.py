@@ -1228,9 +1228,13 @@ def infer_stance_trends_for_target(
         filter_columns (List[str]): List of columns to filter by for trend calculation (i.e. 'Source', 'Author', etc.).
         time_column (str): Column name for the time data, defaults to 'createtime'.
         interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process and 'lowess' for LOWESS. Defaults to 'gp'.
+            Gaussian Process is better for noise and modelling error, but is slower.
+            LOWESS is faster, but does not model error, and does not allow setting a prior to properly model noise.
         classifier_profiles (Dict): Dictionary containing classifier profiles for ordinal GP.
         min_filter_count (int): Minimum count of occurrences for a filter value to be considered.
         time_scale (str): Time scale for the trends, e.g., '1mo', '1w'.
+            Can be any combination of an integer and a time unit from ['h', 'd', 'w', 'mo', 'y'].
+            If time scale is changed from '1mo', the lengthscale prior should be adjusted accordingly.
         verbose (bool): Whether to print progress information.
         lengthscale_loc (float): Location parameter for the lengthscale prior.
         lengthscale_scale (float): Scale parameter for the lengthscale prior.
@@ -1381,7 +1385,11 @@ def infer_stance_trends_for_all_targets(
         filter_columns (List[str]): List of columns to filter by for trend calculation (i.e. 'Source', 'Author', etc.).
         min_count (int): Minimum count of occurrences for a filter value to be considered.
         time_scale (str): Time scale for the trends, e.g., '1mo', '1w'.
+            Can be any combination of an integer and a time unit from ['h', 'd', 'w', 'mo', 'y'].
+            If time scale is changed from '1mo', the lengthscale prior should be adjusted accordingly.
         interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process and 'lowess' for LOWESS. Defaults to 'gp'.
+            Gaussian Process is better for noise and modelling error, but is slower.
+            LOWESS is faster, but does not model error, and does not allow setting a prior to properly model noise.
         verbose (bool): Whether to print progress information.
         
     Returns:
