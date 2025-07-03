@@ -21,3 +21,9 @@ Stance Visualization
 
 .. autofunction:: stancemining.plot.plot_semantic_map
 .. autofunction:: stancemining.plot.plot_trend_map
+
+Multimodal Utilities
+------------------------------------------------------
+
+.. autofunction:: stancemining.utils.get_transcripts_from_audio_files
+.. autofunction:: stancemining.utils.get_transcripts_from_video_files
