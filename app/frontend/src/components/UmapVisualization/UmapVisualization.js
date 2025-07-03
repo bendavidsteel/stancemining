@@ -94,6 +94,36 @@ const UmapVisualization = () => {
   
   
   
+  // Helper function to create stacked bar HTML
+  const createStanceBars = useCallback((item) => {
+    const favor = item.n_favor || 0;
+    const neutral = item.n_neutral || 0;
+    const against = item.n_against || 0;
+    const total = favor + neutral + against;
+    
+    if (total === 0) return '';
+    
+    const favorPct = ((favor / total) * 100).toFixed(1);
+    const neutralPct = ((neutral / total) * 100).toFixed(1);
+    const againstPct = ((against / total) * 100).toFixed(1);
+    
+    // Create a simple text-based bar representation
+    const barWidth = 20;
+    const againstBars = Math.round((against / total) * barWidth);
+    const neutralBars = Math.round((neutral / total) * barWidth);
+    const favorBars = barWidth - againstBars - neutralBars;
+    
+    const againstBar = '█'.repeat(Math.max(0, againstBars));
+    const neutralBar = '░'.repeat(Math.max(0, neutralBars));
+    const favorBar = '█'.repeat(Math.max(0, favorBars));
+    
+    return `<b>Stance Breakdown:</b><br>` +
+           `<span style="color: #d32f2f;">${againstBar}</span><span style="color: #999;">${neutralBar}</span><span style="color: #15c065;">${favorBar}</span><br>` +
+           `<span style="color: #d32f2f;">Against: ${against} (${againstPct}%)</span><br>` +
+           `<span style="color: #999;">Neutral: ${neutral} (${neutralPct}%)</span><br>` +
+           `<span style="color: #15c065;">For: ${favor} (${favorPct}%)</span>`;
+  }, []);
+
   // Prepare data for Plotly
   const plotlyData = useMemo(() => {
     const x = [];
@@ -111,9 +141,10 @@ const UmapVisualization = () => {
       text.push(
         `<b>${item.Target}</b><br>` +
         `Count: ${item.count}<br>` +
-        `Avg. Stance: ${formatNumber(item.avg_stance)}<br>` +
+        `Mean Stance: ${formatNumber(item.mean_stance)}<br>` +
         `Polarization: ${formatNumber(item.stance_abs)}<br>` +
-        `<i>Click to view trend</i>`
+        createStanceBars(item) +
+        `<br><i>Click to view trend</i>`
       );
       customdata.push(item);
     });
@@ -140,10 +171,10 @@ const UmapVisualization = () => {
       hoverlabel: {
         bgcolor: 'rgba(255,255,255,0.95)',
         bordercolor: '#ddd',
-        font: { size: 12 }
+        font: { size: 12, color: 'black' }
       }
     }];
-  }, [filteredData, selectedTarget, colorBy, sizeBy, getColor, getPointSize, formatNumber]);
+  }, [filteredData, selectedTarget, colorBy, sizeBy, getColor, getPointSize, formatNumber, createStanceBars]);
   
   if (loading) {
     return <div className="umap-loading">Loading UMAP visualization...</div>;
