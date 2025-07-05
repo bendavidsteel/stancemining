@@ -24,13 +24,16 @@ class StanceMining:
     Initialize the StanceMining class.
 
     Args:
+        stance_target_type (str): Type of stance target to extract, either 'noun-phrases' or 'claims'.
         llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
         model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
-        model_name (str): Name of the LLM model to use.
+        model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'zero-shot', for stance target extraction and detection.
         model_kwargs (dict): Additional keyword arguments for the LLM model.
         tokenizer_kwargs (dict): Additional keyword arguments for the tokenizer.
+        stance_detection_model (str): Name of the stance detection model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection' if not provided.
         stance_detection_finetune_kwargs (dict): Keyword arguments for the fine-tuned stance detection model.
         stance_detection_model_kwargs (dict): Keyword arguments for stance detection model inference.
+        target_extraction_model (str): Name of the target extraction model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-target-extraction' if not provided.
         target_extraction_finetune_kwargs (dict): Keyword arguments for the fine-tuned target extraction model.
         target_extraction_model_kwargs (dict): Keyword arguments for target extraction model inference.
         embedding_model (str): Name of the embedding model to use for target extraction.
@@ -40,20 +43,25 @@ class StanceMining:
 
     def __init__(
             self, 
+            stance_target_type='noun-phrases',
             llm_method='finetuned',
             model_inference='vllm', 
             model_name='microsoft/Phi-4-mini-instruct', 
             model_kwargs={}, 
             tokenizer_kwargs={},
+            stance_detection_model=None,
             stance_detection_finetune_kwargs={},
             stance_detection_model_kwargs={},
+            target_extraction_model=None,
             target_extraction_finetune_kwargs={},
             target_extraction_model_kwargs={},
             embedding_model='intfloat/multilingual-e5-small',
             embedding_model_inference='vllm',
             verbose=False
         ):
+        assert stance_target_type in ['noun-phrases', 'claims'], f"Stance target type must be either 'noun-phrases' or 'claims', not '{stance_target_type}'"
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
+        self.stance_target_type = stance_target_type
         self.llm_method = llm_method
         self.model_inference = model_inference
         self.model_name = model_name
@@ -65,8 +73,11 @@ class StanceMining:
 
         self.tokenizer_kwargs = tokenizer_kwargs
 
+        if stance_detection_model is None:
+            stance_detection_model = 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection'
+
         if 'model_name' not in stance_detection_finetune_kwargs and 'hf_model' not in stance_detection_finetune_kwargs:
-            stance_detection_finetune_kwargs['hf_model'] = 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection'
+            stance_detection_finetune_kwargs['hf_model'] = stance_detection_model
         if 'classification_method' not in stance_detection_finetune_kwargs:
             stance_detection_finetune_kwargs['classification_method'] = 'head'
         if 'prompting_method' not in stance_detection_finetune_kwargs:
@@ -77,8 +88,16 @@ class StanceMining:
             stance_detection_model_kwargs['device_map'] = 'auto'
         self.stance_detection_model_kwargs = stance_detection_model_kwargs
 
+        if target_extraction_model is None:
+            if self.stance_target_type == 'noun-phrases':
+                target_extraction_model = 'bendavidsteel/SmolLM2-360M-Instruct-stance-target-extraction'
+            elif self.stance_target_type == 'claims':
+                target_extraction_model = 'bendavidsteel/SmolLM2-360M-Instruct-claim-extraction'
+            else:
+                raise ValueError(f"Unknown stance target type: {self.stance_target_type}. Must be either 'noun-phrases' or 'claims'.")
+
         if 'model_name' not in target_extraction_finetune_kwargs and 'hf_model' not in target_extraction_finetune_kwargs:
-            target_extraction_finetune_kwargs['hf_model'] = 'bendavidsteel/SmolLM2-360M-Instruct-stance-target-extraction'
+            target_extraction_finetune_kwargs['hf_model'] = target_extraction_model
         if 'generation_method' not in target_extraction_finetune_kwargs:
             target_extraction_finetune_kwargs['generation_method'] = 'list'
         if 'prompting_method' not in target_extraction_finetune_kwargs:
@@ -94,8 +113,6 @@ class StanceMining:
             logger.setLevel("DEBUG")
         else:
             logger.setLevel("WARNING")
-
-        self.generator = self._get_generator(lazy=lazy)
 
         self.embedding_model = embedding_model
         self.embedding_model_inference = embedding_model_inference
@@ -165,16 +182,15 @@ class StanceMining:
         elif 'Targets' not in document_df.columns:
             logger.info("Getting base targets")
             document_df = self.get_base_targets(docs, embedding_model=embed_model, text_column=text_column, parent_text_column=parent_text_column)
-
-            # cluster initial stance targets
-            base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls()[['Targets']]
         else:
             assert isinstance(document_df.schema['Targets'], pl.List), "Targets column must be a list of strings"
-            base_target_df = document_df.explode('Targets').unique('Targets').drop_nulls('Targets')[['Targets']]
+        
+        # cluster initial stance targets
+        base_target_df = document_df.explode('Targets').rename({'Targets': 'Target'}).unique('Target').drop_nulls().select(['Target'])
         
         if generate_higher_level_targets:
             logger.info("Fitting topic model")
-            doc_targets = base_target_df['Targets'].to_list()
+            doc_targets = base_target_df['Target'].to_list()
             embeddings = self._get_embeddings(doc_targets, model=embed_model)
             cluster_layers, cluster_df = self._topic_model(doc_targets, embeddings, embed_model, toponymy_kwargs)
             if len(cluster_df) > 0:
@@ -184,7 +200,7 @@ class StanceMining:
                         .list.filter(pl.element() != -1)  # filter out -1 clusters
                 ).explode('Clusters').rename({'Clusters': 'Cluster'})
                 logger.info("Getting higher level stance targets")
-                stance_targets = prompting.ask_llm_target_aggregate(self.generator, cluster_df.select(['Exemplars', 'Keyphrases']).to_dicts())
+                stance_targets = self._ask_llm_target_aggregate(cluster_df.select(['Exemplars', 'Keyphrases']).to_dicts())
                 cluster_df = cluster_df.with_columns(
                     pl.Series(name='ClusterTargets', values=stance_targets, dtype=pl.List(pl.String))
                 )
@@ -277,11 +293,15 @@ class StanceMining:
 
         return embeddings
 
-    
+    def _ask_llm_target_aggregate(self, clusters: List[dict]):
+        llm = self._get_llm()
+        return prompting.ask_llm_target_aggregate(llm, clusters)
+
     def _ask_llm_stance_target(self, docs: List[str]):
         num_samples = 3
         if self.llm_method == 'zero-shot':
-            targets = prompting.ask_llm_zero_shot_stance_target(self.generator, docs, {'num_samples': num_samples})
+            llm = self._get_llm()
+            targets = prompting.ask_llm_zero_shot_stance_target(llm, docs, {'num_samples': num_samples})
         elif self.llm_method == 'finetuned':
             df = pl.DataFrame({'Text': docs})
 
@@ -290,10 +310,12 @@ class StanceMining:
                 'repetition_penalty': 1.2
             }
 
+            task_type = 'topic-extraction' if self.stance_target_type == 'noun-phrases' else 'claim-extraction'
+
             if self.model_inference == 'transformers':
-                results = finetune.get_predictions("topic-extraction", df, self.target_extraction_finetune_kwargs, model_kwargs=self.target_extraction_model_kwargs)
+                results = finetune.get_predictions(task_type, df, self.target_extraction_finetune_kwargs, model_kwargs=self.target_extraction_model_kwargs)
             elif self.model_inference == 'vllm':
-                results = llms.get_vllm_predictions("topic-extraction", df, self.target_extraction_finetune_kwargs, verbose=self.verbose)
+                results = llms.get_vllm_predictions(task_type, df, self.target_extraction_finetune_kwargs, verbose=self.verbose)
             else:
                 raise ValueError()
 
@@ -309,7 +331,8 @@ class StanceMining:
 
     def _ask_llm_stance(self, docs, stance_targets, parent_docs=None):
         if self.llm_method == 'zero-shot':
-            return prompting.ask_llm_zero_shot_stance(self.generator, docs, stance_targets)
+            llm = self._get_llm()
+            return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets)
         elif self.llm_method == 'finetuned':
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentTexts': parent_docs})
             if isinstance(data.schema['ParentTexts'], pl.String):
@@ -621,15 +644,12 @@ class StanceMining:
         """
 
         return self.target_info
-    
-    def get_topic_model(self):
-        return self.topic_model
 
-    def _get_generator(self, lazy=False):
+    def _get_llm(self):
         if self.model_inference == 'transformers':
-            return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs, lazy=lazy)
+            return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs)
         elif self.model_inference == 'vllm':
-            return llms.VLLM(self.model_name, lazy=lazy, verbose=self.verbose)
+            return llms.VLLM(self.model_name, verbose=self.verbose)
         else:
             raise ValueError(f"LLM library '{self.model_inference}' not implemented")
         

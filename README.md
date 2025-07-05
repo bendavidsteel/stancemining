@@ -36,6 +36,8 @@ trend_df = stancemining.get_trends_for_all_targets(document_df)
 
 This library comes with a web app to explore the results of the output.
 
+Here is a video demo of the app: [StanceMining App Demo](https://www.youtube.com/watch?v=4tvqq8GTUHU)
+
 ### To deploy stancemining app
 
 The <your-data-path> should be either an absolute path, or a path relative to the `app` directory where the compose.yaml file is located.
