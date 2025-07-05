@@ -36,11 +36,15 @@ trend_df = stancemining.get_trends_for_all_targets(document_df)
 
 This library comes with a web app to explore the results of the output.
 
+Here is a video demo of the app: [StanceMining App Demo](https://www.youtube.com/watch?v=4tvqq8GTUHU)
+
 ### To deploy stancemining app
 If you need authentication for the app, you can set the environment variable `STANCE_AUTH_URL_PATH` to the URL of your authentication service (e.g., `myauth.com/login`). That path must accept a POST request with a JSON body containing `username` and `password` fields, and return a JSON response with a `token` field.
 If you do not need authentication, you can leave the environment variable unset.
 ```
-STANCE_DATA_PATH=<your-data-path> STANCE_AUTH_URL_PATH=<your-auth-url/login> docker compose up -f ./app/compose.yaml
+export STANCE_DATA_PATH=<your-data-path>
+export STANCE_AUTH_URL_PATH=<your-auth-url/login>
+docker compose -f ./app/compose.yaml up
 ```
 
 ## To reproduce experimental results

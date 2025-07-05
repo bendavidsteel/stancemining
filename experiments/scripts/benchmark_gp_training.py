@@ -15,7 +15,8 @@ from stancemining.estimate import (
     _setup_ordinal_gp_model, 
     _train_ordinal_likelihood_gp,
     _get_classifier_profiles,
-    _get_timestamps
+    _get_timestamps,
+    _get_model_prediction
 )
 
 def generate_synthetic_data(
@@ -73,10 +74,10 @@ def generate_synthetic_data(
     
     classifier_ids = np.zeros_like(observed_stances, dtype=int)
     
-    return timestamps, observed_stances, classifier_ids
+    return days, latent_stance, timestamps, observed_stances, classifier_ids
 
 # Custom training function with timing and scheduler
-def timed_train_gp(model, likelihood, train_x, train_y, classifier_ids, optimizers, training_iter, scheduler=None):
+def train_gp(model, likelihood, train_x, train_y, classifier_ids, optimizers, training_iter, scheduler=None):
     model.train()
     likelihood.train()
     
@@ -92,8 +93,6 @@ def timed_train_gp(model, likelihood, train_x, train_y, classifier_ids, optimize
         classifier_ids_gpu = classifier_ids
     
     mll = gpytorch.mlls.VariationalELBO(likelihood, model, train_y.size(0))
-    
-    start_time = time.time()
     
     losses = []
     for k in range(training_iter):
@@ -118,18 +117,59 @@ def timed_train_gp(model, likelihood, train_x, train_y, classifier_ids, optimize
         
         losses.append(loss.item())
     
-    end_time = time.time()
-    training_time = end_time - start_time
-    final_loss = losses[-1]
+    return losses
+
+def custom_get_optimizer(model, likelihood, ngd_lr, lr, scheduler_type, max_epochs, num_data=None):
+    adam_params = []
+    variational_distribution = model.variational_strategy._variational_distribution
+    adam_params.append({'params': likelihood.parameters()})
     
-    return training_time, final_loss, losses
+    if isinstance(variational_distribution, gpytorch.variational.NaturalVariationalDistribution):
+        variational_ngd_optimizer = gpytorch.optim.NGD(
+            model.variational_parameters(), 
+            num_data=num_data, 
+            lr=ngd_lr  # Use custom NGD learning rate
+        )
+    
+        hyperparameter_optimizer = torch.optim.Adam(
+            adam_params + [{'params': model.hyperparameters()}],
+            lr=lr  # Use custom learning rate
+        )
+    
+        # Apply different schedulers
+        if scheduler_type == 'cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                hyperparameter_optimizer, T_max=max_epochs
+            )
+        elif scheduler_type == 'cosine_warm':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                hyperparameter_optimizer, T_0=max_epochs // 5
+            )
+        elif scheduler_type == 'exponential':
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                hyperparameter_optimizer, gamma=0.995
+            )
+        elif scheduler_type == 'step':
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                hyperparameter_optimizer, step_size=max_epochs // 5, gamma=0.5
+            )
+        else:  # 'none'
+            scheduler = None
+    
+        optimizers = [hyperparameter_optimizer, variational_ngd_optimizer]
+        return optimizers, scheduler
+    else:
+        raise NotImplementedError("Only Natural Variational Distribution supported")
+
+                        
 
 def benchmark_gp_training(
     learning_rates: List[float],
     ngd_learning_rates: List[float],
     scheduler_types: List[str],
     data_sizes: List[int],
-    n_trials: int = 3
+    noise_scales: List[float],
+    rw_scales: List[float]
 ) -> pl.DataFrame:
     """Benchmark GP training time with different learning rates and schedulers."""
     
@@ -137,131 +177,72 @@ def benchmark_gp_training(
     classifier_profiles = _get_classifier_profiles()
     
     # Create progress bar for all combinations
-    total_combinations = len(learning_rates) * len(ngd_learning_rates) * len(scheduler_types) * len(data_sizes) * n_trials
+    total_combinations = len(learning_rates) * len(ngd_learning_rates) * len(scheduler_types) * len(data_sizes) * len(noise_scales) * len(rw_scales)
     pbar = tqdm(total=total_combinations, desc="Benchmarking GP Training")
     
-    max_epochs = 200
+    max_epochs = 500
     for data_size in data_sizes:
         for lr in learning_rates:
             for ngd_lr in ngd_learning_rates:
                 for scheduler_type in scheduler_types:
-                    for trial in range(n_trials):
-                        # Generate synthetic data
-                        timestamps, observed_stances, classifier_ids = generate_synthetic_data(
-                            n_samples=data_size,
-                            seed=42 + trial,  # Different seed for each trial
-                            classifier_profiles=classifier_profiles
-                        )
-                    
-                        # Setup GP model
-                        model, likelihood, train_x, train_y, classifier_ids = _setup_ordinal_gp_model(
-                            timestamps, 
-                            observed_stances, 
-                            classifier_ids, 
-                            classifier_profiles,
-                            lengthscale_loc=2.0,
-                            lengthscale_scale=0.1
-                        )
-                    
-                        # Modify the optimizer in the training function
-                        original_get_optimizer = None
-                        
-                        def custom_get_optimizer(model, likelihood, num_data=None):
-                            adam_params = []
-                            variational_distribution = model.variational_strategy._variational_distribution
-                            adam_params.append({'params': likelihood.parameters()})
-                            
-                            if isinstance(variational_distribution, gpytorch.variational.NaturalVariationalDistribution):
-                                variational_ngd_optimizer = gpytorch.optim.NGD(
-                                    model.variational_parameters(), 
-                                    num_data=num_data, 
-                                    lr=ngd_lr  # Use custom NGD learning rate
-                                )
-                            
-                                hyperparameter_optimizer = torch.optim.Adam(
-                                    adam_params + [{'params': model.hyperparameters()}],
-                                    lr=lr  # Use custom learning rate
-                                )
-                            
-                                # Apply different schedulers
-                                if scheduler_type == 'cosine':
-                                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                                        hyperparameter_optimizer, T_max=max_epochs
-                                    )
-                                elif scheduler_type == 'cosine_warm':
-                                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                                        hyperparameter_optimizer, T_0=max_epochs // 5
-                                    )
-                                elif scheduler_type == 'exponential':
-                                    scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                                        hyperparameter_optimizer, gamma=0.995
-                                    )
-                                elif scheduler_type == 'step':
-                                    scheduler = torch.optim.lr_scheduler.StepLR(
-                                        hyperparameter_optimizer, step_size=max_epochs // 5, gamma=0.5
-                                    )
-                                else:  # 'none'
-                                    scheduler = None
-                            
-                                optimizers = [hyperparameter_optimizer, variational_ngd_optimizer]
-                                return optimizers, scheduler
-                            else:
-                                raise NotImplementedError("Only Natural Variational Distribution supported")
-                    
-                        # Monkey patch the training function to use custom optimizer
-                        import stancemining.estimate as est_module
-                        original_get_optimizer = est_module._get_optimizer
-                        
-                        
-                        
-                        try:
-                            optimizers, scheduler = custom_get_optimizer(model, likelihood, train_y.size(0))
-                            training_time, final_loss, losses = timed_train_gp(
-                                model, likelihood, train_x, train_y, classifier_ids, optimizers, max_epochs, scheduler=scheduler
+                    for noise_scale in noise_scales:
+                        for rw_scale in rw_scales:
+                            # Generate synthetic data
+                            test_x, latent_user_stance, timestamps, observed_stances, classifier_ids = generate_synthetic_data(
+                                n_samples=data_size,
+                                noise_scale=noise_scale,
+                                random_walk_scale=rw_scale,
+                                seed=42,  # Different seed for each trial
+                                classifier_profiles=classifier_profiles
                             )
                         
-                            # Calculate convergence metrics
-                            if len(losses) >= 100:
-                                early_loss = np.mean(losses[:100])
-                                late_loss = np.mean(losses[-100:])
-                                convergence_rate = (early_loss - late_loss) / early_loss
-                            else:
-                                convergence_rate = 0.0
+                            # Setup GP model
+                            model, likelihood, train_x, train_y, classifier_ids = _setup_ordinal_gp_model(
+                                timestamps, 
+                                observed_stances, 
+                                classifier_ids, 
+                                classifier_profiles,
+                                lengthscale_loc=2.0,
+                                lengthscale_scale=0.1
+                            )
                         
+                            
+                            optimizers, scheduler = custom_get_optimizer(model, likelihood, ngd_lr, lr, scheduler_type, max_epochs, train_y.size(0))
+                            losses = train_gp(
+                                model, likelihood, train_x, train_y, classifier_ids, optimizers, max_epochs, scheduler=scheduler
+                            )
+
+                            # Get final model prediction
+                            model.eval()
+                            inferred_user_stance, _, _ = _get_model_prediction(model, test_x)
+                            mse = np.mean((inferred_user_stance - latent_user_stance) ** 2)
+                        
+                            min_loss = min(losses)
+                            final_loss = losses[-1]
+
+                            # determine epoch where loss was 90% of the way to minimum loss
+                            ninety_percent_loss = min_loss + 0.1 * (losses[0] - min_loss)
+                            epoch_ninety_percent_loss = np.min(
+                                np.where(np.array(losses) <= ninety_percent_loss)
+                            )
                             # Store results
                             result = {
                                 'data_size': data_size,
                                 'learning_rate': lr,
                                 'ngd_learning_rate': ngd_lr,
                                 'scheduler_type': scheduler_type,
-                                'trial': trial,
-                                'training_time': training_time,
+                                'noise_scale': noise_scale,
+                                'rw_scale': rw_scale,
                                 'final_loss': final_loss,
-                                'convergence_rate': convergence_rate,
-                                'n_parameters': sum(p.numel() for p in model.parameters()),
+                                'min_loss': min_loss,
+                                'epoch_ninety_percent_loss': epoch_ninety_percent_loss,
                                 'n_data_points': len(train_x),
-                                'loss_trajectory': losses
+                                'loss_trajectory': losses,
+                                'mse': mse  
                             }
                             results.append(result)
                         
-                        except NotPSDError as e:
-                            print(f"Failed for lr={lr}, ngd_lr={ngd_lr}, scheduler={scheduler_type}, size={data_size}, trial={trial}: {e}")
-                            result = {
-                                'data_size': data_size,
-                                'learning_rate': lr,
-                                'ngd_learning_rate': ngd_lr,
-                                'scheduler_type': scheduler_type,
-                                'trial': trial,
-                                'training_time': float('inf'),
-                                'final_loss': float('inf'),
-                                'convergence_rate': 0.0,
-                                'n_parameters': 0,
-                                'n_data_points': len(train_x) if 'train_x' in locals() else 0,
-                                'loss_trajectory': []
-                            }
-                            results.append(result)
-                    
-                        pbar.update(1)
+                            pbar.update(1)
     
     pbar.close()
     return pl.DataFrame(results)
@@ -274,42 +255,55 @@ def analyze_results(results_df: pl.DataFrame) -> None:
     print("="*60)
     
     # Group by configuration and calculate statistics
-    summary = results_df.group_by(['data_size', 'learning_rate', 'ngd_learning_rate', 'scheduler_type'])\
+    summary = results_df.group_by(['learning_rate', 'ngd_learning_rate', 'scheduler_type'])\
         .agg([
-            pl.col('training_time').mean().alias('avg_time'),
-            pl.col('training_time').std().alias('std_time'),
-            pl.col('final_loss').mean().alias('avg_loss'),
-            pl.col('final_loss').std().alias('std_loss'),
-            pl.col('convergence_rate').mean().alias('avg_convergence')
-        ])\
-        .sort(['data_size', 'avg_time'])
+            pl.col('min_loss').mean().alias('avg_min_loss'),
+            pl.col('min_loss').std().alias('std_min_loss'),
+            pl.col('epoch_ninety_percent_loss').mean().alias('avg_epoch_ninety_percent_loss'),
+            pl.col('epoch_ninety_percent_loss').std().alias('std_epoch_ninety_percent_loss'),
+            pl.col('mse').mean().alias('avg_mse'),
+            pl.col('mse').std().alias('std_mse')
+        ])
     
-    print("\nBest configurations by data size (sorted by average training time):")
-    print("-" * 60)
-    
-    for data_size in sorted(results_df['data_size'].unique()):
-        print(f"\nData Size: {data_size}")
-        size_results = summary.filter(pl.col('data_size') == data_size)\
-            .head(3)  # Top 3 fastest
-        
-        for row in size_results.to_dicts():
-            print(f"  LR: {row['learning_rate']:.4f}, NGD-LR: {row['ngd_learning_rate']:.4f}, Scheduler: {row['scheduler_type']:12s} -> "
-                  f"Time: {row['avg_time']:.2f}±{row['std_time']:.2f}s, "
-                  f"Loss: {row['avg_loss']:.4f}±{row['std_loss']:.4f}, "
-                  f"Convergence: {row['avg_convergence']:.3f}")
+    # plot map of percentage of epochs to reach 90% of minimum loss vs average MSE
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(
+        summary['avg_epoch_ninety_percent_loss'], 
+        summary['avg_min_loss'], 
+        s=100, 
+        alpha=0.7
+    )
+
+    ax.xaxis.set_inverted(True)
+    ax.yaxis.set_inverted(True)
+    ax.set_yscale('log')
+    ax.set_xlabel('Percentage of epochs to reach 90% of minimum loss')
+    ax.set_ylabel('Average MSE')
+    fig.savefig('figs/percentage_epochs_vs_avg_mse.png', dpi=300, bbox_inches='tight')
     
     # Best overall configurations
     print("\n" + "-"*60)
-    print("TOP 5 OVERALL CONFIGURATIONS (by training time):")
+    print("TOP 5 CONFIGURATIONS (by number of epochs to 90% loss reduction):")
     print("-" * 60)
-    
-    top_configs = summary.sort('avg_time').head(5)
+
+    top_configs = summary.sort('avg_epoch_ninety_percent_loss').head(5)
     for i, row in enumerate(top_configs.to_dicts(), 1):
-        print(f"{i}. Data: {row['data_size']:3d}, LR: {row['learning_rate']:.4f}, NGD-LR: {row['ngd_learning_rate']:.4f}, "
+        print(f"{i}. LR: {row['learning_rate']:.4f}, NGD-LR: {row['ngd_learning_rate']:.4f}, "
               f"Scheduler: {row['scheduler_type']:12s} -> "
-              f"Time: {row['avg_time']:.2f}±{row['std_time']:.2f}s, "
-              f"Loss: {row['avg_loss']:.4f}±{row['std_loss']:.4f}")
-    
+              f"Percentage of epochs to 90% loss reduction: {row['avg_epoch_ninety_percent_loss']:.2f}±{row['std_epoch_ninety_percent_loss']:.2f}s, "
+              f"Loss: {row['avg_min_loss']:.4f}±{row['std_min_loss']:.4f}")
+
+    # best by min loss
+    print("\n" + "-"*60)
+    print("TOP 5 CONFIGURATIONS BY MIN LOSS:")
+    print("-" * 60)
+    best_loss_configs = summary.sort('avg_min_loss').head(5)
+    for i, row in enumerate(best_loss_configs.to_dicts(), 1):
+        print(f"{i}. LR: {row['learning_rate']:.4f}, NGD-LR: {row['ngd_learning_rate']:.4f}, "
+              f"Scheduler: {row['scheduler_type']:12s} -> "
+              f"Min Loss: {row['avg_min_loss']:.4f}±{row['std_min_loss']:.4f}, "
+              f"Percentage of epochs to 90% loss reduction: {row['avg_epoch_ninety_percent_loss']:.2f}±{row['std_epoch_ninety_percent_loss']:.2f}s")
+
     # Scheduler comparison
     print("\n" + "-"*60)
     print("SCHEDULER COMPARISON (averaged across all configurations):")
@@ -317,16 +311,30 @@ def analyze_results(results_df: pl.DataFrame) -> None:
     
     scheduler_summary = results_df.group_by('scheduler_type')\
         .agg([
-            pl.col('training_time').mean().alias('avg_time'),
-            pl.col('final_loss').mean().alias('avg_loss'),
-            pl.col('convergence_rate').mean().alias('avg_convergence')
+            pl.col('epoch_ninety_percent_loss').mean().alias('avg_epoch_ninety_percent_loss'),
+            pl.col('epoch_ninety_percent_loss').std().alias('std_epoch_ninety_percent_loss'),
+            pl.col('min_loss').std().alias('std_min_loss'),
+            pl.col('min_loss').mean().alias('avg_min_loss'),
         ])\
-        .sort('avg_time')
-    
+        .sort('avg_min_loss')
+
     for row in scheduler_summary.to_dicts():
-        print(f"{row['scheduler_type']:15s}: Time: {row['avg_time']:.2f}s, "
-              f"Loss: {row['avg_loss']:.4f}, Convergence: {row['avg_convergence']:.3f}")
-    
+        print(f"{row['scheduler_type']:15s}: Min Loss: {row['avg_min_loss']:.4f}, "
+              f"Percentage of epochs to 90% loss reduction: {row['avg_epoch_ninety_percent_loss']:.2f}±{row['std_epoch_ninety_percent_loss']:.2f}s")
+
+    # for best scheduler, print best learning rate and NGD learning rates
+    best_scheduler = scheduler_summary.sort('avg_min_loss').head(1).to_dicts()[0]
+    best_scheduler_type = best_scheduler['scheduler_type']
+    best_configs = summary.filter(pl.col('scheduler_type') == best_scheduler_type).head(5)
+    print("\n" + "-"*60)
+    print(f"BEST SCHEDULER: {best_scheduler_type}")
+    print("-" * 60)
+    for i, row in enumerate(best_configs.to_dicts(), 1):
+        print(f"{i}. LR: {row['learning_rate']:.4f}, NGD-LR: {row['ngd_learning_rate']:.4f} -> "
+              f"Min Loss: {row['avg_min_loss']:.4f}±{row['std_min_loss']:.4f}, "
+              f"Percentage of epochs to 90% loss reduction: {row['avg_epoch_ninety_percent_loss']:.2f}±{row['std_epoch_ninety_percent_loss']:.2f}s")
+
+
     # Create plots
     plot_loss_curves(results_df)
     plot_loss_curves_by_lr(results_df)
@@ -504,27 +512,30 @@ def main():
     print("This will test different learning rates and schedulers on synthetic data")
     
     # Configuration
-    learning_rates = [0.001, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+    learning_rates = [0.001, 0.01, 0.1, 0.2, 0.5, 1.0]
     ngd_learning_rates = [0.05, 0.1, 0.2, 0.5]
     scheduler_types = ['none', 'cosine', 'cosine_warm', 'exponential', 'step']
     data_sizes = [20, 100, 200]
-    n_trials = 3
+    noise_scales = [0.2, 0.5]
+    rw_scales = [0.1, 0.5]
     
     print(f"\nConfiguration:")
     print(f"  Learning rates: {learning_rates}")
     print(f"  NGD learning rates: {ngd_learning_rates}")
     print(f"  Schedulers: {scheduler_types}")
     print(f"  Data sizes: {data_sizes}")
-    print(f"  Trials per config: {n_trials}")
-    print(f"  Total runs: {len(learning_rates) * len(ngd_learning_rates) * len(scheduler_types) * len(data_sizes) * n_trials}")
-    
+    print(f"  Noise scales: {noise_scales}")
+    print(f"  Random walk scales: {rw_scales}")
+    print(f"  Total runs: {len(learning_rates) * len(ngd_learning_rates) * len(scheduler_types) * len(data_sizes) * len(noise_scales) * len(rw_scales)}")
+
     # Run benchmark
     results_df = benchmark_gp_training(
         learning_rates=learning_rates,
         ngd_learning_rates=ngd_learning_rates,
         scheduler_types=scheduler_types,
         data_sizes=data_sizes,
-        n_trials=n_trials
+        noise_scales=noise_scales,
+        rw_scales=rw_scales
     )
     
     # Analyze results

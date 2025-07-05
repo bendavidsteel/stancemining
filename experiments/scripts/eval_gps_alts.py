@@ -48,6 +48,13 @@ def spline_interpolate(timestamps, observations, test_x, n_knots=4, degree=3, al
     test_y = model.predict(test_x.reshape(-1, 1))
     return test_y
 
+def get_lowess(observed_stances, base_timestamps, test_x):
+    lowess_fit = lowess(observed_stances, base_timestamps, xvals=test_x, is_sorted=True, return_sorted=True)
+    # replace nans with their neighbors
+    # TODO check that this works
+    lowess_fit[np.isnan(lowess_fit)] = np.interp(np.flatnonzero(np.isnan(lowess_fit)), np.flatnonzero(~np.isnan(lowess_fit)), lowess_fit[~np.isnan(lowess_fit)])
+    return lowess_fit
+
 def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, plot=False):
     # create synthetic data using random walk
     days = np.arange(num_days)
@@ -134,7 +141,7 @@ def eval_gp(n_samples=2, noise_scale=0.1, random_walk_scale=0.01, num_days=365, 
 
         # LOWESS
         start_time = datetime.datetime.now()
-        lowess_fit = lowess(observed_stances, base_timestamps, xvals=test_x, is_sorted=True, return_sorted=False)
+        lowess_fit = get_lowess(observed_stances, base_timestamps, test_x)
         end_time = datetime.datetime.now()
         lowess_time = (end_time - start_time).total_seconds()
 
@@ -294,6 +301,7 @@ def run_parameter_sweep():
     plt.errorbar(noise_results['noise_scales'], spline_means, yerr=spline_stds, 
                label='Spline', marker='^', capsize=5)
     
+    plt.yscale('log')
     plt.xlabel('Noise Scale')
     plt.ylabel('MSE')
     # plt.title('MSE vs Noise Scale')
@@ -301,10 +309,9 @@ def run_parameter_sweep():
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig('./figs/mse_vs_noise_scale.png', dpi=150, bbox_inches='tight')
-    plt.show()
     
     # Plot 2: Runtime Bar Chart (aggregated across all parameters)
-    plt.figure(figsize=(4, 3))
+    plt.figure(figsize=(4, 2))
     
     # Aggregate all runtime data across both parameter sweeps
     all_lowess_times = []
@@ -330,13 +337,13 @@ def run_parameter_sweep():
     # Calculate aggregated statistics
     methods = ['LOWESS', 'GP', 'Spline']
     all_times = [all_lowess_times, all_gp_times, all_spline_times]
-    means = [np.mean(times) for times in all_times]
-    stds = [np.std(times) for times in all_times]
+    quintiles = [np.quantile(times, [0.25, 0.5, 0.75]) for times in all_times]
     
     # Create bar chart
     x_pos = np.arange(len(methods))
-    bars = plt.bar(x_pos, means, yerr=stds, capsize=5, 
+    bars = plt.bar(x_pos, [q[1] for q in quintiles], yerr=[[q[1] - q[0] for q in quintiles], [q[2] - q[1] for q in quintiles]], capsize=5, 
                    color=['green', 'orange', 'brown'], alpha=0.7)
+    plt.yscale('log')
     
     plt.xlabel('Method')
     plt.ylabel('Time (seconds)')
@@ -345,7 +352,6 @@ def run_parameter_sweep():
     plt.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
     plt.savefig('./figs/runtime_comparison.png', dpi=150, bbox_inches='tight')
-    plt.show()
     
     # Plot 3: MSE vs Random Walk Scale
     plt.figure(figsize=(6, 2))
@@ -361,6 +367,7 @@ def run_parameter_sweep():
     plt.errorbar(rw_results['rw_scales'], spline_means, yerr=spline_stds, 
                label='Spline', marker='^', capsize=5)
     
+    plt.yscale('log')
     plt.xlabel('Random Walk Scale')
     plt.ylabel('MSE')
     # plt.title('MSE vs Random Walk Scale')
@@ -368,10 +375,38 @@ def run_parameter_sweep():
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig('./figs/mse_vs_rw_scale.png', dpi=150, bbox_inches='tight')
-    plt.show()
     
     
     print("Parameter sweep completed! Results saved to ./figs/")
+
+    all_lowess_mses = np.concatenate(noise_results['lowess_mses'] + rw_results['lowess_mses'])
+    all_gp_mses = np.concatenate(noise_results['gp_mses'] + rw_results['gp_mses'])
+    all_spline_mses = np.concatenate(noise_results['spline_mses'] + rw_results['spline_mses'])
+
+    # Calculate aggregated statistics
+    methods = ['LOWESS', 'GP', 'Spline']
+    all_mses = [all_lowess_mses, all_gp_mses, all_spline_mses]
+    quintiles = [np.quantile(mses, [0.25, 0.5, 0.75]) for mses in all_mses]
+
+    plt.figure(figsize=(4, 2))
+
+    # Create bar chart
+    x_pos = np.arange(len(methods))
+    bars = plt.bar(x_pos, [q[1] for q in quintiles], yerr=[[q[1] - q[0] for q in quintiles], [q[2] - q[1] for q in quintiles]], capsize=5, 
+                   color=['green', 'orange', 'brown'], alpha=0.7)
+    plt.yscale('log')
+    
+    plt.xlabel('Method')
+    plt.ylabel('MSE')
+    # plt.title('Runtime Comparison (Aggregated)')
+    plt.xticks(x_pos, methods)
+    plt.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    plt.savefig('./figs/mse_comparison.png', dpi=150, bbox_inches='tight')
+
+    print(f"LOWESS mean MSE: {np.mean(all_lowess_mses):.4f} ± {np.std(all_lowess_mses):.4f}")
+    print(f"GP mean MSE: {np.mean(all_gp_mses):.4f} ± {np.std(all_gp_mses):.4f}")
+    print(f"Spline mean MSE: {np.mean(all_spline_mses):.4f} ± {np.std(all_spline_mses):.4f}")
 
 def main():
     np.random.seed(42)  # For reproducibility

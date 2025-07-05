@@ -668,7 +668,8 @@ def _batch_train_ordinal_likelihood_gp(
     mll.compile(fullgraph=True, mode='reduce-overhead')
 
     training_iter = 5000
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizers[0], int(training_iter / 10))
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizers[0], int(training_iter / 10))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers[0], T_max=training_iter)
     best_loss = torch.tensor(float('inf'))
     num_since_best = 0
     num_iters_before_stopping = training_iter // 20

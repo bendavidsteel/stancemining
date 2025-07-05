@@ -34,12 +34,7 @@ class Transformers(BaseLLM):
         self.model_kwargs = model_kwargs
         self.tokenizer_kwargs = tokenizer_kwargs
 
-        self.lazy = lazy
-        if not lazy:
-            self.load_model()
-        else:
-            self.model = None
-            self.tokenizer = None
+        self.load_model()
 
     def load_model(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, **self.tokenizer_kwargs)
@@ -69,8 +64,6 @@ class Transformers(BaseLLM):
                 raise ValueError('Prompt must be a string or list of strings')
             conversations.append(conversation)
         
-        if self.lazy:
-            self.load_model()
         all_outputs = []
         if len(conversations) == 1:
             iterator = conversations
@@ -91,8 +84,7 @@ class Transformers(BaseLLM):
             outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **generate_kwargs)
             outputs = [self.tokenizer.decode(output[inputs['input_ids'].shape[1]:], skip_special_tokens=True) for output in outputs]
             all_outputs.append(outputs)
-        if self.lazy:
-            self.unload_model()
+        
         return all_outputs
 
     def unload_model(self):
@@ -101,17 +93,13 @@ class Transformers(BaseLLM):
         torch.cuda.empty_cache()
 
 class VLLM(BaseLLM):
-    def __init__(self, model_name, lazy=False, verbose=False):
+    def __init__(self, model_name, verbose=False):
         super().__init__(model_name)
         
         self.model_name = model_name
         self.verbose = verbose
 
-        self.lazy = lazy
-        if not lazy:
-            self.load_model()
-        else:
-            self.model = None
+        self.load_model()
 
     def load_model(self):
         import vllm
@@ -139,9 +127,6 @@ class VLLM(BaseLLM):
                 raise ValueError('Prompt must be a string or list of strings')
             conversations.append(conversation)
         
-        if self.lazy:
-            self.load_model()
-
         self.sampling_params.max_tokens = max_new_tokens
         self.sampling_params.n = num_samples
 
@@ -153,8 +138,7 @@ class VLLM(BaseLLM):
             continue_final_message=continue_final_message
         )
         all_outputs = [o.outputs[0].text for o in outputs]
-        if self.lazy:
-            self.unload_model()
+        
         return all_outputs
 
     def unload_model(self):
