@@ -18,6 +18,9 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
   const [multipleTimelines, setMultipleTimelines] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [plotRevision, setPlotRevision] = useState(0);
+  const [chartZoomState, setChartZoomState] = useState(null);
+  const [syncedXAxisRange, setSyncedXAxisRange] = useState(null);
   
   const chartContainerRef = useRef(null);
 
@@ -65,6 +68,9 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
       try {
         setLoading(true);
         setError(null);
+        // Reset raw data when filters change
+        setRawDataLoaded(false);
+        setShowScatter(false);
         
         // Determine if we need to load multiple timelines or a single timeline
         if (filterType !== 'all' && filterValue === 'all' && availableFilterValues.length > 0) {
@@ -118,6 +124,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
           
           setMultipleTimelines(allTimelines);
           setTrendData(combinedData);
+          setPlotRevision(prev => prev + 1);
         } else {
           // Load a single timeline
           const response = await api.get(`/target/${targetName}/trends`, {
@@ -146,6 +153,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
           });
           
           setTrendData(formattedData);
+          setPlotRevision(prev => prev + 1);
         }
       } catch (err) {
         console.error('Error loading chart data:', err);
@@ -158,9 +166,33 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
     loadData();
   }, [targetName, filterType, filterValue, availableFilterValues, getFilterColor]);
   
+  // Capture current zoom and pan state from chart
+  const captureZoomState = () => {
+    const chartElement = chartContainerRef.current?.querySelector('.js-plotly-plot');
+    if (chartElement && chartElement.layout) {
+      const layout = chartElement.layout;
+      return {
+        xaxis: layout.xaxis ? { 
+          range: layout.xaxis.range,
+          autorange: layout.xaxis.autorange
+        } : null,
+        yaxis: layout.yaxis ? { 
+          range: layout.yaxis.range,
+          autorange: layout.yaxis.autorange
+        } : null
+      };
+    }
+    return null;
+  };
+
   // Toggle scatter plot (raw data points)
   const toggleScatter = async () => {
-    if (!rawDataLoaded && !loadingRawData) {
+    if (!showScatter) {
+      // Capture current zoom state before loading data
+      const currentZoomState = captureZoomState();
+      setChartZoomState(currentZoomState);
+      
+      // Always fetch fresh data when showing scatter points
       try {
         setLoadingRawData(true);
         
@@ -171,7 +203,11 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
         const formattedData = response.data.data.map(item => ({
           ...item,
           x: new Date(item.createtime).getTime(),
-          Stance: parseFloat(item.Stance) || 0
+          Stance: parseFloat(item.Stance) || 0,
+          hoverText: Object.entries(item)
+            .filter(([key]) => key !== 'createtime') // Exclude createtime as we show formatted date
+            .map(([key, value]) => `${key}: ${value}`)
+            .join('<br>')
         }));
         
         setRawData(formattedData);
@@ -183,7 +219,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
         setLoadingRawData(false);
       }
     } else {
-      setShowScatter(!showScatter);
+      setShowScatter(false);
     }
   };
   
@@ -217,6 +253,15 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
     value.toLowerCase().includes(searchTerm.toLowerCase())
   ).slice(0, 10); // Limit to 10 suggestions
   
+
+  // Handle relayout events to sync zoom/pan between charts
+  const handleRelayout = (eventData) => {
+    if (eventData['xaxis.range[0]'] && eventData['xaxis.range[1]']) {
+      setSyncedXAxisRange([eventData['xaxis.range[0]'], eventData['xaxis.range[1]']]);
+    } else if (eventData['xaxis.autorange']) {
+      setSyncedXAxisRange(null);
+    }
+  };
 
   // Render multiple timelines chart with confidence intervals
   const renderMultipleTimelinesChart = () => {
@@ -302,6 +347,13 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
       };
     });
     
+    // Create shared x-axis layout
+    const sharedXAxisLayout = {
+      title: 'Date',
+      type: 'date',
+      ...(syncedXAxisRange && { range: syncedXAxisRange })
+    };
+    
     return (
       <>
         <div className="stance-chart">
@@ -309,10 +361,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             data={traces}
             layout={{
               title: 'Stance Over Time',
-              xaxis: { 
-                title: 'Date',
-                type: 'date'
-              },
+              xaxis: sharedXAxisLayout,
               yaxis: { 
                 title: 'Stance',
                 range: [-1, 1],
@@ -327,6 +376,8 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             }}
             config={{ responsive: true, displayModeBar: true }}
             style={{ width: '100%', height: '300px' }}
+            revision={plotRevision}
+            onRelayout={handleRelayout}
           />
         </div>
         
@@ -335,10 +386,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             data={volumeTraces}
             layout={{
               title: 'Volume Over Time',
-              xaxis: { 
-                title: 'Date',
-                type: 'date'
-              },
+              xaxis: sharedXAxisLayout,
               yaxis: { title: 'Volume', fixedrange: true },
               height: 150,
               margin: { l: 60, r: 40, t: 40, b: 40 },
@@ -347,6 +395,8 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             }}
             config={{ responsive: true, displayModeBar: true }}
             style={{ width: '100%', height: '150px' }}
+            revision={plotRevision}
+            onRelayout={handleRelayout}
           />
         </div>
       </>
@@ -407,9 +457,17 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
         mode: 'markers',
         marker: { color: '#1E90FF', opacity: 0.5, size: 4 },
         name: 'Data points',
-        hovertemplate: '<b>Data point</b><br>Date: %{x}<br>Stance: %{y:.2f}<extra></extra>'
+        text: rawData.map(d => d.hoverText),
+        hovertemplate: '<b>Data point</b><br>Date: %{x}<br>%{text}<extra></extra>'
       });
     }
+    
+    // Create shared x-axis layout
+    const sharedXAxisLayout = {
+      title: 'Date',
+      type: 'date',
+      ...(syncedXAxisRange && { range: syncedXAxisRange })
+    };
     
     return (
       <>
@@ -418,10 +476,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             data={traces}
             layout={{
               title: 'Stance Over Time',
-              xaxis: { 
-                title: 'Date',
-                type: 'date'
-              },
+              xaxis: sharedXAxisLayout,
               yaxis: { 
                 title: 'Stance',
                 range: [-1, 1],
@@ -436,6 +491,21 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             }}
             config={{ responsive: true, displayModeBar: true }}
             style={{ width: '100%', height: '200px' }}
+            revision={plotRevision}
+            onRelayout={handleRelayout}
+            onUpdate={(figure) => {
+              if (chartZoomState && figure.layout) {
+                if (chartZoomState.xaxis?.range) {
+                  figure.layout.xaxis.range = chartZoomState.xaxis.range;
+                  figure.layout.xaxis.autorange = chartZoomState.xaxis.autorange;
+                }
+                if (chartZoomState.yaxis?.range) {
+                  figure.layout.yaxis.range = chartZoomState.yaxis.range;
+                  figure.layout.yaxis.autorange = chartZoomState.yaxis.autorange;
+                }
+                setChartZoomState(null); // Clear after applying
+              }
+            }}
           />
         </div>
         
@@ -454,10 +524,7 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             }]}
             layout={{
               title: 'Volume Over Time',
-              xaxis: { 
-                title: 'Date',
-                type: 'date'
-              },
+              xaxis: sharedXAxisLayout,
               yaxis: { title: 'Volume', fixedrange: true },
               height: 100,
               margin: { l: 60, r: 40, t: 40, b: 40 },
@@ -465,6 +532,8 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
             }}
             config={{ responsive: true, displayModeBar: true }}
             style={{ width: '100%', height: '100px' }}
+            revision={plotRevision}
+            onRelayout={handleRelayout}
           />
         </div>
       </>
@@ -480,6 +549,20 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
   }
 
   if (trendData.length === 0) {
+    // Show loading state if we're currently loading data
+    if (loading) {
+      return (
+        <div className="target-chart loading">
+          <h2>{targetName}</h2>
+          <div className="loading-bar">
+            <div className="loading-bar-fill"></div>
+          </div>
+          <p>Loading chart data...</p>
+        </div>
+      );
+    }
+    
+    // Show no data message only when not loading
     return (
       <div className="target-chart no-data">
         <h2>{targetName}</h2>
@@ -558,7 +641,14 @@ const TargetChart = ({ targetName, apiBaseUrl }) => {
       <div 
         ref={chartContainerRef} 
         className="charts-container"
+        style={{ position: 'relative' }}
       >
+        {loadingRawData && (
+          <div className="chart-loading-overlay">
+            <div className="loading-spinner"></div>
+            <span>Loading data points...</span>
+          </div>
+        )}
         {showingMultipleTimelines ? 
           renderMultipleTimelinesChart() : 
           renderSingleTimelineChart()

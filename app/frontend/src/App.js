@@ -17,7 +17,7 @@ const Navbar = ({ onLogout }) => {
   
   return (
     <nav className="App-navbar">
-      <div className="navbar-logo">Stance Target Dashboard</div>
+      <div className="navbar-logo">StanceMining Dashboard</div>
       <div className="navbar-tabs">
         <Link 
           to="/" 

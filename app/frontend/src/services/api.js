@@ -1,6 +1,7 @@
 import axios from 'axios';
 
-export const API_BASE_URL = 'http://localhost:8000';
+// TODO fix this
+export const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
 
 // Helper function to set a cookie
 const setCookie = (name, value, days = 1) => {
@@ -45,7 +46,7 @@ api.interceptors.response.use(
   (error) => {
     if (error.response && error.response.status === 401) {
       // Check if auth is disabled
-      const skipAuth = process.env.REACT_APP_SKIP_AUTH === 'true' || process.env.AUTH_URL_PATH === undefined;
+      const skipAuth = process.env.REACT_APP_SKIP_AUTH === 'true' || process.env.REACT_APP_AUTH_URL_PATH === undefined;
       
       if (skipAuth) {
         // If auth is disabled, just throw the error

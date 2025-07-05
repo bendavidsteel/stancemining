@@ -37,10 +37,16 @@ trend_df = stancemining.get_trends_for_all_targets(document_df)
 This library comes with a web app to explore the results of the output.
 
 ### To deploy stancemining app
+
+The <your-data-path> should be either an absolute path, or a path relative to the `app` directory where the compose.yaml file is located.
+It should contain a `doc_stance` directory with the output of the fit_transform method saved as `.parquet.zstd` files, and a `target_trends` directory with the outputs from the `infer_stance_trends_for_all_targets` or `infer_stance_trends_for_target` method saved as `.parquet.zstd` files. There can be multiple files in each directory, and the app will automatically load all of them and concatenate them.
+
 If you need authentication for the app, you can set the environment variable `STANCE_AUTH_URL_PATH` to the URL of your authentication service (e.g., `myauth.com/login`). That path must accept a POST request with a JSON body containing `username` and `password` fields, and return a JSON response with a `token` field.
 If you do not need authentication, you can leave the environment variable unset.
 ```
-STANCE_DATA_PATH=<your-data-path> STANCE_AUTH_URL_PATH=<your-auth-url/login> docker compose up -f ./app/compose.yaml
+export STANCE_DATA_PATH=<your-data-path>
+export STANCE_AUTH_URL_PATH=<your-auth-url/login>
+docker compose -f ./app/compose.yaml up
 ```
 
 ## To reproduce experimental results

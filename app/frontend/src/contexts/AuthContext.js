@@ -11,7 +11,7 @@ export const AuthProvider = ({ children }) => {
     const [authenticated, setAuthenticated] = useState(false);
     
     // Skip auth if explicitly disabled or no auth URL configured
-    const skipAuth = process.env.REACT_APP_SKIP_AUTH === 'true' || process.env.AUTH_URL_PATH === undefined;
+    const skipAuth = process.env.REACT_APP_SKIP_AUTH === 'true' || process.env.REACT_APP_AUTH_URL_PATH === undefined;
     
     useEffect(() => {
       const checkAuthStatus = async () => {
