@@ -4,7 +4,7 @@ import polars as pl
 from sklearn.preprocessing import scale
 import torch
 
-from stancemining.estimate import _calculate_trends_for_filtered_df_with_batching, _get_classifier_profiles, get_stance_normal_for_all_targets
+from stancemining.estimate import _calculate_trends_for_filtered_df_with_batching, _get_classifier_profiles, infer_stance_normal_for_all_targets
 
 def test_batch_train():
 
@@ -75,7 +75,7 @@ def test_get_stance_normal():
 
     doc_target_df = pl.DataFrame(data)
 
-    stance_mean_df = get_stance_normal_for_all_targets(doc_target_df, filter_cols=[filter_type])
+    stance_mean_df = infer_stance_normal_for_all_targets(doc_target_df, filter_cols=[filter_type])
 
 if __name__ == "__main__":
     test_get_stance_normal()

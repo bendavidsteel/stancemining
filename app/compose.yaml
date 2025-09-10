@@ -1,14 +1,19 @@
 services:
   backend:
-    build: ./backend
-    volumes:
-      ${STANCE_DATA_PATH:-./data}: /app/data
+    image: bendavidsteel/stancemining-backend:latest
+    # build: ./backend
     ports:
       - "5000:5000"
+    volumes:
+      - ${STANCE_DATA_PATH:-../data}:/app/data
     environment:
-      AUTH_URL_PATH: ${STANCE_AUTH_URL}
+      AUTH_URL_PATH: ${STANCE_AUTH_URL:-}
       DATA_DIR_PATH: /app/data
   frontend:
-    build: ./frontend,
+    image: bendavidsteel/stancemining-frontend:latest
+    # build: ./frontend
     environment:
-      AUTH_URL_PATH: ${STANCE_AUTH_URL}
+      AUTH_URL_PATH: ${STANCE_AUTH_URL:-}
+      REACT_APP_API_BASE_URL: http://localhost:5000
+    ports:
+      - "4200:80"

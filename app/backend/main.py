@@ -5,19 +5,19 @@ import os
 import logging
 import random
 import re
-import requests
 import secrets
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('stancemining')
 
+import llama_cpp
 import numpy as np
 import polars as pl
 from pydantic import BaseModel
 import pynndescent
-import sentence_transformers
-from jose import jwt, JWTError
+import requests
 import sklearn.metrics.pairwise
+from umap import UMAP
 
 from fastapi import FastAPI, Query, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -193,19 +193,14 @@ def compute_target_embeddings(target_count_df: pl.DataFrame):
     # If we have targets that need embedding
     if missing_targets:
         logger.info(f"Computing embeddings for {len(missing_targets)} new targets...")
-        if isinstance(embedding_model, sentence_transformers.SentenceTransformer):
-            new_embeddings = embedding_model.encode(missing_targets, show_progress_bar=True)
-        elif str(type(embedding_model)) == "<class 'vllm.entrypoints.llm.LLM'>":
-            outputs = embedding_model.embed(missing_targets, use_tqdm=True)
-            new_embeddings = np.stack([np.array(o.outputs.embedding) for o in outputs])
-        else:
-            raise ValueError(f"Unsupported embedding model type: {type(embedding_model)}")
+        result = embedding_model.create_embedding(ProgressList(missing_targets))
+        new_embeddings = np.stack([np.array(o['embedding']) for o in result['data']])
         
         # Create dataframe for new embeddings
         new_embeddings_df = pl.DataFrame({
             'Target': missing_targets,
-            'Embedding': [embedding.tolist() for embedding in new_embeddings]
-        }, schema_overrides={'Embedding': pl.Array(pl.Float32, 384)})
+            'Embedding': new_embeddings
+        }, schema_overrides={'Embedding': pl.Array(pl.Float32, new_embeddings.shape[1])})
         
         # Combine with existing embeddings
         embeddings_df = pl.concat([embeddings_df, new_embeddings_df])
@@ -249,11 +244,7 @@ def compute_umap_embeddings(target_df: pl.DataFrame, target_embeddings_df: pl.Da
     embeddings = valid_embeddings_df['Embedding'].to_numpy()
     
     # Set up UMAP with parameters suitable for visualization
-    try:
-        from cuml.manifold.umap import UMAP
-    except ImportError:
-        logger.info("cuml not found, falling back to umap-learn")
-        from umap import UMAP
+    
     reducer = UMAP(
         n_components=2,
         n_neighbors=15,
@@ -296,7 +287,7 @@ async def authenticate_request(request: Request):
     # Handle authentication (with development mode flexibility)
     try:
         # Check if we're in development mode with authentication skipping enabled
-        skip_auth = os.getenv("REACT_APP_SKIP_AUTH") == "true" or STANCE_AUTH_URL_PATH is None
+        skip_auth = os.getenv("REACT_APP_SKIP_AUTH") == "true" or not STANCE_AUTH_URL_PATH
         if skip_auth:
             # Skip authentication in development mode if configured
             return User(username="dev-user")
@@ -371,6 +362,25 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
         full_name="Authenticated User",
     )
 
+class ProgressList(list):
+    """A list that shows progress bars when iterating."""
+    
+    def __init__(self, iterable):
+        super().__init__(iterable)
+    
+    def __iter__(self):
+        """Override default iteration to show progress."""
+        # Use super().__iter__() to get the actual list iterator
+        total = len(self)
+        i = 0
+        next_log_per = 0.1
+        for item in super().__iter__():
+            yield item
+            i += 1
+            if i / total >= next_log_per:
+                logger.info(f"Progress: {i / total * 100:.1f}%")
+                next_log_per += 0.1
+
 @app.on_event("startup")
 async def startup_event():
     """Load all precomputed data on startup"""
@@ -383,21 +393,17 @@ async def startup_event():
     try:
         # Initialize embedding model
         logger.info("Initialized semantic search model")
-        embedding_model_name = 'sentence-transformers/all-MiniLM-L12-v2'
-        try:
-            import vllm
-
-            import torch
-            torch.cuda.init()
-
-            embedding_model = vllm.LLM(model=embedding_model_name)
-        except Exception:
-            embedding_model = sentence_transformers.SentenceTransformer(embedding_model_name)
+        # try:
+        embedding_model = llama_cpp.Llama.from_pretrained(
+            repo_id="ChristianAzinn/gist-small-embedding-v0-gguf",
+            filename="gist-small-embedding-v0.Q8_0.gguf",
+            embedding=True
+        )
 
         # Load filtered targets list
         stance_dir_path = os.path.join(DATA_DIR_PATH, 'doc_stance')
         if not os.path.exists(stance_dir_path):
-            raise FileNotFoundError(f"Stance data directory must be accessible at {stance_dir_path}")
+            raise FileNotFoundError(f"Stance data directory must be accessible at {stance_dir_path}, only found files {os.listdir(DATA_DIR_PATH)} at {DATA_DIR_PATH}")
         stance_file_paths = glob.glob(os.path.join(stance_dir_path, '*.parquet.zstd'))
         if len(stance_file_paths) == 0:
             raise FileNotFoundError(f"No stance files found in {stance_dir_path}, some must be present.")
@@ -425,11 +431,12 @@ async def startup_event():
                 pl.when(pl.col('Stance') == 0).then(1).otherwise(0).sum().alias('n_neutral')
             ])
             
-        target_df = target_df.filter(pl.col('count') > 2).sort('count', descending=True)
-        
+        min_count = 20
+        target_df = target_df.filter(pl.col('count') >= min_count).sort('count', descending=True)
+
         # TODO filter or remove this line
-        logger.info(f"Loaded {len(target_df)} valid targets with ≥3 data points")
-        
+        logger.info(f"Loaded {len(target_df)} valid targets with ≥{min_count} data points")
+
         # Load trends data
         target_trends_dir_path = os.path.join(DATA_DIR_PATH, 'target_trends')
         if not os.path.exists(target_trends_dir_path):
@@ -538,39 +545,38 @@ async def search_targets(
     
     if embedding_model and nn_index:
         # Encode the query
-        query_embedding = embedding_model.encode([query])[0].reshape(1, -1)
+        query_embedding = np.array(embedding_model.create_embedding([query])['data'][0]['embedding']).reshape(1, -1)
         
-        # Use PyNNDescent for efficient nearest neighbor search
-        # Get more results than needed to filter by threshold later
-        k = min(len(target_df), top_k * 3 if top_k else 100)
-        indices, distances = nn_index.query(query_embedding, k=k)
-        
-        # Convert cosine distance to similarity (1 - distance)
-        similarities = 1 - distances[0]
-        
-        # Filter results by similarity threshold and prepare response
-        results = []
-        for idx, similarity in zip(indices[0], similarities):
-            if similarity > 0.2:  # Keep the same threshold as before
-                results.append(target_df['Target'][idx])
-                
-                # Limit to top_k if specified
-                if top_k and len(results) >= top_k:
-                    break
-    elif embedding_model and nn_index is None:
-        query_embedding = embedding_model.encode([query])[0].reshape(1, -1)
-        
-        # Calculate similarities
-        target_embeddings = target_df.join(target_embeddings_df, on='Target', maintain_order='left')['Embedding'].to_numpy()
+        if nn_index:
+            # Use PyNNDescent for efficient nearest neighbor search
+            # Get more results than needed to filter by threshold later
+            k = min(len(target_df), top_k * 3 if top_k else 100)
+            indices, distances = nn_index.query(query_embedding, k=k)
+            
+            # Convert cosine distance to similarity (1 - distance)
+            similarities = 1 - distances[0]
+            
+            # Filter results by similarity threshold and prepare response
+            results = []
+            for idx, similarity in zip(indices[0], similarities):
+                if similarity > 0.2:  # Keep the same threshold as before
+                    results.append(target_df['Target'][idx])
+                    
+                    # Limit to top_k if specified
+                    if top_k and len(results) >= top_k:
+                        break
+        else:
+            # Calculate similarities
+            target_embeddings = target_df.join(target_embeddings_df, on='Target', maintain_order='left')['Embedding'].to_numpy()
 
-        cosine_similarity = sklearn.metrics.pairwise.cosine_similarity(query_embedding, target_embeddings).squeeze(0)
-        target_similarity_df = target_df.with_columns(pl.Series(name='similarity', values=cosine_similarity))
-        target_similarity_df = target_similarity_df.sort('similarity', descending=True)
+            cosine_similarity = sklearn.metrics.pairwise.cosine_similarity(query_embedding, target_embeddings).squeeze(0)
+            target_similarity_df = target_df.with_columns(pl.Series(name='similarity', values=cosine_similarity))
+            target_similarity_df = target_similarity_df.sort('similarity', descending=True)
 
-        if top_k:
-            target_similarity_df = target_similarity_df.head(top_k)
+            if top_k:
+                target_similarity_df = target_similarity_df.head(top_k)
 
-        results = target_similarity_df.filter(pl.col('similarity') > 0.2).select(['Target', 'count']).to_dicts()
+            results = target_similarity_df.filter(pl.col('similarity') > 0.2).select(['Target', 'count']).to_dicts()
     else:
         # Fallback to text search
         query = query.lower()
@@ -650,25 +656,39 @@ async def get_target_raw_data(
         # Load raw data for just this target on-demand
         logger.info(f"Loading raw data for target: {target_name}")
         
-        # Load the full raw data file
-        # In a production environment, you might want to store individual target files 
-        # or use a database that allows querying specific targets efficiently
-        raw_df = pl.read_parquet(os.path.join(DATA_DIR_PATH, 'precomputed', 'all_targets_raw.parquet.zstd'))
-        
-        # Filter for just this target
-        target_raw = raw_df.filter(pl.col('Target') == target_name)
-        
-        if len(target_raw) == 0:
+        stance_dir_path = os.path.join(DATA_DIR_PATH, 'doc_stance')
+        if not os.path.exists(stance_dir_path):
+            raise FileNotFoundError(f"Stance data directory must be accessible at {stance_dir_path}, only found files {os.listdir(DATA_DIR_PATH)} at {DATA_DIR_PATH}")
+        stance_file_paths = glob.glob(os.path.join(stance_dir_path, '*.parquet.zstd'))
+        if len(stance_file_paths) == 0:
+            raise FileNotFoundError(f"No stance files found in {stance_dir_path}, some must be present.")
+        target_df = None
+        for stance_file_path in stance_file_paths:
+            try:
+                file_stance_df = pl.read_parquet(stance_file_path)
+                file_target_df = file_stance_df.explode(['Targets', 'Stances'])\
+                    .drop_nulls('Targets')\
+                    .filter(pl.col('Targets') == target_name)
+                
+                if len(file_target_df) == 0:
+                    continue
+                else:
+                    file_target_df = file_target_df.rename({'Targets': 'Target', 'Stances': 'Stance'})
+                    target_df = pl.concat([target_df, file_target_df]) if target_df is not None else file_target_df
+            except Exception as ex:
+                logger.error(f"Error loading stance file {stance_file_path}: {ex}")
+
+        if target_df is None:
             return {"data": []}
         
         # Apply additional filtering
         if filter_value != "all":
-            target_raw = target_raw.filter(pl.col(filter_type) == filter_value)
-        
-        logger.info(f"Returning {len(target_raw)} raw data points for {target_name}")
-        
+            target_df = target_df.filter(pl.col(filter_type) == filter_value)
+
+        logger.info(f"Returning {len(target_df)} raw data points for {target_name}")
+
         # Convert to list of dicts for JSON response
-        return {"data": target_raw.to_dicts()}
+        return {"data": target_df.to_dicts()}
     
     except Exception as e:
         logger.error(f"Error loading raw data for {target_name}: {e}")
