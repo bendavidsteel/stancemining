@@ -1,13 +1,13 @@
 import os
 
+import dotenv
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from tqdm import tqdm
 import wandb
 
-from experiments import datasets
-from stancemining import metrics
+from stancemining import datasets, metrics
 
 def get_latest_runs():
     api = wandb.Api()
@@ -141,10 +141,12 @@ def get_metric(run, metric):
         return metrics.mean_cluster_size_ratio(output_df['Probs'].to_numpy())
     elif metric == 'cluster_size_std':
         return metrics.mean_cluster_size_std_ratio(output_df['Probs'].to_numpy())
+    elif metric == 'balanced_cluster_size':
+        return metrics.balanced_cluster_size(output_df['Probs'].to_numpy())
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
-def generate_latex_tables(runs_data):
+def get_final_metrics_from_runs(runs_data):
     """
     Generate two LaTeX tables - one for supervised metrics and one for unsupervised metrics.
     
@@ -153,15 +155,9 @@ def generate_latex_tables(runs_data):
     Returns:
         tuple[str, str]: Tuple of formatted LaTeX table strings (supervised, unsupervised)
     """
-    methods = ['PaCTE', 'POLAR', 'WIBA', 'LLMTopic']
+    methods = ['LLMTopic', 'PaCTE', 'POLAR', 'WIBA']
     datasets = ['vast', 'ezstance']
 
-    method_names = {
-        'PaCTE': 'PaCTE',
-        'POLAR': 'POLAR',
-        'WIBA': 'WIBA',
-        'LLMTopic': 'ExtractCluster'
-    }
     
     # Define metrics for each table
     supervised_metrics = [
@@ -177,7 +173,7 @@ def generate_latex_tables(runs_data):
         'document_distance',
         'mean_num_targets',
         'stance_variance',
-        'cluster_size',
+        'balanced_cluster_size',
         'wall_time'
     ]
 
@@ -192,43 +188,19 @@ def generate_latex_tables(runs_data):
         'mean_num_targets': True,
         'stance_variance': True,
         'cluster_size': True,
-        'wall_time': False
+        'wall_time': False,
+        'balanced_cluster_size': True,
     }
 
     # remeasure_metrics = []
-    remeasure_metrics = supervised_metrics + ['mean_num_targets', 'document_distance', 'stance_variance', 'cluster_size']
+    remeasure_metrics = supervised_metrics + ['mean_num_targets', 'document_distance', 'stance_variance', 'balanced_cluster_size']
 
     # TODO extract the f1 scores from the probs, not the given targets 
-
-    num_runs = 5
-    
-    # Column headers for supervised metrics
-    supervised_header = [
-        "\\begin{tabular}{l|ccc|ccc}",
-        "\\toprule",
-        "\\multicolumn{1}{c}{} & \\multicolumn{3}{c}{\\textbf{Target}} & \\multicolumn{3}{c}{\\textbf{Stance}} \\\\",
-        "\\textbf{Method} & \\textbf{F1 ↑} & \\textbf{Prec. ↑} & \\textbf{Recall ↑} & "
-        "\\textbf{F1 ↑} & \\textbf{Prec. ↑} & \\textbf{Recall ↑} \\\\",
-        "\\midrule"
-    ]
-
-    # Column headers for unsupervised metrics
-    unsupervised_header = [
-        "\\begin{tabular}{l|cccccc|c}",
-        "\\toprule",
-        "\\textbf{Method} & \\textbf{Document Cluster} & \\textbf{Mean Num.} & "
-        "\\textbf{Stance} & \\textbf{Cluster} & \\textbf{Wall}\\\\",
-        "& \\textbf{Distance } & \\textbf{Targets ↑} & "
-        "\\textbf{Variance ↑} & \\textbf{Size ↑} & \\textbf{Time ↓}\\\\",
-        "\\midrule"
-    ]
 
     rank_data = []
     metric_rows = []
         
-    def generate_table_content(header_lines, metrics, runs_data):
-        latex_table = header_lines.copy()
-        
+    def get_final_metrics(metrics, runs_data):
         # Filter and sort datasets
         runs_data = {dataset: runs_data.get(dataset, {}) for dataset in datasets}
 
@@ -270,81 +242,20 @@ def generate_latex_tables(runs_data):
                     rank_data.append({'dataset': dataset, 'metric': metric} | method_ranks)
                 except:
                     rank_data.append({'dataset': dataset, 'metric': metric} | {methods[i]: len(methods) for i in range(len(methods))})
-
-        for dataset in runs_data:
-            latex_table.append(f"\\multicolumn{{{len(metrics)+1}}}{{c}}{{\\textbf{{{dataset.upper()}}}}}\\\\")
-            latex_table.append("\\midrule")
-            for method in methods:
-                row_parts = [method_names[method]]
-                for metric in metrics:
-                    mean_value = metric_data[dataset][metric][method]
-                    rank = [d for d in rank_data if d['dataset'] == dataset and d['metric'] == metric][0][method]
-                    cell = '& '
-                    if mean_value is None or np.isnan(mean_value) or mean_value == 0:
-                        cell += '-'
-                    else:
-                        if rank == 0:
-                            cell += r'\textbf{'
-                        elif rank == 1:
-                            cell += r'\underline{'
-
-                        if metric == 'wall_time':
-                            cell += f"{mean_value:.1f}"
-                        else:
-                            cell += f"{mean_value:.3f}"
-                        
-                        if rank in [0, 1]:
-                            cell += '}'
-
-                    row_parts.append(cell)
-                    
-                row_parts.append("\\\\")
-                latex_table.append(" ".join(row_parts))
-            
-            latex_table.append("\\midrule")
-        
-
-        # Table footer
-        latex_table.extend([
-            "\\bottomrule",
-            "\\end{tabular}"
-        ])
-        
-        return latex_table
     
-    # Generate unsupervised table
-    unsupervised_table = generate_table_content(unsupervised_header, unsupervised_metrics, runs_data)
-
-    unsupervised_table = "\n".join(unsupervised_table)
-
-    # Write unsupervised metrics table
-    with open(os.path.join('.', 'data', 'unsupervised_metrics_table.tex'), 'w') as f:
-        f.write(unsupervised_table)
-
     # Generate supervised table
-    supervised_table = generate_table_content(supervised_header, supervised_metrics, runs_data)
+    get_final_metrics(supervised_metrics, runs_data)
 
-    supervised_table = "\n".join(supervised_table)
+    # Generate unsupervised table
+    get_final_metrics(unsupervised_metrics, runs_data)
 
-    # Write supervised metrics table
-    with open(os.path.join('.', 'data', 'supervised_metrics_table.tex'), 'w') as f:
-        f.write(supervised_table)
-
-    rank_df = pl.DataFrame(rank_data)
     metric_df = pl.DataFrame(metric_rows)
     metric_df.write_parquet('./data/metrics.parquet')
 
-    fig, ax = plt.subplots(figsize=(3,2.5))
-    ax.bar(methods, list(rank_df.select(methods).sum().rows()[0]))
-    ax.set_xlabel('Method')
-    ax.tick_params(axis='x', labelrotation=45)
-    ax.set_ylabel('Summed Rank Order')
-    fig.tight_layout()
-    fig.savefig('./figs/rank_order.png')
-
 def main():
+    dotenv.load_dotenv()
     latest_runs = get_latest_runs()
-    generate_latex_tables(latest_runs)
+    get_final_metrics_from_runs(latest_runs)
 
 
 if __name__ == '__main__':

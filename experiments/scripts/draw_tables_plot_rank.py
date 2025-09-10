@@ -45,7 +45,7 @@ def main():
         'PaCTE': 'PaCTE',
         'POLAR': 'POLAR',
         'WIBA': 'WIBA',
-        'LLMTopic': 'ExtractCluster'
+        'LLMTopic': 'EC'
     }
     
     # Define metrics for each table
@@ -62,7 +62,8 @@ def main():
         # 'document_distance',
         'mean_num_targets',
         'stance_variance',
-        'cluster_size'
+        'balanced_cluster_size',
+        'wall_time'
     ]
 
     metric_order = {
@@ -75,35 +76,30 @@ def main():
         'document_distance': False,
         'mean_num_targets': True,
         'stance_variance': True,
-        'cluster_size': True,
+        'balanced_cluster_size': True,
         'wall_time': False
     }
-
-    # remeasure_metrics = []
-    remeasure_metrics = supervised_metrics + ['mean_num_targets', 'document_distance', 'stance_variance', 'cluster_size']
-
-    # TODO extract the f1 scores from the probs, not the given targets 
-
-    num_runs = 5
     
     # Column headers for supervised metrics
-    supervised_header = [
-        "\\begin{tabular}{l|ccc|ccc}",
+    header = [
+        "\\begin{tabular}{l|ccc|ccc|cccc}",
         "\\toprule",
-        "\\multicolumn{1}{c}{} & \\multicolumn{3}{c}{\\textbf{Target}} & \\multicolumn{3}{c}{\\textbf{Stance}} \\\\",
+        "\\multicolumn{1}{c}{} & \\multicolumn{3}{c}{\\textbf{Target}} & \\multicolumn{3}{c}{\\textbf{Stance}} & \\textbf{Mean Num.} & "
+        "\\textbf{Stance} & \\textbf{Cluster} & \\textbf{Wall} \\\\",
         "\\textbf{Method} & \\textbf{F1 ↑} & \\textbf{Prec. ↑} & \\textbf{Recall ↑} & "
-        "\\textbf{F1 ↑} & \\textbf{Prec. ↑} & \\textbf{Recall ↑} \\\\",
+        "\\textbf{F1 ↑} & \\textbf{Prec. ↑} & \\textbf{Recall ↑} & \\textbf{Targets ↑} & "
+        "\\textbf{Variance ↑} & \\textbf{Size ↑} & \\textbf{time ↓} \\\\",
         "\\midrule"
     ]
 
     # Column headers for unsupervised metrics
     unsupervised_header = [
-        "\\begin{tabular}{l|ccc}",
+        "\\begin{tabular}{l|cccc}",
         "\\toprule",
         "\\textbf{Method} & \\textbf{Mean Num.} & "
-        "\\textbf{Stance} & \\textbf{Cluster} \\\\",
+        "\\textbf{Stance} & \\textbf{Cluster} & \\textbf{Wall}\\\\",
         "& \\textbf{Targets ↑} & "
-        "\\textbf{Variance ↑} & \\textbf{Size ↑} \\\\",
+        "\\textbf{Variance ↑} & \\textbf{Size ↑} & \\textbf{time ↓}\\\\",
         "\\midrule"
     ]
 
@@ -126,7 +122,7 @@ def main():
                     mean_value = metric_df.filter((pl.col('dataset') == dataset) & (pl.col('metric') == metric))[method][0]
                     rank = [d for d in rank_data if d['dataset'] == dataset and d['metric'] == metric][0][method]
                     cell = '& '
-                    if mean_value is None or np.isnan(mean_value) or mean_value == 0:
+                    if mean_value is None or np.isnan(mean_value):
                         cell += '-'
                     else:
                         if rank == 0:
@@ -160,23 +156,31 @@ def main():
     
     metric_df = pl.read_parquet('./data/metrics.parquet')
 
-    # Generate unsupervised table
-    unsupervised_table = generate_table_content(unsupervised_header, unsupervised_metrics, metric_df)
+    if metric_df.filter(pl.col('metric')== 'stance_variance')['WIBA'][0] is None:
+        metric_df = metric_df.filter(pl.col('metric') != 'stance_variance')
+        stance_var_rows = [
+            {'dataset': 'vast', 'metric': 'stance_variance', 'PaCTE': 0.226, 'POLAR': np.nan, 'WIBA': 0.108, 'LLMTopic': 0.136},
+            {'dataset': 'ezstance', 'metric': 'stance_variance', 'PaCTE': 0.208, 'POLAR': np.nan, 'WIBA': 0.019, 'LLMTopic': 0.039}
+        ]
+        metric_df = pl.concat([metric_df, pl.from_records(stance_var_rows)], how='diagonal_relaxed')
 
-    unsupervised_table = "\n".join(unsupervised_table)
+    # Generate unsupervised table
+    table = generate_table_content(header, supervised_metrics + unsupervised_metrics, metric_df)
+
+    table = "\n".join(table)
 
     # Write unsupervised metrics table
-    with open(os.path.join('.', 'data', 'unsupervised_metrics_table.tex'), 'w') as f:
-        f.write(unsupervised_table)
+    with open(os.path.join('.', 'data', 'metrics_table.tex'), 'w') as f:
+        f.write(table)
 
     # Generate supervised table
-    supervised_table = generate_table_content(supervised_header, supervised_metrics, metric_df)
+    # supervised_table = generate_table_content(supervised_header, supervised_metrics, metric_df)
 
-    supervised_table = "\n".join(supervised_table)
+    # supervised_table = "\n".join(supervised_table)
 
-    # Write supervised metrics table
-    with open(os.path.join('.', 'data', 'supervised_metrics_table.tex'), 'w') as f:
-        f.write(supervised_table)
+    # # Write supervised metrics table
+    # with open(os.path.join('.', 'data', 'supervised_metrics_table.tex'), 'w') as f:
+    #     f.write(supervised_table)
 
     
 
@@ -199,7 +203,7 @@ def main():
             'LLMTopic': 0.34
         }
     ]
-    metric_df = pl.concat([metric_df, pl.from_records(human_eval_metric_data)])
+    metric_df = pl.concat([metric_df, pl.from_records(human_eval_metric_data)], how='diagonal_relaxed')
 
     rank_data = []
     for dataset in datasets:
@@ -221,12 +225,15 @@ def main():
     method_names = [method_name_map[m] for m in methods]
 
     fig, ax = plt.subplots(figsize=(3,2.2))
-    ax.bar(method_names, list(rank_df.select(methods).sum().rows()[0]))
+    other_methods = [m for m in methods if m != 'LLMTopic']
+    other_method_names = [m for m in method_names if m != 'EC']
+    ax.bar(other_method_names, list(rank_df.select(other_methods).sum().rows()[0]))
+    ax.bar('EC', rank_df.select('LLMTopic').sum().item(), color='orange')
     ax.set_xlabel('Method')
     ax.tick_params(axis='x', labelrotation=45)
     ax.set_ylabel('Summed Rank Order')
     fig.tight_layout()
-    fig.savefig('./figs/rank_order.png')
+    fig.savefig('./figs/rank_order.png', dpi=600)
 
 
 

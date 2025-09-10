@@ -1199,6 +1199,8 @@ def _calculate_trends_for_filtered_df(
         except ImportError:
             raise ImportError("Please install statsmodels to use LOWESS interpolation method: pip install statsmodels")
         pred = lowess(stance, timestamps, xvals=test_x, is_sorted=True, return_sorted=False)
+        # Interpolate NaN values
+        pred[np.isnan(pred)] = np.interp(np.flatnonzero(np.isnan(pred)), np.flatnonzero(~np.isnan(pred)), pred[~np.isnan(pred)])
 
         trend_df = _combine_trend_df(trend_df, pred, np.full_like(pred, np.nan), np.full_like(pred, np.nan), target_name, filter_type, filter_value)
         interpolation_outputs = {}
@@ -1341,6 +1343,7 @@ def infer_stance_trends_for_target(
         classifier_profiles,
         time_column,
         time_scale,
+        interpolation_method=interpolation_method,
         lengthscale_loc=lengthscale_loc,
         lengthscale_scale=lengthscale_scale,
         sigma_loc=sigma_loc,

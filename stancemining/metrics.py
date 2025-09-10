@@ -1,4 +1,7 @@
+import collections
+from pydoc import text
 from typing import List
+import re
 
 import bert_score
 import numpy as np
@@ -105,7 +108,7 @@ def bertscore_f1_targets(doc_targets: List[List[str]], gold_doc_targets: List[Li
 def f1_stances(all_targets, all_gold_targets, doc_targets, gold_doc_targets, polarity, gold_polarity, threshold=0.9):
     similarity_matrix = sentence_embedding_similarity(all_targets, all_gold_targets)
     extracted_to_gold = {all_targets[i]: all_gold_targets[j] for i, j in enumerate(np.argmax(similarity_matrix, axis=1)) if similarity_matrix[i, j] >= threshold}
-    pred_stance = [[(extracted_to_gold[t], polarity[i, all_targets.index(t)]) for t in doc_targets[i] if t in extracted_to_gold] for i in range(len(doc_targets))]
+    pred_stance = [[(extracted_to_gold[t], polarity[i][j]) for j, t in enumerate(doc_targets[i]) if t in extracted_to_gold] for i in range(len(doc_targets))]
     gold_stance = [list(set([(t, p) for t, p in zip(gold_doc_targets[i], gold_polarity[i])])) for i in range(len(doc_targets))]
     # TODO split f1 scores by target?
     p, r, f1 = [], [], []
@@ -142,7 +145,13 @@ def soft_inclusion(target_probs):
 def document_distance(target_probs):
     return np.mean(np.triu(cosine_similarity(target_probs), k=1))
 
-def stance_variance(polarity):
+def stance_variance(document_df: pl.DataFrame):
+    return document_df.explode(['Targets', 'Stances'])\
+        .group_by('Targets')\
+        .agg(pl.col('Stances').var())\
+        ['Stances'].mean()
+
+def stance_variance_from_numpy(polarity):
     return np.mean(np.nanvar(polarity, axis=0))
 
 
@@ -198,8 +207,65 @@ def bleu_targets(doc_targets, gold_doc_targets):
 def mean_num_targets(doc_targets):
     return np.mean([len(t) for t in doc_targets])
 
-def mean_cluster_size_ratio(stance_target_probs):
+def mean_cluster_size_ratio(document_df: pl.DataFrame):
+    return document_df.explode(['Targets'])\
+        .group_by('Targets').agg(pl.col('Stances').len())['Stances'].mean() / len(document_df)
+
+def mean_cluster_size_ratio_from_probs(stance_target_probs):
     return np.mean((stance_target_probs > 0).sum(0)) / stance_target_probs.shape[0]
 
-def mean_cluster_size_std_ratio(stance_target_probs):
+def mean_cluster_size_std_ratio_from_probs(stance_target_probs):
     return np.std((stance_target_probs > 0).sum(0)) / stance_target_probs.shape[0]
+
+def shannon_entropy_from_probs(stance_target_probs):
+    # Calculate Shannon entropy for each document
+    sizes = (stance_target_probs > 0).sum(axis=0)
+    n_clusters = len(sizes)
+    
+    # Diversity: normalized Shannon entropy (0 to 1)
+    proportions = sizes / sizes.sum()
+    entropy = -np.sum(proportions * np.log2(proportions + 1e-10))
+    return entropy
+
+def shannon_entropy(document_df: pl.DataFrame):
+    # Calculate Shannon entropy for each document
+    sizes = document_df.explode(['Targets'])\
+        .group_by('Targets').agg(pl.col('Stances').len())['Stances'].to_numpy()
+    n_clusters = len(sizes)
+    
+    # Diversity: normalized Shannon entropy (0 to 1)
+    proportions = sizes / sizes.sum()
+    entropy = -np.sum(proportions * np.log2(proportions + 1e-10))
+    return entropy
+
+def cluster_normalized_range_from_probs(stance_target_probs):
+    # Calculate the range of cluster sizes
+    cluster_sizes = (stance_target_probs > 0).sum(axis=0)
+    return (np.max(cluster_sizes) - np.min(cluster_sizes)) / np.max(cluster_sizes) if np.max(cluster_sizes) > 0 else 0
+
+def cluster_normalized_range(document_df: pl.DataFrame):
+    # Calculate the range of cluster sizes
+    cluster_sizes = document_df.explode(['Targets'])\
+        .group_by('Targets').agg(pl.col('Stances').len())['Stances']
+    return (cluster_sizes.max() - cluster_sizes.min()) / cluster_sizes.max() if cluster_sizes.max() > 0 else 0
+
+def balanced_cluster_size_from_probs(stance_target_probs):
+    return cluster_normalized_range_from_probs(stance_target_probs) * shannon_entropy_from_probs(stance_target_probs)
+
+def balanced_cluster_size(document_df: pl.DataFrame):
+    return cluster_normalized_range(document_df) * shannon_entropy(document_df)
+
+
+def max_ngram_repetition(all_texts: List[List[str]], n_range=(2, 5)):
+    max_count = 0
+    for texts in all_texts:
+        for text in texts:
+            words = re.findall(r'\b\w+\b', text.lower())
+            for n in range(n_range[0], n_range[1] + 1):
+                ngrams = [tuple(words[i:i+n]) for i in range(len(words) - n + 1)]
+                counts = collections.Counter(ngrams)
+                
+                this_max_count = max(counts.values(), default=0)
+                max_count = max(max_count, this_max_count)
+
+    return max_count

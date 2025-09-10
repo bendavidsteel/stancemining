@@ -9,8 +9,7 @@ import omegaconf
 import polars as pl
 import wandb
 
-from experiments import datasets
-from stancemining import metrics
+from stancemining import metrics, datasets
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
@@ -106,7 +105,7 @@ def main(config):
 
     # create unique directory
     cur_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-    working_dir = f'./data/{cur_time}/runs'
+    working_dir = f'./data/runs/{cur_time}'
     # update wandb config with working directory
     wandb.config.update({'working_dir': working_dir})
     os.makedirs(working_dir, exist_ok=True)

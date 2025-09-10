@@ -1,5 +1,245 @@
 from .llms import BaseLLM
 
+NOUN_PHRASE_AGGREGATE_PROMPT = [
+    "You are an expert at analyzing and categorizing topics.",
+    """Your task is to generate a list of appropriately specific generalized stance targets that best represent a cluster of related stance targets.
+
+    Instructions:
+    1. Review the provided stance targets and keyphrases that characterize the stance target cluster
+    2. Identify the common specific stance issues these targets relate to
+    3. Generate 1-3 appropriately specific noun phrases that:
+    - Are specific enough to meaningfully represent the stance being taken
+    - Are general enough to apply to the whole cluster
+    - Include relevant context like policy domains, affected groups, or implementation approaches
+    - Each noun phrase should be max 5 words
+    - If inputs are low quality (just emojis, Twitter handles, random phrases), return []
+
+    Input:
+    Representative stance targets: [list of stance targets]
+    Top keyphrases: [list of high tf-idf terms]
+
+    Output format:
+    Generalized target: ["appropriately specific noun phrase 1", "appropriately specific noun phrase 2", "appropriately specific noun phrase 3"]
+    Reasoning: [1-2 sentences explaining why these specific generalizations fit]
+
+    Examples:
+
+    Input:
+    Representative stance targets: ["EU vaccine passports", "mandatory covid shots", "provincial immunization requirements"]
+    Top keyphrases: ["mandatory", "requirement", "public health", "immunization", "vaccination"]
+
+    Output:
+    Generalized target: ["mandatory healthcare worker vaccination", "cross-border vaccination verification", "regional immunization requirements"]
+    Reasoning: These capture specific vaccination contexts and policy approaches across different regional systems without overly precise details.
+
+    Input:
+    Representative stance targets: ["London congestion charge", "Oslo car-free zones", "Paris emissions restrictions"]
+    Top keyphrases: ["emissions", "electric vehicles", "urban", "pollution"]
+
+    Output:
+    Generalized target: ["urban vehicle restriction zones", "metropolitan emissions policies", "city center traffic regulations"]
+    Reasoning: These targets identify specific urban policy approaches across different cities and implementation contexts without committing to exact timeframes.
+
+    Input:
+    Representative stance targets: ["o canada", "canada #canada", "2/3 of canadians", "canada 🍁", "canada canadians"]
+    Top keyphrases: ["canadians", "canada", "canadas", "canadian", "canadianpolling", "screwed", "canadaus", "broken"]
+
+    Output:
+    Generalized target: ["canada", "current state of canada"]
+    Reasoning: The inputs are all basically just the stance target canada, so output that and a related target.
+
+    Input:
+    Representative stance targets: ["content moderation", "online censorship", "platform guidelines"]
+    Top keyphrases: ["social media", "guidelines", "content", "moderation", "posts"]
+
+    Output:
+    Generalized target: ["political content removal policies", "international platform regulations", "global speech moderation standards"]
+    Reasoning: These specify content types and regulatory mechanisms across international contexts without naming specific platforms or exact policies.
+
+    Input:
+    Representative stance targets: ["Mediterranean migration crisis", "Canadian immigration system", "Schengen border controls"]
+    Top keyphrases: ["migration", "borders", "refugees", "policy", "asylum"]
+
+    Output:
+    Generalized target: ["refugee processing protocols", "international border management", "asylum application systems"]
+    Reasoning: These targets specify aspects of migration management across different regions without overly specific geographic or numerical details.
+
+    Input:
+    Representative stance targets: ["Ontario teacher contracts", "Ontario education spending", "Ontario school funding"]
+    Top keyphrases: ["education", "funding", "teachers", "schools", "budget"]
+
+    Output:
+    Generalized target: ["Ontario public education funding models", "Ontario teacher collective agreements", "Ontario classroom resource availability"]
+    Reasoning: These identify specific aspects of education funding for the Canadian province of Ontario without committing to specific percentage increases or exact amounts.
+
+    Input:
+    Representative stance targets: ["😂😂😂", "@JohnDoe2023", "@RealUserXYZ", "lol omg"]
+    Top keyphrases: ["lol", "omg", "user", "haha"]
+
+    Output:
+    Generalized target: []
+    Reasoning: The inputs contain only emojis, specific Twitter usernames, and generic expressions without substantive content related to any stance target.
+
+    Input:
+    Representative stance targets: ["just saying", "idk maybe", "whatever", "cool story"]
+    Top keyphrases: ["just", "maybe", "whatever", "cool", "story"]
+
+    Output:
+    Generalized target: []
+    Reasoning: The inputs are random short phrases without substantive content or specific topics that could be formed into meaningful stance targets.
+
+    Input:
+    Representative stance targets: ["ndp leader jagmeet singh", "jagmeet singh and j", "the jagmeet singh", "jagmeet singh", "@jagmeet singh"]
+    Top keyphrases: ["jagmeet singh", "khan", "dr", "jagmeet", "mohammed", "manana", "khans", "abdulla", "abu", "nan"]
+
+    Output:
+    Generalized target: ["jagmeet singh", "jagmeet singh's policies", "jagmeet singh's leadership"]
+    Reasoning: The inputs are all about one person, so the outputs are all about that person, but generalized to include his policies and leadership style.
+
+    Input:
+    Representative stance targets: ["rent control", "rent housing", "rent de l\'écart", "rent"]
+    Top keyphrases: ["rent control", "rental", "landlord", "tenant", "lease", "renters", "landlords", "shortterm", "rentals", "tenants"]
+
+    Output:
+    Generalized target: ["rent control", "rent increase caps", "renter protections"]
+    Reasoning: The inputs are about renting and landlords, and these outputs are all renter policy specific stance targets.
+    
+    Input:
+    Representative stance targets: ["israeli", "israeli israeli,", "israeli israeli israeli", "israeli israeli", "israeli israel"]
+    Top keyphrases: ["israeli", "palestinian", "israel", "gaza", "palestine", "israels", "palestinians", "conflict", "gaza war", "attacks"]
+
+    Output:
+    Generalized target: ["state of israel", "ceasefire in palestine", "ceasefire in gaza"]
+    Reasoning: The inputs are about israel and palestine, and these outputs are all israel-palestine specific stance targets.
+    
+    Input:
+    Representative stance targets: [{repr_docs_s}]
+    Top keyphrases: [{keyphrases_s}]
+
+    Output:
+    Generalized target: """
+]
+
+CLAIM_AGGREGATE_PROMPT = [
+    "You are an expert at analyzing and categorizing topics.",
+    """Your task is to generate a list of appropriately specific generalized stance claims that best represent a cluster of related stance targets.
+
+    Instructions:
+    1. Review the provided stance targets (which are claims) and keyphrases that characterize the stance target cluster
+    2. Identify the common specific stance issues these targets relate to
+    3. Generate 1-3 appropriately specific claims that:
+    - Are specific enough to meaningfully represent the stance being taken
+    - Are general enough to apply to the whole cluster
+    - Include relevant context like policy domains, affected groups, or implementation approaches
+    - Each claim should be a complete statement expressing a position
+    - If inputs are low quality (just emojis, Twitter handles, random phrases), return []
+
+    Input:
+    Representative stance targets: [list of stance claims]
+    Top keyphrases: [list of high tf-idf terms]
+
+    Output format:
+    Generalized target: ["appropriately specific claim 1", "appropriately specific claim 2", "appropriately specific claim 3"]
+    Reasoning: [1-2 sentences explaining why these specific generalizations fit]
+
+    Examples:
+
+    Input:
+    Representative stance targets: ["EU should require vaccine passports", "Covid shots should be mandatory", "Provinces need immunization requirements"]
+    Top keyphrases: ["mandatory", "requirement", "public health", "immunization", "vaccination"]
+
+    Output:
+    Generalized target: ["Healthcare workers should be required to get vaccinated", "Cross-border travel should require vaccination verification", "Regional authorities should enforce immunization requirements"]
+    Reasoning: These capture specific vaccination contexts and policy approaches across different regional systems without overly precise details.
+
+    Input:
+    Representative stance targets: ["London should maintain congestion charges", "Oslo needs more car-free zones", "Paris must enforce emissions restrictions"]
+    Top keyphrases: ["emissions", "electric vehicles", "urban", "pollution"]
+
+    Output:
+    Generalized target: ["Cities should implement vehicle restriction zones", "Metropolitan areas need emissions reduction policies", "City centers should regulate traffic to reduce pollution"]
+    Reasoning: These targets identify specific urban policy approaches across different cities and implementation contexts without committing to exact timeframes.
+
+    Input:
+    Representative stance targets: ["Canada is broken", "Canada needs change", "2/3 of Canadians are unhappy", "Canada is failing", "Canadians deserve better"]
+    Top keyphrases: ["canadians", "canada", "canadas", "canadian", "canadianpolling", "screwed", "canadaus", "broken"]
+
+    Output:
+    Generalized target: ["Canada is facing significant challenges", "The current state of Canada needs improvement"]
+    Reasoning: The inputs are all basically claims about Canada's problems, so output claims about Canada's current situation.
+
+    Input:
+    Representative stance targets: ["Content moderation has gone too far", "Online censorship is increasing", "Platform guidelines are too restrictive"]
+    Top keyphrases: ["social media", "guidelines", "content", "moderation", "posts"]
+
+    Output:
+    Generalized target: ["Platforms should remove harmful political content", "International regulations should govern platform speech", "Global standards should guide content moderation"]
+    Reasoning: These specify content types and regulatory mechanisms across international contexts without naming specific platforms or exact policies.
+
+    Input:
+    Representative stance targets: ["Mediterranean migration is a crisis", "Canada's immigration system is broken", "Schengen borders need stronger controls"]
+    Top keyphrases: ["migration", "borders", "refugees", "policy", "asylum"]
+
+    Output:
+    Generalized target: ["Refugee processing protocols need reform", "International border management requires coordination", "Asylum application systems should be streamlined"]
+    Reasoning: These targets specify aspects of migration management across different regions without overly specific geographic or numerical details.
+
+    Input:
+    Representative stance targets: ["Ontario teachers deserve better contracts", "Ontario is underfunding education", "Ontario schools lack proper funding"]
+    Top keyphrases: ["education", "funding", "teachers", "schools", "budget"]
+
+    Output:
+    Generalized target: ["Ontario should increase public education funding", "Ontario needs to improve teacher compensation agreements", "Ontario must address classroom resource shortages"]
+    Reasoning: These identify specific aspects of education funding for the Canadian province of Ontario without committing to specific percentage increases or exact amounts.
+
+    Input:
+    Representative stance targets: ["😂😂😂", "@JohnDoe2023", "@RealUserXYZ", "lol omg"]
+    Top keyphrases: ["lol", "omg", "user", "haha"]
+
+    Output:
+    Generalized target: []
+    Reasoning: The inputs contain only emojis, specific Twitter usernames, and generic expressions without substantive content related to any stance target.
+
+    Input:
+    Representative stance targets: ["just saying", "idk maybe", "whatever", "cool story"]
+    Top keyphrases: ["just", "maybe", "whatever", "cool", "story"]
+
+    Output:
+    Generalized target: []
+    Reasoning: The inputs are random short phrases without substantive content or specific topics that could be formed into meaningful stance targets.
+
+    Input:
+    Representative stance targets: ["Jagmeet Singh is wrong", "Jagmeet Singh failed the NDP", "Jagmeet Singh should resign", "Jagmeet Singh betrayed workers", "Jagmeet Singh is ineffective"]
+    Top keyphrases: ["jagmeet singh", "khan", "dr", "jagmeet", "mohammed", "manana", "khans", "abdulla", "abu", "nan"]
+
+    Output:
+    Generalized target: ["Jagmeet Singh should change his approach", "Jagmeet Singh's policies need reconsideration", "Jagmeet Singh's leadership style is problematic"]
+    Reasoning: The inputs are all claims about one person, so the outputs are claims about that person's policies and leadership style.
+
+    Input:
+    Representative stance targets: ["Rent control works", "Housing rent is too high", "Rent increases are unfair", "Renters need protection"]
+    Top keyphrases: ["rent control", "rental", "landlord", "tenant", "lease", "renters", "landlords", "shortterm", "rentals", "tenants"]
+
+    Output:
+    Generalized target: ["Rent control policies should be implemented", "Rent increases need to be capped", "Renters deserve stronger protections"]
+    Reasoning: The inputs are claims about renting and landlords, and these outputs are all renter policy specific stance claims.
+    
+    Input:
+    Representative stance targets: ["Israel must stop", "Israel is committing genocide", "Israel violated international law", "Israel should withdraw", "Israel needs accountability"]
+    Top keyphrases: ["israeli", "palestinian", "israel", "gaza", "palestine", "israels", "palestinians", "conflict", "gaza war", "attacks"]
+
+    Output:
+    Generalized target: ["Israel needs to change its approach", "A ceasefire should be implemented in Palestine", "The Gaza conflict must end immediately"]
+    Reasoning: The inputs are claims about israel and palestine, and these outputs are all israel-palestine specific stance claims.
+    
+    Input:
+    Representative stance targets: [{repr_docs_s}]
+    Top keyphrases: [{keyphrases_s}]
+
+    Output:
+    Generalized target: """
+]
+
 def parse_generated_targets(outputs):
     outputs = [o.replace('stance', '').strip() for o in outputs if o != 'none' and o != None and o != '']
     outputs = list(set(outputs))
@@ -199,7 +439,13 @@ def ask_llm_zero_shot_stance(generator, docs, stance_targets):
     return all_outputs
 
 
-def ask_llm_target_aggregate(generator: BaseLLM, topics):
+def ask_llm_noun_phrase_aggregate(generator: BaseLLM, clusters):
+    return ask_llm_target_aggregate(generator, clusters, NOUN_PHRASE_AGGREGATE_PROMPT, 20)
+
+def ask_llm_claim_aggregate(generator: BaseLLM, clusters):
+    return ask_llm_target_aggregate(generator, clusters, CLAIM_AGGREGATE_PROMPT, 100)
+
+def ask_llm_target_aggregate(generator: BaseLLM, topics, prompt, max_new_tokens):
     # Stance Target Topic Generalization Prompt
     prompts = []
     for topic in topics:
@@ -207,135 +453,18 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics):
         keyphrases = topic['Keyphrases']
         repr_docs_s = ', '.join(f'"{d}"' for d in repr_docs)
         keyphrases_s = ', '.join(f'"{k}"' for k in keyphrases)
-        prompt = [
-            "You are an expert at analyzing and categorizing topics.",
-            f"""Your task is to generate a list of appropriately specific generalized stance targets that best represent a cluster of related stance targets.
+        formatted_prompt = [p.format(repr_docs_s=repr_docs_s, keyphrases_s=keyphrases_s) for p in prompt]
+        prompts.append(formatted_prompt)
 
-            Instructions:
-            1. Review the provided stance targets and keyphrases that characterize the stance target cluster
-            2. Identify the common specific stance issues these targets relate to
-            3. Generate 1-3 appropriately specific noun phrases that:
-            - Are specific enough to meaningfully represent the stance being taken
-            - Are general enough to apply to the whole cluster
-            - Include relevant context like policy domains, affected groups, or implementation approaches
-            - Each noun phrase should be max 5 words
-            - If inputs are low quality (just emojis, Twitter handles, random phrases), return []
-
-            Input:
-            Representative stance targets: [list of stance targets]
-            Top keyphrases: [list of high tf-idf terms]
-
-            Output format:
-            Generalized target: ["appropriately specific noun phrase 1", "appropriately specific noun phrase 2", "appropriately specific noun phrase 3"]
-            Reasoning: [1-2 sentences explaining why these specific generalizations fit]
-
-            Examples:
-
-            Input:
-            Representative stance targets: ["EU vaccine passports", "mandatory covid shots", "provincial immunization requirements"]
-            Top keyphrases: ["mandatory", "requirement", "public health", "immunization", "vaccination"]
-
-            Output:
-            Generalized target: ["mandatory healthcare worker vaccination", "cross-border vaccination verification", "regional immunization requirements"]
-            Reasoning: These capture specific vaccination contexts and policy approaches across different regional systems without overly precise details.
-
-            Input:
-            Representative stance targets: ["London congestion charge", "Oslo car-free zones", "Paris emissions restrictions"]
-            Top keyphrases: ["emissions", "electric vehicles", "urban", "pollution"]
-
-            Output:
-            Generalized target: ["urban vehicle restriction zones", "metropolitan emissions policies", "city center traffic regulations"]
-            Reasoning: These targets identify specific urban policy approaches across different cities and implementation contexts without committing to exact timeframes.
-
-            Input:
-            Representative stance targets: ["o canada", "canada #canada", "2/3 of canadians", "canada 🍁", "canada canadians"]
-            Top keyphrases: ["canadians", "canada", "canadas", "canadian", "canadianpolling", "screwed", "canadaus", "broken"]
-
-            Output:
-            Generalized target: ["canada", "current state of canada"]
-            Reasoning: The inputs are all basically just the stance target canada, so output that and a related target.
-
-            Input:
-            Representative stance targets: ["content moderation", "online censorship", "platform guidelines"]
-            Top keyphrases: ["social media", "guidelines", "content", "moderation", "posts"]
-
-            Output:
-            Generalized target: ["political content removal policies", "international platform regulations", "global speech moderation standards"]
-            Reasoning: These specify content types and regulatory mechanisms across international contexts without naming specific platforms or exact policies.
-
-            Input:
-            Representative stance targets: ["Mediterranean migration crisis", "Canadian immigration system", "Schengen border controls"]
-            Top keyphrases: ["migration", "borders", "refugees", "policy", "asylum"]
-
-            Output:
-            Generalized target: ["refugee processing protocols", "international border management", "asylum application systems"]
-            Reasoning: These targets specify aspects of migration management across different regions without overly specific geographic or numerical details.
-
-            Input:
-            Representative stance targets: ["Ontario teacher contracts", "Ontario education spending", "Ontario school funding"]
-            Top keyphrases: ["education", "funding", "teachers", "schools", "budget"]
-
-            Output:
-            Generalized target: ["Ontario public education funding models", "Ontario teacher collective agreements", "Ontario classroom resource availability"]
-            Reasoning: These identify specific aspects of education funding for the Canadian province of Ontario without committing to specific percentage increases or exact amounts.
-
-            Input:
-            Representative stance targets: ["😂😂😂", "@JohnDoe2023", "@RealUserXYZ", "lol omg"]
-            Top keyphrases: ["lol", "omg", "user", "haha"]
-
-            Output:
-            Generalized target: []
-            Reasoning: The inputs contain only emojis, specific Twitter usernames, and generic expressions without substantive content related to any stance target.
-
-            Input:
-            Representative stance targets: ["just saying", "idk maybe", "whatever", "cool story"]
-            Top keyphrases: ["just", "maybe", "whatever", "cool", "story"]
-
-            Output:
-            Generalized target: []
-            Reasoning: The inputs are random short phrases without substantive content or specific topics that could be formed into meaningful stance targets.
-
-            Input:
-            Representative stance targets: ["ndp leader jagmeet singh", "jagmeet singh and j", "the jagmeet singh", "jagmeet singh", "@jagmeet singh"]
-            Top keyphrases: ["jagmeet singh", "khan", "dr", "jagmeet", "mohammed", "manana", "khans", "abdulla", "abu", "nan"]
-
-            Output:
-            Generalized target: ["jagmeet singh", "jagmeet singh's policies", "jagmeet singh's leadership"]
-            Reasoning: The inputs are all about one person, so the outputs are all about that person, but generalized to include his policies and leadership style.
-
-            Input:
-            Representative stance targets: ["rent control", "rent housing", "rent de l\'écart", "rent"]
-            Top keyphrases: ["rent control", "rental", "landlord", "tenant", "lease", "renters", "landlords", "shortterm", "rentals", "tenants"]
-
-            Output:
-            Generalized target: ["rent control", "rent increase caps", "renter protections"]
-            Reasoning: The inputs are about renting and landlords, and these outputs are all renter policy specific stance targets.
-            
-            Input:
-            Representative stance targets: ["israeli", "israeli israeli,", "israeli israeli israeli", "israeli israeli", "israeli israel"]
-            Top keyphrases: ["israeli", "palestinian", "israel", "gaza", "palestine", "israels", "palestinians", "conflict", "gaza war", "attacks"]
-
-            Output:
-            Generalized target: ["state of israel", "ceasefire in palestine", "ceasefire in gaza"]
-            Reasoning: The inputs are about israel and palestine, and these outputs are all israel-palestine specific stance targets.
-            
-            Input:
-            Representative stance targets: [{repr_docs_s}]
-            Top keyphrases: [{keyphrases_s}]
-
-            Output:
-            Generalized target: """
-        ]
-        prompts.append(prompt)
-    
-    all_raw_outputs = generator.generate(prompts, max_new_tokens=20, num_samples=1, add_generation_prompt=False, continue_final_message=True)
+    all_raw_outputs = generator.generate(prompts, max_new_tokens=max_new_tokens, num_samples=1, add_generation_prompt=False, continue_final_message=True)
     all_outputs = []
     for raw_outputs in all_raw_outputs:
         def parse_output(o):
-            if ('\n' not in o) and (', ' not in o) and (']' not in o):  # incomplete generation
-                # incomplete generation
+            o = o.strip()
+            if o == '[]':
                 return []
             o = o.split('Reasoning:')[0].split('\n')[0].strip('\n').strip().strip('[]').split(', ')
+            o = [t for t in o if t[0] == '"' and t[-1] == '"']
             o = [t.strip('"') for t in o]
             return o
         outputs = parse_output(raw_outputs)

@@ -93,17 +93,18 @@ class Transformers(BaseLLM):
         torch.cuda.empty_cache()
 
 class VLLM(BaseLLM):
-    def __init__(self, model_name, verbose=False):
+    def __init__(self, model_name, model_kwargs, verbose=False):
         super().__init__(model_name)
         
         self.model_name = model_name
+        self.model_kwargs = model_kwargs
         self.verbose = verbose
 
         self.load_model()
 
     def load_model(self):
         import vllm
-        self.model = vllm.LLM(model=self.model_name, enable_prefix_caching=True)
+        self.model = vllm.LLM(model=self.model_name, enable_prefix_caching=True, **self.model_kwargs)
         self.sampling_params = vllm.SamplingParams(
             temperature=0.0,
             stop=['\n', '<|endoftext|>', '<|im_end|>']
@@ -146,7 +147,7 @@ class VLLM(BaseLLM):
         torch.cuda.empty_cache()
 
 
-def get_vllm_predictions(task, df, config, verbose=False):
+def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, generate_kwargs={}):
     import vllm
     import vllm.lora.request
     
@@ -159,8 +160,11 @@ def get_vllm_predictions(task, df, config, verbose=False):
         prompt = metadata['prompt']
         parent_prompt = metadata['parent_prompt'] if 'parent_prompt' in metadata else None
     else:
-        model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], config['data_name'], output_type)
-        prompt=load_prompt(task, config['prompting_method'], generation_method=config['generation_method'] if 'generation_method' in config else None),
+        if 'data_name' in config:
+            model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], config['data_name'], output_type)
+        else:
+            model_save_path = config['model_path']
+        prompt=load_prompt(task, config['prompting_method'], generation_method=config['generation_method'] if 'generation_method' in config else None)
         parent_prompt=load_parent_prompt(task, prompting_method=config['prompting_method'])
     
     # Setup configurations
@@ -185,28 +189,37 @@ def get_vllm_predictions(task, df, config, verbose=False):
     prompts = [to_message_format(p) for p in prompts]
 
     if model_config.generation_method == 'beam':
-        raise NotImplementedError()
+        raise NotImplementedError("Beam search is not supported with VLLM yet.")
 
-    llm_kwargs = {}
+    chat_template_kwargs = {}
     if task in ['topic-extraction', 'claim-extraction'] or (task == 'stance-classification' and model_config.classification_method == 'generation'):
-        llm_kwargs['task'] = 'generate'
-        llm_kwargs['generation_config'] = 'auto'
+        model_kwargs['task'] = 'generate'
+        model_kwargs['generation_config'] = 'auto'
+        model_kwargs['enable_lora'] = True
+        chat_template_kwargs['enable_thinking'] = False
 
-        file_path = huggingface_hub.hf_hub_download(repo_id=model_save_path, filename='adapter_config.json')
-        with open(file_path, 'r') as f:
-            adapter_config = json.load(f)
-        adapter_path = huggingface_hub.snapshot_download(repo_id=model_save_path)
-        model_name = adapter_config['base_model_name_or_path']
+        if 'hf_model' in config:
+            file_path = huggingface_hub.hf_hub_download(repo_id=model_save_path, filename='adapter_config.json')
+            with open(file_path, 'r') as f:
+                adapter_config = json.load(f)
+            adapter_path = huggingface_hub.snapshot_download(repo_id=model_save_path)
+            model_name = adapter_config['base_model_name_or_path']
+        else:
+            adapter_path = model_save_path
+            model_name = config['base_model_name']
 
     elif task == 'stance-classification' and model_config.classification_method == 'head':
-        llm_kwargs['task'] = 'classify'
-        llm_kwargs['enforce_eager'] = True
-        model_name = config['hf_model']
+        model_kwargs['task'] = 'classify'
+        # model_kwargs['enforce_eager'] = True
+        model_name = model_save_path
     else:
         raise ValueError()
     
-    file_path = huggingface_hub.hf_hub_download(repo_id=model_save_path, filename='tokenizer_config.json')
-    with open(file_path, 'r') as f:
+    if 'hf_model' in config:
+        tokenizer_file_path = huggingface_hub.hf_hub_download(repo_id=model_save_path, filename='tokenizer_config.json')
+    else:
+        tokenizer_file_path = os.path.join(model_save_path, 'tokenizer_config.json')
+    with open(tokenizer_file_path, 'r') as f:
         tokenizer_config = json.load(f)
     if 'chat_template' in tokenizer_config and task == 'stance-classification' and model_config.classification_method == 'head':
         import transformers
@@ -222,12 +235,14 @@ def get_vllm_predictions(task, df, config, verbose=False):
             tokenize=False
         )
 
+    # turn off verbose logging
+    os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
+
     try:
         llm = vllm.LLM(
             model=model_name,
-            enable_lora=True,
             enable_prefix_caching=True,
-            **llm_kwargs
+            **model_kwargs
         )
     except NotImplementedError as ex:
         # this sometimes works without the env var, not sure why
@@ -235,9 +250,8 @@ def get_vllm_predictions(task, df, config, verbose=False):
             os.environ['VLLM_USE_V1'] = '0'
             llm = vllm.LLM(
                 model=model_name,
-                enable_lora=True,
                 enable_prefix_caching=True,
-                **llm_kwargs
+                **model_kwargs
             )
         else:
             raise
@@ -255,7 +269,8 @@ def get_vllm_predictions(task, df, config, verbose=False):
     sampling_params = vllm.SamplingParams(
         temperature=0.0,
         stop=['\n', '<|endoftext|>', '<|im_end|>'] if task in ['topic-extraction', 'claim-extraction'] else None,
-        max_tokens=max_new_tokens
+        max_tokens=max_new_tokens,
+        repetition_penalty=1.2
     )
     if task in ['topic-extraction', 'claim-extraction']:
         lora_request = vllm.lora.request.LoRARequest(
@@ -265,11 +280,11 @@ def get_vllm_predictions(task, df, config, verbose=False):
         )
 
     if task in ['topic-extraction', 'claim-extraction'] or (task == 'stance-classification' and model_config.classification_method == 'generation'):
-        outputs = llm.chat(messages=prompts, sampling_params=sampling_params, use_tqdm=verbose, lora_request=lora_request)
+        outputs = llm.chat(messages=prompts, sampling_params=sampling_params, use_tqdm=verbose, lora_request=lora_request, chat_template_kwargs=chat_template_kwargs, **generate_kwargs)
         predictions = [o.outputs[0].text for o in outputs]
         predictions = parse_list_completions(predictions)
     elif task == 'stance-classification' and model_config.classification_method == 'head':
-        outputs = llm.classify(prompts, use_tqdm=verbose)
+        outputs = llm.classify(prompts, use_tqdm=verbose, **generate_kwargs)
         probs = [o.outputs.probs for o in outputs]
         predictions = [np.argmax(p) for p in probs]
         id2labels = {v: k for k, v in data_config.labels2id.items()}

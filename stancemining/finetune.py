@@ -444,6 +444,22 @@ class DataProcessor:
                 dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=len(dataset) > 1, num_proc=num_proc)
         return dataset
 
+def _evaluate_generation_set(predictions, references):
+    bertscore_f1, bertscore_p, bertscore_r = stancemining.metrics.bertscore_f1_targets(predictions, references)
+    bleu_f1, bleu_p, bleu_r = stancemining.metrics.bleu_targets(predictions, references)
+    max_claim_length = max(max(len(claim) for claim in preds) for preds in predictions)
+    repetition_score = stancemining.metrics.max_ngram_repetition(predictions)
+    return {
+        'bertscore_f1': bertscore_f1,
+        'bertscore_p': bertscore_p,
+        'bertscore_r': bertscore_r,
+        'bleu_f1': bleu_f1,
+        'bleu_p': bleu_p,
+        'bleu_r': bleu_r,
+        'max_claim_length': max_claim_length,
+        'max_ngram_repetition': repetition_score
+    }
+
 class ModelEvaluator:
     def __init__(self, task, labels2id=None):
         self.task = task
@@ -499,17 +515,8 @@ class ModelEvaluator:
 
         return pred_metrics
 
-    def _evaluate_generation(self, predictions: List[Any], references: List[Any], datasets: List[str]) -> Dict[str, float]:
-        bertscore_f1, bertscore_p, bertscore_r = stancemining.metrics.bertscore_f1_targets(predictions, references)
-        bleu_f1, bleu_p, bleu_r = stancemining.metrics.bleu_targets(predictions, references)
-        pred_metrics = {
-            'bertscore_f1': bertscore_f1,
-            'bertscore_p': bertscore_p,
-            'bertscore_r': bertscore_r,
-            'bleu_f1': bleu_f1,
-            'bleu_p': bleu_p,
-            'bleu_r': bleu_r
-        }
+    def _evaluate_generation(self, predictions: List[List[str]], references: List[List[str]], datasets: List[str]) -> Dict[str, float]:
+        pred_metrics = _evaluate_generation_set(predictions, references)
 
         df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
         for key, dataset_df in df.partition_by('dataset', as_dict=True).items():
@@ -517,16 +524,7 @@ class ModelEvaluator:
             d_predictions = dataset_df['prediction'].to_list()
             d_references = dataset_df['reference'].to_list()
     
-            d_bertscore_f1, d_bertscore_p, d_bertscore_r = stancemining.metrics.bertscore_f1_targets(d_predictions, d_references)
-            d_bleu_f1, d_bleu_p, d_bleu_r = stancemining.metrics.bleu_targets(d_predictions, d_references)
-            pred_metrics[dataset] = {
-                'bertscore_f1': d_bertscore_f1,
-                'bertscore_p': d_bertscore_p,
-                'bertscore_r': d_bertscore_r,
-                'bleu_f1': d_bleu_f1,
-                'bleu_p': d_bleu_p,
-                'bleu_r': d_bleu_r
-            }
+            pred_metrics[dataset] = _evaluate_generation_set(d_predictions, d_references)
         return pred_metrics
 
 
@@ -933,7 +931,7 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             return parse_list_completions(completions)
         elif generation_method == 'beam':
             batched_completions = []
-            num_return_sequences = generate_kwargs.get('num_return_sequences', 1)
+            num_return_sequences = generate_kwargs.get('num_return_sequences', 3)
             for i in range(prompt['input_ids'].shape[0]):
                 batched_completions.append(completions[i*num_return_sequences:(i+1)*num_return_sequences])
             return batched_completions
@@ -952,7 +950,7 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
         prompt = metadata['prompt']
         parent_prompt = metadata['parent_prompt'] if 'parent_prompt' in metadata else None
     else:
-        model_save_path = get_model_save_path(task, config['save_model_path'], config['model_name'], config['data_name'], output_type)
+        model_save_path = config['model_path']
         prompt = load_prompt(task, config['prompting_method'], generation_method=config['generation_method'] if 'generation_method' in config else None)
         parent_prompt = load_parent_prompt(task, prompting_method=config['prompting_method'])
 
@@ -990,6 +988,7 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
             generate_kwargs['diversity_penalty'] = 10.0
             generate_kwargs['no_repeat_ngram_size'] = 2
             generate_kwargs['do_sample'] = False
+            generate_kwargs['trust_remote_code'] = True
 
     predictions = []
     test_loader = processor.get_loader(test_dataset, loader_kwargs={"batch_size": config.get('batch_size', 1)})
