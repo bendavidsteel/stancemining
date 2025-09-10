@@ -188,6 +188,12 @@ export const getUmapData = async () => {
   return response.data;
 };
 
+// API function for PCA streamplot data
+export const getPcaStreamplotData = async () => {
+  const response = await api.get('/pca-streamplot');
+  return response.data;
+};
+
 // Error handling utility
 export const handleApiError = (error) => {
   let errorMessage = 'An error occurred. Please try again.';

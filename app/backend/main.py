@@ -17,6 +17,11 @@ from pydantic import BaseModel
 import pynndescent
 import requests
 import sklearn.metrics.pairwise
+import sklearn.decomposition
+import sklearn.impute
+from sklearn.experimental import enable_iterative_imputer
+from scipy.stats import gaussian_kde
+from scipy.spatial.distance import cdist
 from umap import UMAP
 
 from fastapi import FastAPI, Query, Depends, HTTPException, status, Request
@@ -107,6 +112,20 @@ class UmapPoint(BaseModel):
 
 class UmapResponse(BaseModel):
     data: List[UmapPoint]
+
+class PCAStreamplotPoint(BaseModel):
+    x: float
+    y: float
+    createtime: str
+    filter_value: str
+    platform: str
+    year: int
+    flow_u: Optional[float] = None
+    flow_v: Optional[float] = None
+
+class PCAStreamplotResponse(BaseModel):
+    data: List[PCAStreamplotPoint]
+    pca_info: Dict[str, Any]
 
 # Global variables to store loaded data
 target_df = None
@@ -459,6 +478,9 @@ async def startup_event():
             except Exception as e:
                 logger.error(f"Error loading trend file {trend_file_path}: {e}")
 
+        # only keep targets we have trends for
+        target_df = target_df.join(all_trends_df.select('target').unique('target'), left_on='Target', right_on='target', how='right', maintain_order='left').rename({'target': 'Target'})
+
         logger.info(f"Loaded unified trends dataframe with {len(all_trends_df)} rows")
 
         # Note: Raw data will be loaded on-demand, not at startup
@@ -670,20 +692,20 @@ async def get_target_raw_data(
                     .drop_nulls('Targets')\
                     .filter(pl.col('Targets') == target_name)
                 
+                # Apply additional filtering
+                if filter_value != "all":
+                    file_target_df = file_target_df.filter(pl.col(filter_type) == filter_value)
+
                 if len(file_target_df) == 0:
                     continue
-                else:
-                    file_target_df = file_target_df.rename({'Targets': 'Target', 'Stances': 'Stance'})
-                    target_df = pl.concat([target_df, file_target_df]) if target_df is not None else file_target_df
+                
+                file_target_df = file_target_df.rename({'Targets': 'Target', 'Stances': 'Stance'})
+                target_df = pl.concat([target_df, file_target_df], how='diagonal_relaxed') if target_df is not None else file_target_df
             except Exception as ex:
                 logger.error(f"Error loading stance file {stance_file_path}: {ex}")
 
         if target_df is None:
             return {"data": []}
-        
-        # Apply additional filtering
-        if filter_value != "all":
-            target_df = target_df.filter(pl.col(filter_type) == filter_value)
 
         logger.info(f"Returning {len(target_df)} raw data points for {target_name}")
 
@@ -717,6 +739,153 @@ async def get_target_filters(
         .to_dicts()
 
     return {f['filter_type']: f['filter_value'] for f in filters}
+
+
+def compute_pca_streamplot_data(df, cols='both'):
+    """Compute PCA analysis and flow field data for streamplot visualization"""
+    try:
+        # Pivot data
+        logger.info("Pivoting data for PCA...")
+        target_df = df.pivot(on='target', index=['createtime', 'filter_value'], values=['trend_mean', 'volume'])
+        
+        # Get feature columns
+        feature_cols = [c for c in target_df.columns if c not in ['createtime', 'filter_value']]
+        stance_cols = [c for c in feature_cols if 'trend_mean' in c]
+        volume_cols = [c for c in feature_cols if 'volume' in c]
+        
+        # Handle missing values
+        # sklearn simple imputer is very slow so use polars instead
+        logger.info("Imputing missing values...")
+        # replace completely missing values with mean
+        target_df = target_df.with_columns(
+            [pl.col(c).backward_fill().over('filter_value') for c in stance_cols]
+        ).with_columns(
+            [pl.col(c).forward_fill().over('filter_value') for c in stance_cols]
+        ).with_columns(
+            [pl.col(c).fill_null(strategy='mean') for c in stance_cols]
+        ).with_columns(
+            [pl.col(c).fill_null(0).rolling_mean(window_size=3).over('filter_value').fill_null(value=0) for c in volume_cols]
+        )
+
+        X = target_df.select(feature_cols).to_numpy()
+        n_components = 2
+
+        # Apply PCA
+        logger.info("Applying PCA")
+        try:
+            import faiss
+
+            pca = faiss.PCAMatrix(X.shape[1], n_components)
+            pca.train(X)
+            coords = pca.apply(X)
+
+            explained_variance = None
+            pca_components = components = faiss.vector_to_array(pca.A).reshape(n_components, X.shape[1])
+        except ImportError:
+            logger.warning("FAISS not available, using sklearn PCA instead")
+            pca = sklearn.decomposition.PCA(n_components=n_components)
+            coords = pca.fit_transform(X)
+
+            explained_variance = pca.explained_variance_ratio_.tolist()
+            pca_components = pca.components_
+
+        # Add coordinates and extract metadata
+        target_df = target_df.with_columns([
+            pl.Series('x', coords[:, 0]),
+            pl.Series('y', coords[:, 1]),
+            pl.col('createtime').dt.year().alias('year'),
+            pl.col('filter_value').str.split('-').list.get(1).alias('platform')
+        ])
+
+        logger.info("Calculating flow field...")
+        # Calculate flow field (simplified version for web)
+        flow_data = calculate_flow_field(target_df)
+        
+        # Get top contributing features
+        pca_info = {
+            'explained_variance_ratio': explained_variance,
+            'feature_names': feature_cols,
+            'components': pca_components
+        }
+        
+        return target_df, pca_info, flow_data
+        
+    except Exception as e:
+        logger.error(f"Error computing PCA data: {e}")
+        return None, None, None
+
+def calculate_flow_field(target_df: pl.DataFrame):
+    """Calculate simplified flow field data for web visualization"""
+    
+    return target_df.select(['filter_value', 'x', 'y'])\
+        .with_columns(pl.concat_arr(['x', 'y']).alias('coord'))\
+        .with_columns((pl.col('coord') - pl.col('coord').shift(1).over('filter_value')).alias('flow'))\
+        .select([
+            pl.col('coord').arr.get(0).alias('x'),
+            pl.col('coord').arr.get(1).alias('y'),
+            pl.col('flow').arr.get(0).alias('u'),
+            pl.col('flow').arr.get(1).alias('v'),
+            pl.col('filter_value').alias('user_id')
+        ]).to_dicts()
+    # flow_data = []
+    
+    # # Group by user and calculate flow vectors
+    # user_groups = target_df.group_by('filter_value')
+    
+    # for user_id, user_data in user_groups:
+    #     if len(user_data) > 1:
+    #         user_coords = user_data.select(['x', 'y']).to_numpy()
+            
+    #         for i in range(len(user_coords) - 1):
+    #             start_pos = user_coords[i]
+    #             end_pos = user_coords[i + 1]
+    #             flow_vector = end_pos - start_pos
+                
+    #             # Skip very small movements
+    #             if np.linalg.norm(flow_vector) > 0.01:
+    #                 flow_data.append({
+    #                     'x': float(start_pos[0]),
+    #                     'y': float(start_pos[1]),
+    #                     'u': float(flow_vector[0]),
+    #                     'v': float(flow_vector[1]),
+    #                     'user_id': user_id[0] if isinstance(user_id, tuple) else user_id
+    #                 })
+        
+
+@app.get("/pca-streamplot", response_model=PCAStreamplotResponse)
+async def get_pca_streamplot_data(request: Request):
+    """Get PCA streamplot visualization data (requires authentication)"""
+    await authenticate_request(request)
+    
+    try:
+        # Load the stance target trends data
+        df = all_trends_df.filter(pl.col('filter_type') == 'PlatformHandleID')
+        if df is None:
+            return {"data": [], "pca_info": {}}
+        
+        # Compute PCA and flow field data
+        result_df, pca_info, flow_data = compute_pca_streamplot_data(df)
+        if result_df is None:
+            return {"data": [], "pca_info": {}}
+        
+        # Convert to response format
+        data_points = result_df.select([
+            pl.col('x'),
+            pl.col('y'),
+            pl.col('createtime').dt.to_string('iso'),
+            pl.col('filter_value'),
+            pl.col('platform').fill_null('unknown'),
+            pl.col('year')
+        ]).to_dicts()
+        
+        # Add flow data to pca_info
+        pca_info['flow_data'] = flow_data
+        
+        return PCAStreamplotResponse(data=data_points, pca_info=pca_info)
+        
+    except Exception as e:
+        logger.error(f"Error generating PCA streamplot data: {e}")
+        return {"data": [], "pca_info": {"error": str(e)}}
 
 if __name__ == "__main__":
     import uvicorn

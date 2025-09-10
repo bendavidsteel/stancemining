@@ -280,6 +280,9 @@ def run_parameter_sweep():
         rw_results['spline_times'].append(results['spline_times'])
         
         print(f"Completed random walk scale {rw_scale:.4f}")
+
+    pl.DataFrame(rw_results).write_parquet('./data/rw_sweep_results.parquet.zstd', compression='zstd')
+    pl.DataFrame(noise_results).write_parquet('./data/noise_sweep_results.parquet.zstd', compression='zstd')
     
     # Helper function to calculate mean and confidence intervals
     def calc_stats(data_list):

@@ -1,0 +1,175 @@
+.pca-streamplot-container {
+  padding: 20px;
+  max-width: 100%;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: center;
+  padding: 15px;
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  border: 1px solid #e9ecef;
+}
+
+.control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.control-group label {
+  font-weight: 500;
+  color: #495057;
+  font-size: 14px;
+}
+
+.control-group select {
+  padding: 8px 12px;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  background-color: white;
+  font-size: 14px;
+  min-width: 120px;
+}
+
+.control-group input[type="checkbox"] {
+  margin-right: 8px;
+}
+
+.data-info {
+  margin-left: auto;
+  text-align: right;
+  color: #6c757d;
+  font-size: 14px;
+}
+
+.pca-info {
+  margin-top: 5px;
+  font-weight: 500;
+  color: #495057;
+}
+
+.plot-container {
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  padding: 10px;
+  margin-bottom: 30px;
+}
+
+.explanation {
+  background-color: #f8f9fa;
+  padding: 20px;
+  border-radius: 8px;
+  border-left: 4px solid #007bff;
+}
+
+.explanation h3 {
+  margin-top: 0;
+  color: #495057;
+  font-size: 18px;
+}
+
+.explanation p {
+  color: #6c757d;
+  line-height: 1.6;
+  margin-bottom: 15px;
+}
+
+.explanation ul {
+  color: #6c757d;
+  line-height: 1.6;
+  padding-left: 20px;
+}
+
+.explanation li {
+  margin-bottom: 8px;
+}
+
+.explanation strong {
+  color: #495057;
+}
+
+.loading, .error {
+  text-align: center;
+  padding: 40px;
+  font-size: 18px;
+}
+
+.loading {
+  color: #6c757d;
+}
+
+.error {
+  color: #dc3545;
+  background-color: #f8d7da;
+  border: 1px solid #f5c6cb;
+  border-radius: 8px;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .control-group {
+    width: 100%;
+  }
+  
+  .data-info {
+    margin-left: 0;
+    text-align: center;
+    margin-top: 15px;
+  }
+  
+  .plot-container {
+    padding: 5px;
+  }
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .pca-streamplot-container {
+    background-color: #1a1a1a;
+    color: #e9ecef;
+  }
+  
+  .controls {
+    background-color: #2d2d2d;
+    border-color: #404040;
+  }
+  
+  .control-group select {
+    background-color: #2d2d2d;
+    color: #e9ecef;
+    border-color: #404040;
+  }
+  
+  .plot-container {
+    background-color: #2d2d2d;
+  }
+  
+  .explanation {
+    background-color: #2d2d2d;
+    border-left-color: #0d6efd;
+  }
+  
+  .explanation h3 {
+    color: #e9ecef;
+  }
+  
+  .explanation p,
+  .explanation ul {
+    color: #ced4da;
+  }
+  
+  .explanation strong {
+    color: #e9ecef;
+  }
+}

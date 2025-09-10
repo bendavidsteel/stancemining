@@ -4,6 +4,7 @@ import SearchBar from './components/SearchBar';
 import Pagination from './components/Pagination';
 import TargetChart from './components/TargetChart';
 import UmapVisualization from './components/UmapVisualization';
+import PCAStreamplot from './components/PCAStreamplot';
 import Login from './components/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import PrivateRoute from './contexts/PrivateRoute';
@@ -30,6 +31,12 @@ const Navbar = ({ onLogout }) => {
           className={`navbar-tab ${location.pathname === '/map' ? 'active' : ''}`}
         >
           Map View
+        </Link>
+        <Link 
+          to="/pca" 
+          className={`navbar-tab ${location.pathname === '/pca' ? 'active' : ''}`}
+        >
+          PCA Flow
         </Link>
       </div>
       <div className="navbar-actions">
@@ -204,6 +211,15 @@ const MapView = () => {
   );
 };
 
+// PCA Flow view component
+const PCAFlowView = () => {
+  return (
+    <div className="view-container">
+      <PCAStreamplot />
+    </div>
+  );
+};
+
 // Main layout component with navigation
 const MainLayout = () => {
   const { logout } = useAuth();
@@ -215,6 +231,7 @@ const MainLayout = () => {
         <Routes>
           <Route path="/" element={<TimelineView />} />
           <Route path="/map" element={<MapView />} />
+          <Route path="/pca" element={<PCAFlowView />} />
         </Routes>
       </main>
     </div>
