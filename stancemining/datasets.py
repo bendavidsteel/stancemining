@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 import json
 import os
+import re
 
 import polars as pl
 
@@ -108,32 +109,55 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
         )
         df = df.rename({'text_0': 'Text', 'stance': 'Stance'})
     elif name == 'romain_claims':
-        path = 'romain_claims/train-v1-valid.jsonl'
-        with open(os.path.join(datasets_path, path)) as f:
-            data = []
-            for line in f:
-                item = json.loads(line)
-                user_message = [msg for msg in item['messages'] if msg['role'] == 'user'][0]
-                assistant_message = [msg for msg in item['messages'] if msg['role'] == 'assistant'][0]
-                
-                # Extract original text from user message
-                user_content = user_message['content']
-                # Find the input text section
-                if '## Input Text\n' in user_content:
-                    original_text = user_content.split('## Input Text\n')[1].strip()
-                else:
-                    continue
-                
-                # Extract claims from JSON response
-                try:
-                    response_json = json.loads(assistant_message['content'].split('```json\n')[1].split('\n```')[0])
-                    claims = response_json['claims']
-                    for claim in claims:
-                        data.append({'Text': original_text, 'Target': claim, 'Stance': None})
-                except:
-                    continue
-        df = pl.DataFrame(data)
+        if split == 'val':
+            split = 'valid'
+        elif split == 'test':
+            split = 'valid'
+        data_path = os.path.join(datasets_path, 'romain_claims', f'{split}.jsonl')
+        with open(data_path) as f:
+            ds = [json.loads(line) for line in f]
+
+        new_data = []
+        for item in ds:
+            user_content = [msg for msg in item['messages'] if msg['role'] == 'user'][0]['content']
+            assistant_content = [msg for msg in item['messages'] if msg['role'] == 'assistant'][0]['content']
+            
+            # Find the input text section
+            original_text = re.search(r'Input text:\s*\n"((?:.|\n)+?)"\s*\n\n', user_content).group(1)
+            
+            # Extract claims from JSON response
+            claims = re.findall(r'"text":\s*"([^"]+)"', assistant_content)
+            for claim in claims:
+                new_data.append({'Text': original_text, 'Target': claim, 'Stance': None})
+
+        df = pl.from_dicts(new_data)
+
+        if split == 'valid':
+            df = df.head(int(0.5 * len(df)))
+        elif split == 'test':
+            df = df.tail(int(0.5 * len(df)))
+
         mapping = {}
+    elif name == 'romain_tiktok_claims':
+        dataset_path = os.path.join(datasets_path, 'romain_tiktok_claims')
+        file_name = '1-claim-extractions-validated.json'
+        with open(os.path.join(dataset_path, file_name)) as f:
+            items = json.load(f)
+
+        items = [v | {'id': k} for k, v in items.items()]
+        df = pl.from_dicts(items)
+        if split == 'train':
+            df = df.head(int(0.8 * len(df)))
+        elif split == 'val':
+            df = df.slice(int(0.8 * len(df)), int(0.1 * len(df)))
+        elif split == 'test':
+            df = df.tail(int(0.1 * len(df)))
+        else:
+            raise Exception()
+        df = df.explode('claims').drop_nulls('claims')
+        df = df.select([pl.col('input_text').alias('Text'), pl.col('claims').alias('Target'), pl.lit(None).alias('Stance')])
+        mapping = {}
+
     elif name == 'ctsdt':
         ctsdt_path = os.path.join(datasets_path, 'CTSDT', 'labeled_data.csv')
         df = pl.read_csv(ctsdt_path)
@@ -150,7 +174,7 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
         else:
             raise ValueError(f'Unknown split: {split}')
 
-        df = df.with_columns(pl.col('sub_branch').str.strip_chars('[]').str.split(', ').list.eval(pl.first().str.strip_chars("'")))
+        df = df.with_columns(pl.col('sub_branch').str.strip_chars('[]').str.split(', ').list.eval(pl.element().str.strip_chars("'")))
         
         chain_df = df.explode('sub_branch')\
             .with_columns(pl.col('sub_branch').fill_null(pl.col('id')).cast(pl.Int64))\

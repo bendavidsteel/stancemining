@@ -63,7 +63,8 @@ def _main(config, args):
         generation_method=args.generation_method,
         device_map={"": config.device_id},
         prompt=load_prompt(args.task, args.prompting_method, args.generation_method),
-        parent_prompt=load_parent_prompt(args.task, args.prompting_method)
+        parent_prompt=load_parent_prompt(args.task, args.prompting_method),
+        attn_implementation=args.attn_implementation
     )
     
     data_config = DataConfig(

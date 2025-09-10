@@ -1,23 +1,17 @@
+import functools
 import logging
 from typing import Any, List, Union
 
-import toponymy
 import numpy as np
 import pandas as pd
 import polars as pl
 from sentence_transformers import SentenceTransformer
-import toponymy.embedding_wrappers
 from tqdm import tqdm
 import torch
 
 from stancemining import llms, finetune, prompting, utils
 
 logger = logging.getLogger('StanceMining')
-logger.setLevel('WARNING')
-sh = logging.StreamHandler()
-sh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s: %(message)s'))
-logger.addHandler(sh)
-logger.propagate = False
 
 class StanceMining:
     """
@@ -52,11 +46,15 @@ class StanceMining:
             stance_detection_model=None,
             stance_detection_finetune_kwargs={},
             stance_detection_model_kwargs={},
+            stance_detection_generation_kwargs={},
             target_extraction_model=None,
             target_extraction_finetune_kwargs={},
             target_extraction_model_kwargs={},
+            target_extraction_generation_kwargs={},
             embedding_model='intfloat/multilingual-e5-small',
             embedding_model_inference='vllm',
+            topic_model='toponymy',
+            cosine_similarity_threshold=0.8,
             verbose=False
         ):
         assert stance_target_type in ['noun-phrases', 'claims'], f"Stance target type must be either 'noun-phrases' or 'claims', not '{stance_target_type}'"
@@ -66,9 +64,9 @@ class StanceMining:
         self.model_inference = model_inference
         self.model_name = model_name
         self.model_kwargs = model_kwargs
-        if 'device_map' not in self.model_kwargs:
+        if 'device_map' not in self.model_kwargs and self.model_inference == 'transformers':
             self.model_kwargs['device_map'] = 'auto'
-        if 'torch_dtype' not in self.model_kwargs:
+        if 'torch_dtype' not in self.model_kwargs and self.model_inference == 'transformers':
             self.model_kwargs['torch_dtype'] = 'auto'
 
         self.tokenizer_kwargs = tokenizer_kwargs
@@ -76,7 +74,7 @@ class StanceMining:
         if stance_detection_model is None:
             stance_detection_model = 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection'
 
-        if 'model_name' not in stance_detection_finetune_kwargs and 'hf_model' not in stance_detection_finetune_kwargs:
+        if 'model_path' not in stance_detection_finetune_kwargs and 'hf_model' not in stance_detection_finetune_kwargs:
             stance_detection_finetune_kwargs['hf_model'] = stance_detection_model
         if 'classification_method' not in stance_detection_finetune_kwargs:
             stance_detection_finetune_kwargs['classification_method'] = 'head'
@@ -84,9 +82,10 @@ class StanceMining:
             stance_detection_finetune_kwargs['prompting_method'] = 'stancemining'
         self.stance_detection_finetune_kwargs = stance_detection_finetune_kwargs
 
-        if 'device_map' not in stance_detection_model_kwargs:
+        if 'device_map' not in stance_detection_model_kwargs and self.model_inference == 'transformers':
             stance_detection_model_kwargs['device_map'] = 'auto'
         self.stance_detection_model_kwargs = stance_detection_model_kwargs
+        self.stance_detection_generation_kwargs = stance_detection_generation_kwargs
 
         if target_extraction_model is None:
             if self.stance_target_type == 'noun-phrases':
@@ -96,7 +95,7 @@ class StanceMining:
             else:
                 raise ValueError(f"Unknown stance target type: {self.stance_target_type}. Must be either 'noun-phrases' or 'claims'.")
 
-        if 'model_name' not in target_extraction_finetune_kwargs and 'hf_model' not in target_extraction_finetune_kwargs:
+        if 'model_path' not in target_extraction_finetune_kwargs and 'hf_model' not in target_extraction_finetune_kwargs:
             target_extraction_finetune_kwargs['hf_model'] = target_extraction_model
         if 'generation_method' not in target_extraction_finetune_kwargs:
             target_extraction_finetune_kwargs['generation_method'] = 'list'
@@ -104,9 +103,10 @@ class StanceMining:
             target_extraction_finetune_kwargs['prompting_method'] = 'stancemining'
         self.target_extraction_finetune_kwargs = target_extraction_finetune_kwargs
         
-        if 'device_map' not in target_extraction_model_kwargs:
+        if 'device_map' not in target_extraction_model_kwargs and self.model_inference == 'transformers':
             target_extraction_model_kwargs['device_map'] = 'auto'
         self.target_extraction_model_kwargs = target_extraction_model_kwargs
+        self.target_extraction_generation_kwargs = target_extraction_generation_kwargs
 
         self.verbose = verbose
         if self.verbose:
@@ -115,8 +115,14 @@ class StanceMining:
             logger.setLevel("WARNING")
 
         self.embedding_model = embedding_model
+        assert embedding_model_inference in ['vllm', 'sentence-transformers'], f"Embedding model inference method must be either 'vllm' or 'sentence-transformers', not '{embedding_model_inference}'"
         self.embedding_model_inference = embedding_model_inference
         self.embedding_cache_df = pl.DataFrame({'text': [], 'embedding': []}, schema={'text': pl.String, 'embedding': pl.Array(pl.Float32, 384)})
+
+        self.cosine_similarity_threshold = cosine_similarity_threshold
+
+        assert topic_model in ['bertopic', 'toponymy'], f"Topic model must be either 'bertopic' or 'toponymy', not '{topic_model}'"
+        self.topic_model = topic_model
 
     def fit_transform(
             self, 
@@ -126,9 +132,11 @@ class StanceMining:
             get_stance: bool=True,
             generate_targets: bool=True,
             generate_higher_level_targets: bool=True,
+            deduplicate_all_targets: bool=True,
             targets: List[str]=[],
-            toponymy_kwargs: dict={},
+            topic_model_kwargs: dict={},
             embedding_cache: pl.DataFrame = None,
+            max_layers: int=2
         ) -> pl.DataFrame:
         """
         Find stances from the given documents.
@@ -145,7 +153,7 @@ class StanceMining:
                 using topic modeling. Defaults to True.
             targets (List[str]): List of stance targets to use if not generating them.
                 If `generate_targets` is True, this should be an empty list.
-            toponymy_kwargs (dict): Additional keyword arguments for the toponymy topic model.
+            topic_model_kwargs (dict): Additional keyword arguments for the topic model.
             embedding_cache (pl.DataFrame): Optional cache of embeddings to use for the documents.
                 Should be a polars DataFrame with 'text' and 'embedding' columns.
 
@@ -171,10 +179,11 @@ class StanceMining:
             document_df = pl.DataFrame({text_column: docs}).with_row_index(name='ID')
         elif isinstance(docs, pl.DataFrame):
             document_df = docs
-            assert text_column in document_df.columns, f"docs argument must have a '{text_column}' column if it is a dataframe"
+            assert text_column in document_df.columns, f"docs argument must have a '{text_column}' column if it is a dataframe, found columns: {document_df.columns}"
             if 'ID' not in document_df.columns:
                 document_df = document_df.with_row_index(name='ID')
         
+        logger.info("Loading embedding model...")
         embed_model = self._get_embedding_model()
         if targets and not generate_targets:
             logger.info("Using provided targets")
@@ -186,13 +195,14 @@ class StanceMining:
             assert isinstance(document_df.schema['Targets'], pl.List), "Targets column must be a list of strings"
         
         # cluster initial stance targets
-        base_target_df = document_df.explode('Targets').rename({'Targets': 'Target'}).unique('Target').drop_nulls().select(['Target'])
+        logger.debug("Exploding targets to get unique targets")
+        base_target_df = document_df.select(['Targets']).explode('Targets').rename({'Targets': 'Target'}).unique('Target').drop_nulls('Target')
         
         if generate_higher_level_targets:
             logger.info("Fitting topic model")
             doc_targets = base_target_df['Target'].to_list()
             embeddings = self._get_embeddings(doc_targets, model=embed_model)
-            cluster_layers, cluster_df = self._topic_model(doc_targets, embeddings, embed_model, toponymy_kwargs)
+            cluster_layers, cluster_df = self._topic_model(doc_targets, embeddings, embed_model, topic_model_kwargs, max_layers)
             if len(cluster_df) > 0:
                 base_target_cluster_df = base_target_df.with_columns(
                     pl.Series(name='Clusters', values=np.stack(cluster_layers, axis=-1), dtype=pl.Array(pl.Int64, len(cluster_layers)))\
@@ -231,7 +241,7 @@ class StanceMining:
                         .otherwise(pl.col('Targets')))
                 document_df = document_df.drop(['NewTargets'])
 
-        if generate_targets:
+        if generate_targets and deduplicate_all_targets:
             logger.info("Removing similar stance targets")
             # remove targets that are too similar
             document_df = self._filter_all_similar_targets(document_df, embed_model)
@@ -262,8 +272,12 @@ class StanceMining:
 
     def _get_embedding_model(self):
         if self.embedding_model_inference == 'vllm':
-            model = toponymy.embedding_wrappers.VLLMEmbedder(model=self.embedding_model)
-        elif self.embedding_model_inference == 'transformers':
+            try:
+                model = utils.VLLMEmbedder(model=self.embedding_model, kwargs={'gpu_memory_utilization': 0.1})
+            except ImportError:
+                logger.warning("VLLM is not installed, using SentenceTransformer for embeddings.")
+                model = SentenceTransformer(self.embedding_model)
+        elif self.embedding_model_inference == 'sentence-transformers':
             model = SentenceTransformer(self.embedding_model)
         else:
             raise ValueError(f"Embedding model inference method '{self.embedding_model_inference}' not implemented")
@@ -280,10 +294,12 @@ class StanceMining:
         document_df = document_df.join(self.embedding_cache_df, on='text', how='left', maintain_order='left')
         missing_docs = document_df.unique('text').filter(pl.col('embedding').is_null())
         if len(missing_docs) > 0:
-            new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose)
+            logger.debug(f"Computing embeddings for {len(missing_docs)} missing documents")
+            new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose).astype(np.float32)
             
             missing_docs = missing_docs.with_columns(pl.Series(name='embedding', values=new_embeddings))
             # cache embeddings
+            logger.debug("Updating embedding cache")
             self.embedding_cache_df = pl.concat([self.embedding_cache_df, missing_docs], how='diagonal_relaxed')
             # add new embeddings to document_df
             document_df = document_df.join(missing_docs, on='text', how='left', maintain_order='left')\
@@ -295,7 +311,14 @@ class StanceMining:
 
     def _ask_llm_target_aggregate(self, clusters: List[dict]):
         llm = self._get_llm()
-        return prompting.ask_llm_target_aggregate(llm, clusters)
+        if self.stance_target_type == 'noun-phrases':
+            aggregations = prompting.ask_llm_noun_phrase_aggregate(llm, clusters)
+        elif self.stance_target_type == 'claims':
+            aggregations = prompting.ask_llm_claim_aggregate(llm, clusters)
+        else:
+            raise ValueError(f"Unrecognised self.stance_target_type value: {self.stance_target_type}")
+        llm.unload_model()
+        return aggregations
 
     def _ask_llm_stance_target(self, docs: List[str]):
         num_samples = 3
@@ -306,16 +329,13 @@ class StanceMining:
             df = pl.DataFrame({'Text': docs})
 
             # TODO add guided decoding to generate list
-            sampling_params = {
-                'repetition_penalty': 1.2
-            }
 
             task_type = 'topic-extraction' if self.stance_target_type == 'noun-phrases' else 'claim-extraction'
 
             if self.model_inference == 'transformers':
-                results = finetune.get_predictions(task_type, df, self.target_extraction_finetune_kwargs, model_kwargs=self.target_extraction_model_kwargs)
+                results = finetune.get_predictions(task_type, df, self.target_extraction_finetune_kwargs, model_kwargs=self.target_extraction_model_kwargs, generate_kwargs=self.target_extraction_generation_kwargs)
             elif self.model_inference == 'vllm':
-                results = llms.get_vllm_predictions(task_type, df, self.target_extraction_finetune_kwargs, verbose=self.verbose)
+                results = llms.get_vllm_predictions(task_type, df, self.target_extraction_finetune_kwargs, verbose=self.verbose, model_kwargs=self.target_extraction_model_kwargs, generate_kwargs=self.target_extraction_generation_kwargs)
             else:
                 raise ValueError()
 
@@ -379,9 +399,11 @@ class StanceMining:
         target_df = target_df.select(['index', pl.struct(['Targets', 'embeddings']).alias('target_embeds')])
         df = target_df.group_by('index').agg(pl.col('target_embeds')).with_columns(pl.col('target_embeds').list.len().alias('target_len'))
 
+        filter_phrases = functools.partial(utils.filter_phrases, similarity_threshold=self.cosine_similarity_threshold)
+
         df = df.with_columns(
             pl.when(pl.col('target_len') > 1)
-                .then(pl.col('target_embeds').map_elements(utils.filter_phrases, return_dtype=pl.List(pl.String)))\
+                .then(pl.col('target_embeds').map_elements(filter_phrases, return_dtype=pl.List(pl.String)))\
                 .otherwise(pl.col('target_embeds'))\
             .alias('targets')
         )
@@ -400,25 +422,102 @@ class StanceMining:
         Returns:
             DataFrame with 'Targets' column filtered for similar targets
         """
+        logger.debug("Getting target counts for filtering")
         target_df = documents_df.select('Targets')\
             .explode('Targets')\
             .drop_nulls()\
             .rename({'Targets': 'Target'})\
             .group_by('Target')\
             .agg(pl.len().alias('count'))
+        logger.debug("Getting target embeddings")
         embeddings = self._get_embeddings(target_df['Target'], model=embedding_model)
-        target_mapper = utils.get_similar_target_mapper(embeddings, target_df)
+        logger.debug("Create mapping of small count targets to larger count similar targets")
+        if self.stance_target_type == 'noun-phrases':
+            max_distance = 0.2
+        elif self.stance_target_type == 'claims':
+            max_distance = 0.1
+        target_mapper = utils.get_similar_target_mapper(embeddings, target_df, max_distance=max_distance)
+        logger.debug("Replacing small count targets with larger count similar targets")
         documents_df = documents_df.with_columns(
             pl.col('Targets').list.eval(pl.element().replace(target_mapper)).list.unique()
         )
         return documents_df
 
-    def _topic_model(self, targets, embeddings, embedding_model, kwargs):
+    def _topic_model(self, targets, embeddings, embedding_model, kwargs, max_layers):
+        if self.topic_model == 'toponymy':
+            results = self._toponymy_topic_model(targets, embeddings, embedding_model, kwargs, max_layers)
+        elif self.topic_model == 'bertopic':
+            results = self._bertopic_topic_model(targets, embeddings, embedding_model, kwargs)
+        else:
+            raise ValueError(f"Unknown topic model: {self.topic_model}. Supported models: 'toponymy', 'bertopic'.")
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Clear GPU memory if using CUDA
+
+        return results
+        
+    def _bertopic_topic_model(self, targets, embeddings, embedding_model, kwargs):
+        try:
+            from bertopic import BERTopic
+        except ImportError:
+            raise ImportError("BERTopic package is not installed. Please install it with 'pip install bertopic'.")
+
+        if 'verbose' not in kwargs:
+            kwargs['verbose'] = self.verbose
+        if 'umap_model' not in kwargs:
+            umap_kwargs = {
+                "n_components": 5, # higher dimensionality for more sparse clusters,
+                "verbose": self.verbose
+            }
+            if torch.cuda.is_available():
+                try:
+                    # use pacmap instead https://github.com/hyhuang00/ParamRepulsor
+                    import parampacmap
+                    umap_model = parampacmap.ParamPaCMAP(**umap_kwargs)
+                except ImportError:
+                    logger.warning("ParamRepulsor is not installed, using pacmap for dimensionality reduction.")
+                    import pacmap
+                    umap_model = pacmap.PaCMAP(**umap_kwargs)
+            else:
+                import pacmap
+                umap_model = pacmap.PaCMAP(**umap_kwargs)
+            kwargs['umap_model'] = umap_model
+        if 'hdbscan_model' not in kwargs:
+            if torch.cuda.is_available():
+                from cuml.cluster import HDBSCAN
+                kwargs['hdbscan_model'] = HDBSCAN(min_samples=10, gen_min_span_tree=True, prediction_data=True, verbose=self.verbose, random_state=42)
+        topic_model = BERTopic(**kwargs)
+        topics, probs = topic_model.fit_transform(targets, embeddings=embeddings)
+
+        base_target_df = pl.DataFrame({'Topic': topics, 'Document': targets}).with_row_index(name='ID')
+        num_representative_docs = 5
+        repr_docs, _, _, _ = topic_model._extract_representative_docs(
+            topic_model.c_tf_idf_,
+            base_target_df.to_pandas(),
+            topic_model.topic_representations_,
+            nr_samples=500,
+            nr_repr_docs=num_representative_docs,
+        )
+        topic_model.representative_docs_ = repr_docs
+        topic_info = topic_model.get_topic_info()
+        cluster_df = pl.from_pandas(topic_info)\
+            .rename({'Representation': 'Keyphrases', 'Representative_Docs': 'Exemplars', 'Topic': 'Cluster'})\
+            .filter(pl.col('Cluster') != -1)
+
+        return [np.array(topics)], cluster_df
+
+    def _toponymy_topic_model(self, targets, embeddings, embedding_model, kwargs, max_layers):
+        try:
+            import toponymy
+        except ImportError:
+            raise ImportError("Toponymy package is not installed. Please install it with 'pip install toponymy'.")
         if 'show_progress_bars' not in kwargs:
             kwargs['show_progress_bars'] = self.verbose
         clusterer = toponymy.ToponymyClusterer(
             min_clusters=2,
-            verbose=self.verbose
+            verbose=self.verbose,
+            max_layers=max_layers,
+            **kwargs.get('clusterer', {})
         )
         topic_model = toponymy.Toponymy(
             llm_wrapper=None,
@@ -426,20 +525,22 @@ class StanceMining:
             clusterer=clusterer,
             object_description="documents",
             corpus_description="document corpus",
-            **kwargs
+            **kwargs.get('toponymy', {})
         )
         umap_kwargs = {
-            "n_neighbors": 15,
-            "min_dist": 0.1,
             "n_components": 10, # higher dimensionality for more sparse clusters
-            "metric": "cosine"
         }
-        try:
-            from cuml.manifold.umap import UMAP
-            umap_model = UMAP(**umap_kwargs)
-        except ImportError:
-            from umap import UMAP
-            umap_model = UMAP(**umap_kwargs)
+        if torch.cuda.is_available():
+            try:
+                # use pacmap instead https://github.com/hyhuang00/ParamRepulsor
+                import parampacmap
+                umap_model = parampacmap.ParamPaCMAP(**umap_kwargs)
+            except ImportError:
+                import pacmap
+                umap_model = pacmap.PaCMAP(**umap_kwargs)
+        else:
+            import pacmap
+            umap_model = pacmap.PaCMAP(**umap_kwargs)
         clusterable_vectors = umap_model.fit_transform(embeddings)
 
         # running toponymy fit method except topic naming step which we do ourselves
@@ -590,7 +691,8 @@ class StanceMining:
                 target_df.select(['ID', 'Target']).group_by('ID').agg(pl.col('Target')).rename({'Target': 'Targets'}),
                 on='ID',
                 how='left'
-            )
+            )\
+            .with_columns(pl.col('Targets').fill_null([]))  # fill nulls with empty list
 
         documents_df = documents_df.with_columns(self._filter_document_similar_targets(documents_df['Targets'], embedding_model=embedding_model))
         
@@ -619,7 +721,7 @@ class StanceMining:
         if 'ID' not in document_df.columns:
             document_df = document_df.with_row_index(name='ID')
 
-        target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
+        target_df = document_df.explode('Targets').drop_nulls('Targets').rename({'Targets': 'Target'})
         parent_docs = target_df[parent_text_column] if parent_text_column in target_df.columns else None
         target_stance = self._ask_llm_stance(target_df[text_column], target_df['Target'], parent_docs=parent_docs)
         target_df = target_df.with_columns(pl.Series(name='stance', values=target_stance))
@@ -632,7 +734,11 @@ class StanceMining:
                 on='ID',
                 how='left',
                 maintain_order='left'
-            )
+            )\
+            .with_columns([
+                pl.col('Targets').fill_null([]),
+                pl.col('Stances').fill_null([])
+            ])
         return document_df
 
     def get_target_info(self):
@@ -649,7 +755,7 @@ class StanceMining:
         if self.model_inference == 'transformers':
             return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs)
         elif self.model_inference == 'vllm':
-            return llms.VLLM(self.model_name, verbose=self.verbose)
+            return llms.VLLM(self.model_name, self.model_kwargs, verbose=self.verbose)
         else:
             raise ValueError(f"LLM library '{self.model_inference}' not implemented")
         
