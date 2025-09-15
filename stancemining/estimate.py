@@ -1198,7 +1198,17 @@ def _calculate_trends_for_filtered_df(
             from statsmodels.nonparametric.smoothers_lowess import lowess
         except ImportError:
             raise ImportError("Please install statsmodels to use LOWESS interpolation method: pip install statsmodels")
-        pred = lowess(stance, timestamps, xvals=test_x, is_sorted=True, return_sorted=False)
+        
+        it = 3
+        pred = lowess(stance, timestamps, it=it, xvals=test_x, is_sorted=True, return_sorted=False)
+        
+        while np.all(np.isnan(pred)) and it < 30:
+            it += 2
+            pred = lowess(stance, timestamps, it=it, xvals=test_x, is_sorted=True, return_sorted=False)
+        if np.all(np.isnan(pred)):
+            logger.warning(f"Skipping {target_name} {filter_type} {filter_value} - LOWESS failed")
+            return None, None
+        
         # Interpolate NaN values
         pred[np.isnan(pred)] = np.interp(np.flatnonzero(np.isnan(pred)), np.flatnonzero(~np.isnan(pred)), pred[~np.isnan(pred)])
 
