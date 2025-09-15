@@ -30,7 +30,7 @@ def cluster_target_embeddings(embeddings, max_distance = 0.2):
     except ImportError:
         return _pynndescent_clustering(normalized_embeddings, max_distance=max_distance)
 
-def propagate_clusters_cupy(cluster_labels, verbose=True):
+def _propagate_clusters_cupy(cluster_labels, verbose=True):
     import cupy as cp
 
     labels_range = cp.arange(len(cluster_labels))
@@ -56,7 +56,7 @@ def propagate_clusters_cupy(cluster_labels, verbose=True):
     return cluster_labels
 
 def _cuvl_clustering(embeddings, max_distance=0.2, batch_size=10000, verbose=True):
-    """GPU-accelerated deduplication using cuVS (RAPIDS)"""
+    """GPU-accelerated deduplication using cuVS (RAPIDS)."""
     from cuvs.neighbors import cagra
     import cupy as cp
 
@@ -116,7 +116,7 @@ def _cuvl_clustering(embeddings, max_distance=0.2, batch_size=10000, verbose=Tru
                 cluster_labels[valid_neighbors] = min_label
     
     # Propagate cluster assignments (handle transitive closure)
-    cluster_labels = propagate_clusters_cupy(cluster_labels, verbose=verbose)
+    cluster_labels = _propagate_clusters_cupy(cluster_labels, verbose=verbose)
     
     # Renumber clusters consecutively
     cluster_labels_cpu = cp.asnumpy(cluster_labels)
@@ -134,11 +134,13 @@ def _cuvl_clustering(embeddings, max_distance=0.2, batch_size=10000, verbose=Tru
     return final_labels
 
 def _pynndescent_clustering(normalized_embeddings, max_distance=0.2, n_neighbors=30, batch_size=100000):
+    """Alternative: Process in batches with PyNNDescent for very large datasets.
+    This addresses potential memory issues with the full graph approach.
     """
-    Alternative: Process in batches with PyNNDescent for very large datasets
-    This addresses potential memory issues with the full graph approach
-    """
-    normalized_embeddings = normalize(embeddings, axis=1, norm='l2').astype('float32')
+    try:
+        import pynndescent
+    except ImportError:
+        raise ImportError("pynndescent is not installed. Please install it with `pip install pynndescent`.")
     n_samples = len(normalized_embeddings)
     
     # Initialize with each point in its own cluster
@@ -222,9 +224,9 @@ def get_similar_target_mapper(embeddings: np.ndarray, target_df: pl.DataFrame, m
     assert embeddings.shape[0] == target_df.shape[0], "embeddings must match the number of targets in target_df"
 
     embed_clusters = cluster_target_embeddings(embeddings, max_distance=max_distance)
-    return clusters_to_mapper(embed_clusters, target_df)
+    return _clusters_to_mapper(embed_clusters, target_df)
 
-def clusters_to_mapper(embed_clusters, target_df):
+def _clusters_to_mapper(embed_clusters, target_df):
     target_df = target_df.with_columns(pl.Series(name='cluster', values=embed_clusters))
     # primary target should be ideally most common target, and secondly shortest
     primary_target_df = target_df.sort(['count', pl.col('Target').str.len_chars()], descending=[True, False])\
@@ -233,7 +235,7 @@ def clusters_to_mapper(embed_clusters, target_df):
     target_df = target_df.filter(pl.col('cluster') != -1).join(primary_target_df, on='cluster', how='inner').filter(pl.col('top_target') != pl.col('Target'))
     return {k: v for k, v in target_df.select(['Target', 'top_target']).rows()}
 
-def propagate_clusters_np(cluster_labels, verbose=True):
+def _propagate_clusters_np(cluster_labels, verbose=True):
 
     labels_range = np.arange(len(cluster_labels))
 
@@ -289,7 +291,7 @@ def _minhash_clustering(target_df: pl.DataFrame, threshold=0.7):
             cluster_labels[neighbour_indices] = min_label
 
     # Propagate cluster assignments (handle transitive closure)
-    cluster_labels = propagate_clusters_np(cluster_labels, verbose=True)
+    cluster_labels = _propagate_clusters_np(cluster_labels, verbose=True)
     
     # Renumber clusters consecutively
     unique_labels = np.unique(cluster_labels)
@@ -298,7 +300,7 @@ def _minhash_clustering(target_df: pl.DataFrame, threshold=0.7):
 
     return final_labels
 
-def get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model_name: str, minhash_threshold=0.7, max_embedding_distance=0.2, batch_size=1000):
+def _get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model_name: str, minhash_threshold=0.7, max_embedding_distance=0.2, batch_size=1000):
     hash_clusters = _minhash_clustering(target_df, threshold=minhash_threshold)
     target_cluster_df = target_df.with_columns(pl.Series(name='cluster', values=hash_clusters))
     embedding_model = VLLMEmbedder(model=embedding_model_name)
@@ -332,7 +334,7 @@ def get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model_nam
         batch_idx = np.asarray(batch['index'])
         embed_clusters[batch_idx] = sub_clusters
 
-    return clusters_to_mapper(embed_clusters, target_df)
+    return _clusters_to_mapper(embed_clusters, target_df)
 
 def deduplicate_all_similar_targets(document_df: pl.DataFrame, embedding_model_name: str, batch_size: int = 1000, minhash_threshold=0.7, max_embedding_distance: float = 0.1) -> pl.DataFrame:
     target_df = document_df.select('Targets')\
@@ -342,7 +344,7 @@ def deduplicate_all_similar_targets(document_df: pl.DataFrame, embedding_model_n
         .group_by('Target')\
         .agg(pl.len().alias('count'))
     
-    target_mapper = get_similar_target_mapper_batch(target_df, embedding_model_name, minhash_threshold=minhash_threshold, max_embedding_distance=max_embedding_distance, batch_size=batch_size)
+    target_mapper = _get_similar_target_mapper_batch(target_df, embedding_model_name, minhash_threshold=minhash_threshold, max_embedding_distance=max_embedding_distance, batch_size=batch_size)
     document_df = document_df.with_columns(
         pl.col('Targets').list.eval(pl.element().replace(target_mapper)).list.unique()
     )
@@ -375,7 +377,7 @@ def remove_bad_targets(target_df: pl.DataFrame):
                               .or_(pl.col('Target').str.to_lowercase().is_in(exclude_phrases)))
     return target_df
 
-def get_var_and_max_var_target(documents_df: pl.DataFrame, target_info_df: pl.DataFrame) -> pl.DataFrame:
+def _get_var_and_max_var_target(documents_df: pl.DataFrame, target_info_df: pl.DataFrame) -> pl.DataFrame:
     if 'topic_id' in target_info_df.columns:
         target_info_df = target_info_df.group_by('noun_phrase')\
             .agg(pl.col('topic_id'), pl.col('polarity'))
@@ -404,7 +406,7 @@ def get_var_and_max_var_target(documents_df: pl.DataFrame, target_info_df: pl.Da
     return documents_df, target_info_df
 
 
-def filter_stance_targets(all_targets: pl.Series) -> pl.Series:
+def _filter_stance_targets(all_targets: pl.Series) -> pl.Series:
     # lower case all results
     all_targets = all_targets.list.eval(
         pl.element().str.to_lowercase().str.strip_chars().str.replace('stance target: ', '').str.replace('1. ', '').str.strip_chars().str.strip_chars('"').str.strip_chars("'")
@@ -413,7 +415,7 @@ def filter_stance_targets(all_targets: pl.Series) -> pl.Series:
     all_targets = all_targets.list.unique()
     return all_targets
 
-def filter_phrases(target_embeds, similarity_threshold=0.9):
+def _filter_phrases(target_embeds, similarity_threshold=0.9):
     # Compute cosine similarity matrix for current sublist
     embeddings = target_embeds.struct.field('embeddings').to_numpy()
     phrases_list = target_embeds.struct.field('Targets').to_list()
@@ -445,8 +447,7 @@ def get_transcripts_from_video_files(
         save_speaker_embeddings: bool = False, 
         verbose: bool = True
     ) -> pl.DataFrame:
-    """
-    Get transcripts from a list of video file paths using whisperx.
+    """Get transcripts from a list of video file paths using whisperx.
 
     Requires whisperx, moviepy, and pyannote.audio.
 
@@ -461,7 +462,6 @@ def get_transcripts_from_video_files(
     Returns:
         pl.DataFrame: DataFrame containing the transcripts and diarization results.
     """
-
     try:
         import whisperx
         from moviepy.editor import VideoFileClip
@@ -489,8 +489,7 @@ def get_transcripts_from_audio_files(
         save_speaker_embeddings: bool = False, 
         verbose: bool = True
     ) -> pl.DataFrame:
-    """
-    Get transcripts from a list of audio file paths using whisperx.
+    """Get transcripts from a list of audio file paths using whisperx.
 
     Requires whisperx and pyannote.audio.
 
@@ -505,7 +504,6 @@ def get_transcripts_from_audio_files(
     Returns:
         pl.DataFrame: DataFrame containing the transcripts and diarization results.
     """
-
     try:
         import whisperx
     except ImportError:

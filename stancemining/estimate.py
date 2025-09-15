@@ -1,6 +1,5 @@
 import datetime
 import json
-import multiprocessing
 import re
 from typing import Optional, Any, Dict, List, Tuple, Iterable, Union, Callable
 
@@ -47,9 +46,9 @@ class StanceEstimation:
                 )
                 
             else:
-                user_stance_var = pyro.param("user_stance_var", torch.tensor(0.1).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=dist.constraints.positive)
+                user_stance_var = pyro.param("user_stance_var", torch.tensor(0.1).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=pyro.distributions.constraints.positive)
                 # # sample stance from the uniform prior
-                user_stance = pyro.param("user_stance", torch.tensor(0.0).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=dist.constraints.interval(-1, 1))
+                user_stance = pyro.param("user_stance", torch.tensor(0.0).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=pyro.distributions.constraints.interval(-1, 1))
 
             # loop over the observed data
             with pyro.plate("observed_data", opinion_sequences.shape[1], dim=-1):
@@ -202,8 +201,7 @@ def get_stance_normal(stance_df):
     return user_stances.item(), user_stance_vars.item()
 
 def infer_stance_normal_for_target(target_df: pl.DataFrame, min_count: int = 5, filter_cols: List[str] = [], verbose: bool = False) -> pl.DataFrame:
-    """
-    Get the stance normal for a specific target DataFrame.
+    """Get the stance normal for a specific target DataFrame.
 
     Args:
         target_df (pl.DataFrame): DataFrame containing stance data for a specific target.
@@ -242,8 +240,7 @@ def infer_stance_normal_for_target(target_df: pl.DataFrame, min_count: int = 5, 
     return pl.DataFrame(stance_values)
 
 def infer_stance_normal_for_all_targets(document_df: pl.DataFrame, filter_cols: List[str] = [], min_count: int = 5, verbose: bool = False) -> pl.DataFrame:
-    """
-    Get the stance normal for all targets in the document DataFrame.
+    """Get the stance normal for all targets in the document DataFrame.
 
     Args:
         document_df (pl.DataFrame): DataFrame containing document data with stance information.
@@ -254,7 +251,6 @@ def infer_stance_normal_for_all_targets(document_df: pl.DataFrame, filter_cols: 
     Returns:
         pl.DataFrame: DataFrame containing the stance normal for all targets.
     """
-
     targets_df, target_names = _document_to_targets(document_df, min_count)
 
     all_value_stance_df = None
@@ -914,7 +910,7 @@ def _get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column
 
     try:
         numerator = int(numerator)
-    except:
+    except Exception:
         raise ValueError('time_scale argument must start with an integer')
     
     assert unit in available_time_units, f"time_scale unit must be in {available_time_units}"
@@ -1162,7 +1158,7 @@ def _calculate_trends_for_filtered_df(
         sigma_scale = 0.2,
         verbose=False
     ) -> Tuple[pl.DataFrame, Dict[str, Any]]:
-    """Calculate trends for a filtered DataFrame with optimized operations"""
+    """Calculate trends for a filtered DataFrame with optimized operations."""
     # First sort by createtime - ensures consistent results
     start_date = filtered_df[time_column].min().date()
     end_date = filtered_df[time_column].max().date()
@@ -1232,8 +1228,7 @@ def infer_stance_trends_for_target(
         sigma_loc = 1.0,
         sigma_scale = 0.2
     ) -> Tuple[pl.DataFrame, List[Dict[str, Any]]]:
-    """
-    Compute trend data for a specific target.
+    """Compute trend data for a specific target.
     
     Args:
         df (pl.DataFrame): DataFrame containing the data with 'Target' and 'Stance' columns.
@@ -1390,8 +1385,7 @@ def infer_stance_trends_for_all_targets(
         interpolation_method: str = 'gp',
         verbose: bool = False
     ) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """
-    Compute trends for all targets in the document DataFrame.
+    """Compute trends for all targets in the document DataFrame.
     
     Args:
         document_df (pl.DataFrame): DataFrame containing the document data with 'Targets' and 'Stances' columns.
@@ -1411,8 +1405,6 @@ def infer_stance_trends_for_all_targets(
             - A DataFrame with trend data for each target and filter value.
             - A DataFrame with interpolation method outputs, useful for Gaussian Process outputs.
     """
-
-
     all_trend_gps_data = []
     all_trend_df = None
 

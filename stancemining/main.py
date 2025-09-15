@@ -1,9 +1,8 @@
 import functools
 import logging
-from typing import Any, List, Union
+from typing import List, Union
 
 import numpy as np
-import pandas as pd
 import polars as pl
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
@@ -14,26 +13,7 @@ from stancemining import llms, finetune, prompting, utils
 logger = logging.getLogger('StanceMining')
 
 class StanceMining:
-    """
-    Initialize the StanceMining class.
-
-    Args:
-        stance_target_type (str): Type of stance target to extract, either 'noun-phrases' or 'claims'.
-        llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
-        model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
-        model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'zero-shot', for stance target extraction and detection.
-        model_kwargs (dict): Additional keyword arguments for the LLM model.
-        tokenizer_kwargs (dict): Additional keyword arguments for the tokenizer.
-        stance_detection_model (str): Name of the stance detection model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection' if not provided.
-        stance_detection_finetune_kwargs (dict): Keyword arguments for the fine-tuned stance detection model.
-        stance_detection_model_kwargs (dict): Keyword arguments for stance detection model inference.
-        target_extraction_model (str): Name of the target extraction model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-target-extraction' if not provided.
-        target_extraction_finetune_kwargs (dict): Keyword arguments for the fine-tuned target extraction model.
-        target_extraction_model_kwargs (dict): Keyword arguments for target extraction model inference.
-        embedding_model (str): Name of the embedding model to use for target extraction.
-        embedding_model_inference (str): Inference method for the embedding model, either 'vllm' or 'transformers'.
-        verbose (bool): Whether to enable verbose logging. Defaults to False.
-    """
+    """Class for performing stance mining on a set of documents."""
 
     def __init__(
             self, 
@@ -57,6 +37,29 @@ class StanceMining:
             cosine_similarity_threshold=0.8,
             verbose=False
         ):
+        """Initialize the StanceMining class.
+
+        Args:
+            stance_target_type (str): Type of stance target to extract, either 'noun-phrases' or 'claims'.
+            llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
+            model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
+            model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'zero-shot', for stance target extraction and detection.
+            model_kwargs (dict): Additional keyword arguments for the LLM model.
+            tokenizer_kwargs (dict): Additional keyword arguments for the tokenizer.
+            stance_detection_model (str): Name of the stance detection model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection' if not provided.
+            stance_detection_finetune_kwargs (dict): Keyword arguments for the fine-tuned stance detection model.
+            stance_detection_model_kwargs (dict): Keyword arguments for stance detection model inference.
+            stance_detection_generation_kwargs (dict): Keyword arguments for generate method during stance detection.
+            target_extraction_model (str): Name of the target extraction model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-target-extraction' if not provided.
+            target_extraction_finetune_kwargs (dict): Keyword arguments for the fine-tuned target extraction model.
+            target_extraction_generation_kwargs (dict): Keyword arguments for generate method during target extraction.
+            target_extraction_model_kwargs (dict): Keyword arguments for target extraction model inference.
+            embedding_model (str): Name of the embedding model to use for target extraction.
+            embedding_model_inference (str): Inference method for the embedding model, either 'vllm' or 'transformers'.
+            topic_model (str): Topic model to use for clustering targets, either 'bertopic' or 'toponymy'.
+            cosine_similarity_threshold (float): Cosine similarity threshold for deduplicating targets. Defaults to 0.8.
+            verbose (bool): Whether to enable verbose logging. Defaults to False.
+        """
         assert stance_target_type in ['noun-phrases', 'claims'], f"Stance target type must be either 'noun-phrases' or 'claims', not '{stance_target_type}'"
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
         self.stance_target_type = stance_target_type
@@ -138,8 +141,7 @@ class StanceMining:
             embedding_cache: pl.DataFrame = None,
             max_layers: int=2
         ) -> pl.DataFrame:
-        """
-        Find stances from the given documents.
+        """Find stances from the given documents.
 
         Args:
             docs (Union[List[str], pl.DataFrame]): List of documents or a DataFrame containing documents.
@@ -151,16 +153,17 @@ class StanceMining:
             generate_targets (bool): Whether to generate stance targets from the documents. Defaults to True.
             generate_higher_level_targets (bool): Whether to generate higher-level stance targets
                 using topic modeling. Defaults to True.
+            deduplicate_all_targets (bool): Whether to deduplicate all targets using embedding similarity. Defaults to True.
             targets (List[str]): List of stance targets to use if not generating them.
                 If `generate_targets` is True, this should be an empty list.
             topic_model_kwargs (dict): Additional keyword arguments for the topic model.
             embedding_cache (pl.DataFrame): Optional cache of embeddings to use for the documents.
                 Should be a polars DataFrame with 'text' and 'embedding' columns.
+            max_layers (int): Maximum number of hierarchical topic model layers to use when generating higher-level targets. Defaults to 2.
 
         Returns:
             pl.DataFrame: DataFrame containing the documents with their stance targets and classifications.
         """
-
         if not generate_targets:
             assert len(targets) > 0, "If not generating targets, you must provide a list of targets."
 
@@ -346,7 +349,7 @@ class StanceMining:
         else:
             raise ValueError(f"Unrecognised self.llm_method value: {self.llm_method}")
         target_df = pl.DataFrame({'Targets': targets})
-        target_df = target_df.with_columns(utils.filter_stance_targets(target_df['Targets']))
+        target_df = target_df.with_columns(utils._filter_stance_targets(target_df['Targets']))
         return target_df['Targets'].to_list()
 
     def _ask_llm_stance(self, docs, stance_targets, parent_docs=None):
@@ -366,13 +369,14 @@ class StanceMining:
             return results
 
     def _filter_document_similar_targets(self, phrases_list: pl.Series, embedding_model=None, similarity_threshold: float = 0.8) -> pl.Series:
-        """
+        """Filter similar phrases.
+        
         Filter out similar phrases from a list of lists based on embedding similarity,
         only comparing phrases within the same sublist.
         
         Args:
             phrases_list: List of lists containing phrases to filter
-            embedding_fn: Function that takes a list of strings and returns numpy array of embeddings
+            embedding_model: Embedding model to use for computing embeddings
             similarity_threshold: Threshold above which phrases are considered similar (default: 0.8)
             
         Returns:
@@ -399,7 +403,7 @@ class StanceMining:
         target_df = target_df.select(['index', pl.struct(['Targets', 'embeddings']).alias('target_embeds')])
         df = target_df.group_by('index').agg(pl.col('target_embeds')).with_columns(pl.col('target_embeds').list.len().alias('target_len'))
 
-        filter_phrases = functools.partial(utils.filter_phrases, similarity_threshold=self.cosine_similarity_threshold)
+        filter_phrases = functools.partial(utils._filter_phrases, similarity_threshold=self.cosine_similarity_threshold)
 
         df = df.with_columns(
             pl.when(pl.col('target_len') > 1)
@@ -411,8 +415,9 @@ class StanceMining:
         return df['targets'].rename(col_name) 
     
     def _filter_all_similar_targets(self, documents_df: pl.DataFrame, embedding_model=None) -> pl.DataFrame:
-        """
-        Filter out similar targets from a DataFrame of documents based on embedding similarity,
+        """Filter similar targets.
+        
+        Filter out similar targets from a DataFrame of documents based on embedding similarity, 
         only comparing targets within the same document.
         
         Args:
@@ -546,7 +551,6 @@ class StanceMining:
         # running toponymy fit method except topic naming step which we do ourselves
         exemplar_method = "central"
         keyphrase_method = "information_weighted"
-        subtopic_method = "central"
         topic_model.cluster_layers_, topic_model.cluster_tree_ = topic_model.clusterer.fit_predict(
             clusterable_vectors,
             embeddings,
@@ -558,11 +562,6 @@ class StanceMining:
         # Initialize other data structures
         topic_model.topic_names_ = [[]] * len(topic_model.cluster_layers_)
         topic_model.topic_name_vectors_ = [np.array([])] * len(topic_model.cluster_layers_)
-        detail_levels = np.linspace(
-            topic_model.lowest_detail_level,
-            topic_model.highest_detail_level,
-            len(topic_model.cluster_layers_),
-        )
 
         # Get exemplars for layer 0 first and build keyphrase matrix
         if (
@@ -615,7 +614,7 @@ class StanceMining:
         # Iterate through the layers and build the topic names
         for i, layer in tqdm(
             enumerate(topic_model.cluster_layers_),
-            desc=f"Building topic names by layer",
+            desc="Building topic names by layer",
             disable=not topic_model.show_progress_bars,
             total=len(topic_model.cluster_layers_),
             unit="layer",
@@ -655,8 +654,7 @@ class StanceMining:
             text_column='text', 
             parent_text_column='parent_text'
         ) -> pl.DataFrame:
-        """
-        Generate stance targets from the given documents.
+        """Generate stance targets from the given documents.
         
         Args:
             docs (Union[List[str], pl.DataFrame]): List of documents or a DataFrame containing documents.
@@ -705,8 +703,7 @@ class StanceMining:
             text_column='text', 
             parent_text_column='parent_text'
         ) -> pl.DataFrame:
-        """
-        Get stance classifications for the targets in the documents.
+        """Get stance classifications for the targets in the documents.
 
         Args:
             document_df (pl.DataFrame): DataFrame containing documents with 'Targets' column.
@@ -742,13 +739,11 @@ class StanceMining:
         return document_df
 
     def get_target_info(self):
-        """
-        Get information about the stance targets.
+        """Get information about the stance targets.
         
         Returns:
             pl.DataFrame: DataFrame containing target information, including counts and topic associations.
         """
-
         return self.target_info
 
     def _get_llm(self):

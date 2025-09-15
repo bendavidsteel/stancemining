@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
+from tqdm import tqdm
 
 import vllm
 
@@ -181,7 +182,6 @@ def _sort_by_similarity_bidirectional(items, similarity_func, start_item=None):
             sim_start = similarity_func(chain[0], item)
             if sim_start > best_similarity:
                 best_similarity = sim_start
-                best_item = item
                 best_idx = i
                 add_to_end = False
             
@@ -189,7 +189,6 @@ def _sort_by_similarity_bidirectional(items, similarity_func, start_item=None):
             sim_end = similarity_func(chain[-1], item)
             if sim_end > best_similarity:
                 best_similarity = sim_end
-                best_item = item
                 best_idx = i
                 add_to_end = True
         
@@ -469,7 +468,6 @@ class StanceTrendDiagram:
         
         # Set up the plot
         self.ax.clear()
-        n_targets = len(targets)
         target_spacing = 1.2  # Slightly increased spacing for better flow visibility
         
         # Calculate vertical positions for targets

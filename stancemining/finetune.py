@@ -22,7 +22,8 @@ import tqdm
 import transformers
 import wandb
 
-import stancemining.datasets, stancemining.metrics
+import stancemining.datasets
+import stancemining.metrics
 
 def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
     return stancemining.datasets.load_dataset(
@@ -964,6 +965,7 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
         parent_prompt=parent_prompt,
         classification_method=config['classification_method'] if task == 'stance-classification' else None,
         generation_method=config['generation_method'] if task in ['topic-extraction', 'claim-extraction'] else None,
+        output_type=output_type,
     )
     
     data_config = DataConfig(
