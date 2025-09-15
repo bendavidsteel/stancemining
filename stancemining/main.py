@@ -13,7 +13,29 @@ from stancemining import llms, finetune, prompting, utils
 logger = logging.getLogger('StanceMining')
 
 class StanceMining:
-    """Class for performing stance mining on a set of documents."""
+    """Class for performing stance mining on a set of documents.
+    
+    Args:
+        stance_target_type (str): Type of stance target to extract, either 'noun-phrases' or 'claims'.
+        llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
+        model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
+        model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'zero-shot', for stance target extraction and detection.
+        model_kwargs (dict): Additional keyword arguments for the LLM model.
+        tokenizer_kwargs (dict): Additional keyword arguments for the tokenizer.
+        stance_detection_model (str): Name of the stance detection model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection' if not provided.
+        stance_detection_finetune_kwargs (dict): Keyword arguments for the fine-tuned stance detection model.
+        stance_detection_model_kwargs (dict): Keyword arguments for stance detection model inference.
+        stance_detection_generation_kwargs (dict): Keyword arguments for generate method during stance detection.
+        target_extraction_model (str): Name of the target extraction model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-target-extraction' if not provided.
+        target_extraction_finetune_kwargs (dict): Keyword arguments for the fine-tuned target extraction model.
+        target_extraction_generation_kwargs (dict): Keyword arguments for generate method during target extraction.
+        target_extraction_model_kwargs (dict): Keyword arguments for target extraction model inference.
+        embedding_model (str): Name of the embedding model to use for target extraction.
+        embedding_model_inference (str): Inference method for the embedding model, either 'vllm' or 'transformers'.
+        topic_model (str): Topic model to use for clustering targets, either 'bertopic' or 'toponymy'.
+        cosine_similarity_threshold (float): Cosine similarity threshold for deduplicating targets. Defaults to 0.8.
+        verbose (bool): Whether to enable verbose logging. Defaults to False.
+    """
 
     def __init__(
             self, 
@@ -38,27 +60,6 @@ class StanceMining:
             verbose=False
         ):
         """Initialize the StanceMining class.
-
-        Args:
-            stance_target_type (str): Type of stance target to extract, either 'noun-phrases' or 'claims'.
-            llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
-            model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
-            model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'zero-shot', for stance target extraction and detection.
-            model_kwargs (dict): Additional keyword arguments for the LLM model.
-            tokenizer_kwargs (dict): Additional keyword arguments for the tokenizer.
-            stance_detection_model (str): Name of the stance detection model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection' if not provided.
-            stance_detection_finetune_kwargs (dict): Keyword arguments for the fine-tuned stance detection model.
-            stance_detection_model_kwargs (dict): Keyword arguments for stance detection model inference.
-            stance_detection_generation_kwargs (dict): Keyword arguments for generate method during stance detection.
-            target_extraction_model (str): Name of the target extraction model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-target-extraction' if not provided.
-            target_extraction_finetune_kwargs (dict): Keyword arguments for the fine-tuned target extraction model.
-            target_extraction_generation_kwargs (dict): Keyword arguments for generate method during target extraction.
-            target_extraction_model_kwargs (dict): Keyword arguments for target extraction model inference.
-            embedding_model (str): Name of the embedding model to use for target extraction.
-            embedding_model_inference (str): Inference method for the embedding model, either 'vllm' or 'transformers'.
-            topic_model (str): Topic model to use for clustering targets, either 'bertopic' or 'toponymy'.
-            cosine_similarity_threshold (float): Cosine similarity threshold for deduplicating targets. Defaults to 0.8.
-            verbose (bool): Whether to enable verbose logging. Defaults to False.
         """
         assert stance_target_type in ['noun-phrases', 'claims'], f"Stance target type must be either 'noun-phrases' or 'claims', not '{stance_target_type}'"
         assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
