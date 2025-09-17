@@ -19,7 +19,9 @@ class VLLMEmbedder:
 
         def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
             outputs = self.llm.embed(texts, use_tqdm=show_progress_bar)
+            logger.debug(f"Generated {len(outputs)} embeddings with shape {len(outputs[0].outputs.embedding)} using VLLM model {self.llm}")
             embeddings = np.vstack([np.asarray(o.outputs.embedding, dtype=np.float32) for o in outputs])
+            logger.debug(f"Combined embeddings into array of shape {embeddings.shape}")
             return embeddings
 
 def cluster_target_embeddings(embeddings, max_distance = 0.2):
