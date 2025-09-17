@@ -1,5 +1,4 @@
 import collections
-from pydoc import text
 from typing import List
 import re
 
@@ -8,11 +7,8 @@ import numpy as np
 import polars as pl
 from sacrebleu.metrics import BLEU
 import sentence_transformers
-from sklearn.metrics import f1_score
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
-import evaluate
 
 def sentence_embedding_similarity(targets, gold_targets):
     all_targets = targets + gold_targets
@@ -220,7 +216,6 @@ def mean_cluster_size_std_ratio_from_probs(stance_target_probs):
 def shannon_entropy_from_probs(stance_target_probs):
     # Calculate Shannon entropy for each document
     sizes = (stance_target_probs > 0).sum(axis=0)
-    n_clusters = len(sizes)
     
     # Diversity: normalized Shannon entropy (0 to 1)
     proportions = sizes / sizes.sum()
@@ -231,7 +226,6 @@ def shannon_entropy(document_df: pl.DataFrame):
     # Calculate Shannon entropy for each document
     sizes = document_df.explode(['Targets'])\
         .group_by('Targets').agg(pl.col('Stances').len())['Stances'].to_numpy()
-    n_clusters = len(sizes)
     
     # Diversity: normalized Shannon entropy (0 to 1)
     proportions = sizes / sizes.sum()

@@ -26,7 +26,7 @@ def test_propagate_clusters():
     import cupy as cp
     cluster_labels = np.array([0, 1, 0, 3, 2])
     start_time = time.time()
-    cluster_labels = utils.propagate_clusters_cupy(cp.asarray(cluster_labels), len(cluster_labels))
+    cluster_labels = utils._propagate_clusters_cupy(cp.asarray(cluster_labels), len(cluster_labels))
     end_time = time.time()
     print(f"Propagation took {end_time - start_time:.4f} seconds")
     assert np.asarray(cluster_labels) == np.array([0, 1, 0, 3, 0])

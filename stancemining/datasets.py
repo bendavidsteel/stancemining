@@ -220,7 +220,7 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
                 claims = response_json['claims']
                 for claim in claims:
                     data.append({'Text': original_text, 'Target': claim, 'Stance': None})
-            except:
+            except Exception:
                 continue
         df = pl.DataFrame(data)
         mapping = {}

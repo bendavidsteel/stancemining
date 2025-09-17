@@ -1,8 +1,6 @@
 import os
 
 import dotenv
-import matplotlib.pyplot as plt
-import numpy as np
 import polars as pl
 from tqdm import tqdm
 import wandb

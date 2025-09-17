@@ -241,7 +241,7 @@ CLAIM_AGGREGATE_PROMPT = [
 ]
 
 def parse_generated_targets(outputs):
-    outputs = [o.replace('stance', '').strip() for o in outputs if o != 'none' and o != None and o != '']
+    outputs = [o.replace('stance', '').strip() for o in outputs if o != 'none' and o is not None and o != '']
     outputs = list(set(outputs))
     return outputs
 
@@ -468,7 +468,7 @@ def ask_llm_target_aggregate(generator: BaseLLM, topics, prompt, max_new_tokens)
             o = [t.strip('"') for t in o]
             return o
         outputs = parse_output(raw_outputs)
-        outputs = [o for o in outputs if o != None and o != '']
+        outputs = [o for o in outputs if o is not None and o != '']
         outputs = parse_generated_targets(outputs)
         all_outputs.append(outputs)
     return all_outputs
