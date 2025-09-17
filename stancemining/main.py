@@ -124,6 +124,56 @@ class StanceMining:
         assert topic_model in ['bertopic', 'toponymy'], f"Topic model must be either 'bertopic' or 'toponymy', not '{topic_model}'"
         self.topic_model = topic_model
 
+    def _generate_higher_level_targets(self, document_df: pl.DataFrame, embed_model, topic_model_kwargs, max_layers):
+        logger.info("Fitting topic model")
+        base_target_df = document_df.select(['Targets']).explode('Targets').rename({'Targets': 'Target'}).unique('Target').drop_nulls('Target')
+        doc_targets = base_target_df['Target'].to_list()
+        embeddings = self._get_embeddings(doc_targets, model=embed_model)
+        cluster_layers, cluster_df = self._topic_model(doc_targets, embeddings, embed_model, topic_model_kwargs, max_layers)
+        if len(cluster_df) > 0:
+            base_target_cluster_df = base_target_df.with_columns(
+                pl.Series(name='Clusters', values=np.stack(cluster_layers, axis=-1), dtype=pl.Array(pl.Int64, len(cluster_layers)))\
+                    .cast(pl.List(pl.Int64))\
+                    .list.filter(pl.element() != -1)  # filter out -1 clusters
+            ).explode('Clusters').rename({'Clusters': 'Cluster'})
+            logger.info("Getting higher level stance targets")
+            stance_targets = self._ask_llm_target_aggregate(cluster_df.select(['Exemplars', 'Keyphrases']).to_dicts())
+            cluster_df = cluster_df.with_columns(
+                pl.Series(name='ClusterTargets', values=stance_targets, dtype=pl.List(pl.String))
+            )
+            cluster_df = cluster_df.with_columns(self._filter_document_similar_targets(cluster_df['ClusterTargets'], embedding_model=embed_model))
+
+            cluster_df = cluster_df.with_columns(pl.col('ClusterTargets').fill_null([]))
+
+            logger.info("Mapping targets to topics")
+            # map documents to new noun phrases via topics
+            target_df = document_df.explode('Targets').rename({'Targets': 'Target'}).select(['ID', 'Target'])
+            target_df = target_df.join(base_target_cluster_df, on='Target', how='left')
+            target_df = target_df.join(cluster_df.select(['Cluster', 'ClusterTargets']), on='Cluster', how='left')
+
+            logger.info("Grouping new targets to document IDs")
+            new_target_df = target_df.explode('ClusterTargets')\
+                        .drop_nulls('ClusterTargets')\
+                        .group_by('ID')\
+                        .agg(pl.col('ClusterTargets').alias('NewTargets'))
+
+            logger.info("Joining new targets to documents")
+            document_df = document_df.join(
+                new_target_df,
+                on='ID', 
+                how='left',
+                maintain_order='left'
+            )
+            
+            logger.info("Combining base and topic targets")
+            document_df = document_df.with_columns(
+                pl.when(pl.col('NewTargets').is_not_null())\
+                    .then(pl.concat_list(pl.col('Targets'), pl.col('NewTargets')))\
+                    .otherwise(pl.col('Targets')))
+            document_df = document_df.drop(['NewTargets'])
+
+        return document_df, cluster_df
+
     def fit_transform(
             self, 
             docs: Union[List[str], pl.DataFrame],
@@ -196,50 +246,8 @@ class StanceMining:
         
         # cluster initial stance targets
         logger.debug("Exploding targets to get unique targets")
-        base_target_df = document_df.select(['Targets']).explode('Targets').rename({'Targets': 'Target'}).unique('Target').drop_nulls('Target')
-        
         if generate_higher_level_targets:
-            logger.info("Fitting topic model")
-            doc_targets = base_target_df['Target'].to_list()
-            embeddings = self._get_embeddings(doc_targets, model=embed_model)
-            cluster_layers, cluster_df = self._topic_model(doc_targets, embeddings, embed_model, topic_model_kwargs, max_layers)
-            if len(cluster_df) > 0:
-                base_target_cluster_df = base_target_df.with_columns(
-                    pl.Series(name='Clusters', values=np.stack(cluster_layers, axis=-1), dtype=pl.Array(pl.Int64, len(cluster_layers)))\
-                        .cast(pl.List(pl.Int64))\
-                        .list.filter(pl.element() != -1)  # filter out -1 clusters
-                ).explode('Clusters').rename({'Clusters': 'Cluster'})
-                logger.info("Getting higher level stance targets")
-                stance_targets = self._ask_llm_target_aggregate(cluster_df.select(['Exemplars', 'Keyphrases']).to_dicts())
-                cluster_df = cluster_df.with_columns(
-                    pl.Series(name='ClusterTargets', values=stance_targets, dtype=pl.List(pl.String))
-                )
-                cluster_df = cluster_df.with_columns(self._filter_document_similar_targets(cluster_df['ClusterTargets'], embedding_model=embed_model))
-
-                cluster_df = cluster_df.with_columns(pl.col('ClusterTargets').fill_null([]))
-
-                logger.info("Mapping targets to topics")
-                # map documents to new noun phrases via topics
-                target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
-                target_df = target_df.join(base_target_cluster_df, on='Target', how='left')
-                target_df = target_df.join(cluster_df.select(['Cluster', 'ClusterTargets']), on='Cluster', how='left')
-
-                logger.info("Joining new targets to documents")
-                document_df = document_df.join(
-                        target_df.group_by('ID')\
-                            .agg(pl.col('ClusterTargets').flatten())\
-                            .with_columns(pl.col('ClusterTargets').list.drop_nulls().alias('NewTargets')),
-                    on='ID', 
-                    how='left',
-                    maintain_order='left'
-                ).drop('ClusterTargets')
-                
-                logger.info("Combining base and topic targets")
-                document_df = document_df.with_columns(
-                    pl.when(pl.col('NewTargets').is_not_null())\
-                        .then(pl.concat_list(pl.col('Targets'), pl.col('NewTargets')))\
-                        .otherwise(pl.col('Targets')))
-                document_df = document_df.drop(['NewTargets'])
+            document_df, cluster_df = self._generate_higher_level_targets(document_df, embed_model, topic_model_kwargs, max_layers)
 
         if generate_targets and deduplicate_all_targets:
             logger.info("Removing similar stance targets")
@@ -295,6 +303,7 @@ class StanceMining:
         missing_docs = document_df.unique('text').filter(pl.col('embedding').is_null())
         if len(missing_docs) > 0:
             logger.debug(f"Computing embeddings for {len(missing_docs)} missing documents")
+            # batch process missing docs to try to avoid OOM
             new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose).astype(np.float32)
             
             missing_docs = missing_docs.with_columns(pl.Series(name='embedding', values=new_embeddings))
