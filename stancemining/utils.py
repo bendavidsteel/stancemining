@@ -464,20 +464,25 @@ def get_transcripts_from_video_files(
     """
     try:
         import whisperx
-        from moviepy.editor import VideoFileClip
     except ImportError:
-        raise ImportError("whisperx and/or moviepy is not installed. Please install them with `pip install whisperx moviepy`.")
+        raise ImportError("whisperx is not installed. Please install it with `pip install whisperx`.")
 
     def load_audio_from_video_file(video_path):
-        with tempfile.NamedTemporaryFile(suffix='.mp3') as temp_audio_file:
-                temp_audio_path = temp_audio_file.name
-
-                # Use moviepy to extract audio
-                with VideoFileClip(video_path) as video:
-                    video.audio.write_audiofile(temp_audio_path)
-                
-                audio = whisperx.load_audio(temp_audio_path)
-                return audio
+        cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-threads", "0",
+            "-i", video_path,
+            "-f", "s16le",
+            "-ac", "1",
+            "-acodec", "pcm_s16le", 
+            "-ar", str(sr),
+            "-"
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, check=True)
+        audio = np.frombuffer(result.stdout, np.int16).flatten().astype(np.float32) / 32768.0
+        return audio
 
     return _get_transcripts_from_audio(video_paths, load_audio_from_video_file, hf_token=hf_token, whisper_model=whisper_model, batch_size=batch_size, verbose=verbose, save_speaker_embeddings=save_speaker_embeddings)
 
