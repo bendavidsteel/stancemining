@@ -57,7 +57,8 @@ class StanceMining:
             embedding_model_inference='vllm',
             topic_model='toponymy',
             cosine_similarity_threshold=0.8,
-            verbose=False
+            verbose=False,
+            use_embedding_cache=True,
         ):
         """Initialize the StanceMining class.
         """
@@ -128,12 +129,21 @@ class StanceMining:
         assert topic_model in ['bertopic', 'toponymy'], f"Topic model must be either 'bertopic' or 'toponymy', not '{topic_model}'"
         self.topic_model = topic_model
 
+        self.use_embedding_cache = use_embedding_cache
+
     def _generate_higher_level_targets(self, document_df: pl.DataFrame, embed_model, topic_model_kwargs, max_layers):
         logger.info("Fitting topic model")
-        base_target_df = document_df.select(['Targets']).explode('Targets').rename({'Targets': 'Target'}).unique('Target').drop_nulls('Target')
+        # get unique targets where most common targets are first
+        base_target_df = document_df.select(['Targets'])\
+            .explode('Targets')\
+            .rename({'Targets': 'Target'})\
+            .drop_nulls('Target')\
+            .group_by('Target')\
+            .len()\
+            .sort('len', descending=True)\
+            .drop('len')
         doc_targets = base_target_df['Target'].to_list()
-        embeddings = self._get_embeddings(doc_targets, model=embed_model)
-        cluster_layers, cluster_df = self._topic_model(doc_targets, embeddings, embed_model, topic_model_kwargs, max_layers)
+        cluster_layers, cluster_df = self._topic_model(doc_targets, embed_model, topic_model_kwargs, max_layers)
         if len(cluster_df) > 0:
             base_target_cluster_df = base_target_df.with_columns(
                 pl.Series(name='Clusters', values=np.stack(cluster_layers, axis=-1), dtype=pl.Array(pl.Int64, len(cluster_layers)))\
@@ -218,8 +228,8 @@ class StanceMining:
         if not generate_targets:
             assert len(targets) > 0, "If not generating targets, you must provide a list of targets."
 
-        if generate_targets:
-            assert len(targets) == 0, "If generating targets, the targets argument must be an empty list."
+        if targets and not generate_targets:
+            logger.info("Using provided targets")
 
         if embedding_cache is not None:
             assert isinstance(embedding_cache, pl.DataFrame), "embedding_cache must be a polars DataFrame"
@@ -298,27 +308,29 @@ class StanceMining:
     def _get_embeddings(self, docs: Union[List[str], pl.Series], model=None) -> np.ndarray:
         if model is None:
             model = self._get_embedding_model()
-        # check for cached embeddings
-        if isinstance(docs, pl.Series):
-            document_df = docs.rename('text').to_frame()
+        if self.use_embedding_cache:
+            # check for cached embeddings
+            if isinstance(docs, pl.Series):
+                document_df = docs.rename('text').to_frame()
+            else:
+                document_df = pl.DataFrame({'text': docs})
+            document_df = document_df.join(self.embedding_cache_df, on='text', how='left', maintain_order='left')
+            missing_docs = document_df.unique('text').filter(pl.col('embedding').is_null())
+            if len(missing_docs) > 0:
+                logger.debug(f"Computing embeddings for {len(missing_docs)} missing documents")
+                new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose).astype(np.float32)
+                
+                missing_docs = missing_docs.with_columns(pl.Series(name='embedding', values=new_embeddings))
+                # cache embeddings
+                logger.debug("Updating embedding cache")
+                self.embedding_cache_df = pl.concat([self.embedding_cache_df, missing_docs], how='diagonal_relaxed')
+                # add new embeddings to document_df
+                document_df = document_df.join(missing_docs, on='text', how='left', maintain_order='left')\
+                    .with_columns(pl.coalesce(['embedding', 'embedding_right']))\
+                    .drop('embedding_right')
+            embeddings = document_df['embedding'].to_numpy()
         else:
-            document_df = pl.DataFrame({'text': docs})
-        document_df = document_df.join(self.embedding_cache_df, on='text', how='left', maintain_order='left')
-        missing_docs = document_df.unique('text').filter(pl.col('embedding').is_null())
-        if len(missing_docs) > 0:
-            logger.debug(f"Computing embeddings for {len(missing_docs)} missing documents")
-            # batch process missing docs to try to avoid OOM
-            new_embeddings = model.encode(missing_docs['text'].to_list(), show_progress_bar=self.verbose).astype(np.float32)
-            
-            missing_docs = missing_docs.with_columns(pl.Series(name='embedding', values=new_embeddings))
-            # cache embeddings
-            logger.debug("Updating embedding cache")
-            self.embedding_cache_df = pl.concat([self.embedding_cache_df, missing_docs], how='diagonal_relaxed')
-            # add new embeddings to document_df
-            document_df = document_df.join(missing_docs, on='text', how='left', maintain_order='left')\
-                .with_columns(pl.coalesce(['embedding', 'embedding_right']))\
-                .drop('embedding_right')
-        embeddings = document_df['embedding'].to_numpy()
+            embeddings = model.encode(docs, show_progress_bar=self.verbose).astype(np.float32)
 
         return embeddings
 
@@ -458,11 +470,11 @@ class StanceMining:
         )
         return documents_df
 
-    def _topic_model(self, targets, embeddings, embedding_model, kwargs, max_layers):
+    def _topic_model(self, targets, embedding_model, kwargs, max_layers):
         if self.topic_model == 'toponymy':
-            results = self._toponymy_topic_model(targets, embeddings, embedding_model, kwargs, max_layers)
+            results = self._toponymy_topic_model(targets, embedding_model, kwargs, max_layers)
         elif self.topic_model == 'bertopic':
-            results = self._bertopic_topic_model(targets, embeddings, embedding_model, kwargs)
+            results = self._bertopic_topic_model(targets, embedding_model, kwargs)
         else:
             raise ValueError(f"Unknown topic model: {self.topic_model}. Supported models: 'toponymy', 'bertopic'.")
 
@@ -471,9 +483,10 @@ class StanceMining:
 
         return results
         
-    def _bertopic_topic_model(self, targets, embeddings, embedding_model, kwargs):
+    def _bertopic_topic_model(self, targets, embedding_model, kwargs):
         try:
             from bertopic import BERTopic
+            from bertopic.backend._utils import select_backend
         except ImportError:
             raise ImportError("BERTopic package is not installed. Please install it with 'pip install bertopic'.")
 
@@ -502,9 +515,55 @@ class StanceMining:
                 from cuml.cluster import HDBSCAN
                 kwargs['hdbscan_model'] = HDBSCAN(min_samples=10, gen_min_span_tree=True, prediction_data=True, verbose=self.verbose, random_state=42)
         topic_model = BERTopic(**kwargs)
-        topics, probs = topic_model.fit_transform(targets, embeddings=embeddings)
+        doc_ids = range(len(targets))
 
-        base_target_df = pl.DataFrame({'Topic': topics, 'Document': targets}).with_row_index(name='ID')
+        import pandas as pd
+        document_df = pd.DataFrame({"Document": targets, "ID": doc_ids, "Topic": None})
+
+        self.embedding_model = select_backend(
+            self.embedding_model, language=topic_model.language, verbose=self.verbose
+        )
+
+        batch_size = 2500000
+        if len(targets) <= batch_size:
+            embeddings = self._get_embeddings(targets, model=embed_model)
+
+            # Reduce dimensionality and fit UMAP model
+            umap_embeddings = topic_model._reduce_dimensionality(embeddings)
+        else:
+            # batch process to try to avoid OOM
+            embeddings = None
+            umap_embeddings = None
+            for i in tqdm(range(0, len(targets), batch_size), desc="Computing embeddings for targets in batches"):
+                batch_texts = targets[i:i+batch_size]
+                batch_embeddings = self._get_embeddings(batch_texts, model=embedding_model)
+
+                if i == 0:
+                    batch_umap_embeddings = umap_model.fit_transform(batch_embeddings)
+                else:
+                    batch_umap_embeddings = umap_model.transform(batch_embeddings)
+                if umap_embeddings is None:
+                    umap_embeddings = batch_umap_embeddings
+                else:
+                    umap_embeddings = np.vstack([umap_embeddings, batch_umap_embeddings])
+
+        document_df, _ = topic_model._cluster_embeddings(umap_embeddings, document_df)
+
+        # Sort and Map Topic IDs by their frequency
+        if not topic_model.nr_topics:
+            document_df = topic_model._sort_mappings_by_frequency(document_df)
+
+        # Extract topics by calculating c-TF-IDF, reduce topics if needed, and get representations.
+        topic_model._extract_topics(
+            document_df, embeddings=None, verbose=topic_model.verbose, fine_tune_representation=not topic_model.nr_topics
+        )
+        if topic_model.nr_topics:
+            document_df = topic_model._reduce_topics(document_df)
+
+        # Save the top 3 most representative documents per topic
+        topic_model._save_representative_docs(document_df)
+
+        base_target_df = pl.from_pandas(document_df)
         num_representative_docs = 5
         repr_docs, _, _, _ = topic_model._extract_representative_docs(
             topic_model.c_tf_idf_,
@@ -519,9 +578,9 @@ class StanceMining:
             .rename({'Representation': 'Keyphrases', 'Representative_Docs': 'Exemplars', 'Topic': 'Cluster'})\
             .filter(pl.col('Cluster') != -1)
 
-        return [np.array(topics)], cluster_df
+        return [base_target_df['Topic'].to_numpy()], cluster_df
 
-    def _toponymy_topic_model(self, targets, embeddings, embedding_model, kwargs, max_layers):
+    def _toponymy_topic_model(self, targets, embedding_model, kwargs, max_layers):
         try:
             import toponymy
         except ImportError:
@@ -556,6 +615,8 @@ class StanceMining:
         else:
             import pacmap
             umap_model = pacmap.PaCMAP(**umap_kwargs)
+
+        embeddings = self._get_embeddings(doc_targets, model=embed_model)
         clusterable_vectors = umap_model.fit_transform(embeddings)
 
         # running toponymy fit method except topic naming step which we do ourselves

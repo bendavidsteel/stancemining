@@ -1,6 +1,6 @@
 import gc
 import logging
-import tempfile
+import subprocess
 from typing import List
 
 from nltk.corpus import stopwords
@@ -447,7 +447,8 @@ def get_transcripts_from_video_files(
         whisper_model: str = "large-v2", 
         batch_size: int = 16, 
         save_speaker_embeddings: bool = False, 
-        verbose: bool = True
+        verbose: bool = True,
+        skip_errors: bool = False
     ) -> pl.DataFrame:
     """Get transcripts from a list of video file paths using whisperx.
 
@@ -466,6 +467,7 @@ def get_transcripts_from_video_files(
     """
     try:
         import whisperx
+        from whisperx.audio import SAMPLE_RATE
     except ImportError:
         raise ImportError("whisperx is not installed. Please install it with `pip install whisperx`.")
 
@@ -478,15 +480,27 @@ def get_transcripts_from_video_files(
             "-f", "s16le",
             "-ac", "1",
             "-acodec", "pcm_s16le", 
-            "-ar", str(sr),
+            "-ar", str(SAMPLE_RATE),
             "-"
         ]
         
-        result = subprocess.run(cmd, capture_output=True, check=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"ffmpeg command failed with error: {e.stderr.decode()}") from e
         audio = np.frombuffer(result.stdout, np.int16).flatten().astype(np.float32) / 32768.0
         return audio
 
-    return _get_transcripts_from_audio(video_paths, load_audio_from_video_file, hf_token=hf_token, whisper_model=whisper_model, batch_size=batch_size, verbose=verbose, save_speaker_embeddings=save_speaker_embeddings)
+    return _get_transcripts_from_audio(
+        video_paths, 
+        load_audio_from_video_file, 
+        hf_token=hf_token, 
+        whisper_model=whisper_model, 
+        batch_size=batch_size, 
+        verbose=verbose, 
+        save_speaker_embeddings=save_speaker_embeddings,
+        skip_errors=skip_errors
+    )
 
 def get_transcripts_from_audio_files(
         audio_paths: List[str], 
@@ -494,7 +508,8 @@ def get_transcripts_from_audio_files(
         whisper_model: str = "large-v2", 
         batch_size: int = 16, 
         save_speaker_embeddings: bool = False, 
-        verbose: bool = True
+        verbose: bool = True,
+        skip_errors: bool = False
     ) -> pl.DataFrame:
     """Get transcripts from a list of audio file paths using whisperx.
 
@@ -520,7 +535,16 @@ def get_transcripts_from_audio_files(
         audio = whisperx.load_audio(audio_file)
         return audio
 
-    return _get_transcripts_from_audio(audio_paths, load_audio_from_file, hf_token=hf_token, whisper_model=whisper_model, batch_size=batch_size, verbose=verbose, save_speaker_embeddings=save_speaker_embeddings)
+    return _get_transcripts_from_audio(
+        audio_paths, 
+        load_audio_from_file, 
+        hf_token=hf_token, 
+        whisper_model=whisper_model, 
+        batch_size=batch_size, 
+        verbose=verbose, 
+        save_speaker_embeddings=save_speaker_embeddings,
+        skip_errors=skip_errors
+    )
 
 def _get_transcripts_from_audio(
         items,
@@ -529,7 +553,8 @@ def _get_transcripts_from_audio(
         whisper_model="large-v2", 
         batch_size=16, 
         save_speaker_embeddings=False,
-        verbose=True
+        verbose=True,
+        skip_errors=False
     ) -> pl.DataFrame:
     import torch
 
@@ -540,53 +565,70 @@ def _get_transcripts_from_audio(
     except ImportError:
         raise ImportError("whisperx and/or pyannote is not installed. Please install them with `pip install whisperx pyannote.audio`.")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+    device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device_name)
     compute_type = "float16" # change to "int8" if low on GPU mem (may reduce accuracy)
-    model = whisperx.load_model(whisper_model, device, compute_type=compute_type)
+    model = whisperx.load_model(whisper_model, device_name, compute_type=compute_type)
     diarize_model = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token).to(device)
 
     results = []
     for item in tqdm(items, disable=not verbose, desc="Transcribing"):
-        audio = audio_loader(item)
-        result = model.transcribe(audio, batch_size=batch_size)
+        try:
+            audio = audio_loader(item)
+            result = model.transcribe(audio, batch_size=batch_size)
 
-        # delete model if low on GPU resources
-        # import gc; gc.collect(); torch.cuda.empty_cache(); del model
+            # delete model if low on GPU resources
+            # import gc; gc.collect(); torch.cuda.empty_cache(); del model
 
-        # 2. Align whisper output
-        language = result['language']
-        model_a, metadata = whisperx.load_align_model(language_code=language, device=device)
-        result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
+            # 2. Align whisper output
+            language = result['language']
+            try:
+                model_a, metadata = whisperx.load_align_model(language_code=language, device=device)
+            except ValueError:
+                d = {
+                    'path': item,
+                    'result': result,
+                }
+                results.append(d)
+                continue
 
-        # delete model if low on GPU resources
-        # import gc; gc.collect(); torch.cuda.empty_cache(); del model_a
+            result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
 
-        # 3. Assign speaker labels
-        # add min/max number of speakers if known
-        audio_data = {
-            'waveform': torch.from_numpy(audio[None, :]),
-            'sample_rate': SAMPLE_RATE
-        }
-        segments, embeddings = diarize_model(audio_data, return_embeddings=True)
-        diarize_segments = pl.DataFrame(segments.itertracks(yield_label=True), columns=['segment', 'label', 'speaker'])
-        diarize_segments = diarize_segments.with_columns([
-            pl.col('segment').struct.field('start').alias('start'),
-            pl.col('segment').struct.field('end').alias('end')
-        ])
-        
-        result = whisperx.assign_word_speakers(diarize_segments, result)
-        result['language'] = language
+            # delete model if low on GPU resources
+            # import gc; gc.collect(); torch.cuda.empty_cache(); del model_a
 
-        d = {
-            'path': item,
-            'result': result,
-            'diarize_segments': diarize_segments,
-        }
+            # 3. Assign speaker labels
+            # add min/max number of speakers if known
+            audio_data = {
+                'waveform': torch.from_numpy(audio[None, :]),
+                'sample_rate': SAMPLE_RATE
+            }
+            segments, embeddings = diarize_model(audio_data, return_embeddings=True)
+            diarize_segments = pl.DataFrame(segments.itertracks(yield_label=True), schema=['segment', 'label', 'speaker'])
+            diarize_segments = diarize_segments.with_columns([
+                pl.col('segment').map_elements(lambda s: s.start, pl.Float64).alias('start'),
+                pl.col('segment').map_elements(lambda s: s.end, pl.Float64).alias('end')
+            ]).to_pandas()
+            
+            result = whisperx.assign_word_speakers(diarize_segments, result)
+            result['language'] = language
 
-        if save_speaker_embeddings:
-            d['embeddings'] = embeddings
+            d = {
+                'path': item,
+                'result': result,
+                'diarize_segments': diarize_segments[['label', 'start', 'end', 'speaker']].to_dict(orient='records'),
+            }
 
-        results.append(d)
+            if save_speaker_embeddings:
+                d['embeddings'] = embeddings
+
+            results.append(d)
+        except Exception as e:
+            if skip_errors:
+                logger.error(f"Error processing {item}: {e}")
+                continue
+            else:
+                raise
 
     return pl.DataFrame(results)
 
