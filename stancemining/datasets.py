@@ -224,6 +224,20 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
                 continue
         df = pl.DataFrame(data)
         mapping = {}
+    elif name == 'watclaimcheck':
+        path = os.path.join(datasets_path, 'WatClaimCheck_dataset')
+        if split in ['train', 'val']:
+            file_name = 'train.json'
+        elif split == 'test':
+            file_name = 'valid.json'
+        else:
+            raise ValueError(f'Unknown split: {split}')
+        file_path = os.path.join(path, file_name)
+        with open(file_path) as f:
+            data = json.load(f)
+
+        for item in data:
+            pass
     else:
         raise ValueError(f'Unknown dataset: {name}')
     

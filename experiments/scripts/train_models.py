@@ -39,6 +39,8 @@ def _main(config, args):
         project_name = 'stance-target-extraction'
     elif args.task == 'claim-extraction':
         project_name = 'claim-extraction'
+    elif args.task == 'claim-entailment':
+        project_name = 'claim-entailment'
     else:
         raise ValueError(f"Invalid task: {args.task}")
 
@@ -89,7 +91,7 @@ def _main(config, args):
     hf_token = config.hf_token
     
     # Setup model path
-    output_type = model_config.classification_method if model_config.task == "stance-classification" else model_config.generation_method
+    output_type = model_config.classification_method if model_config.task in ["stance-classification", "claim-entailment"] else model_config.generation_method
     model_save_path = get_model_save_path(args.task, args.save_model_path, args.model_name, data_config.dataset_name, output_type)
 
     model_kwargs = {
@@ -134,8 +136,8 @@ def _main(config, args):
     
     if args.do_eval:
         model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_save_path=model_save_path)
-        
-        if model_config.task == 'stance-classification' and model_config.classification_method == 'head':
+
+        if model_config.task in ['stance-classification', 'claim-entailment'] and model_config.classification_method == 'head':
             # merge adapter into model and save for vllm
             model = model.merge_and_unload()
             # save new model
@@ -173,7 +175,7 @@ def _main(config, args):
             ))
         
         datasets = test_dataset['dataset']
-        if model_config.task in ["argument-classification", "stance-classification"]:
+        if model_config.task in ["argument-classification", "stance-classification", 'claim-entailment']:
             references = test_dataset['class']
         else:
             references = test_data['Target'].to_list()
@@ -198,7 +200,7 @@ def _main(config, args):
         metadata['prompt'] = model_config.prompt
         if model_config.parent_prompt is not None:
             metadata['parent_prompt'] = model_config.parent_prompt
-        if model_config.task == 'stance-classification':
+        if model_config.task in ['stance-classification', 'claim-entailment']:
             metadata['classification_method'] = model_config.classification_method
         elif model_config.task in ['topic-extraction', 'claim-extraction']:
             metadata['generation_method'] = model_config.generation_method

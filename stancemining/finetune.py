@@ -60,6 +60,8 @@ def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_t
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-topic-extraction"
     elif task == "claim-extraction":
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-extraction"
+    elif task == "claim-entailment":
+        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-entailment"
     else:
         raise ValueError("Task not found")
     if isinstance(dataset_name, str):
@@ -94,6 +96,8 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
+    elif task == "claim-entailment":
+        file_path = top_dir / 'models/stancemining/prompt_claim_entailment.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -118,6 +122,8 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
+    elif task == "claim-entailment":
+        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -467,7 +473,7 @@ class ModelEvaluator:
         self.metrics = self._setup_metrics()
     
     def _setup_metrics(self) -> Dict[str, Any]:
-        if self.task in ["stance-classification", "argument-classification"]:
+        if self.task in ["stance-classification", "argument-classification", "claim-entailment"]:
             return {
                 'accuracy': evaluate.load("accuracy"),
                 'f1': evaluate.load("f1"),
@@ -482,7 +488,7 @@ class ModelEvaluator:
         raise ValueError(f"Unknown task: {self.model_config.task}")
     
     def evaluate(self, predictions: List[Any], references: List[Any], datasets: List[Any]) -> Dict[str, float]:
-        if self.task in ["stance-classification", "argument-classification"]:
+        if self.task in ["stance-classification", "argument-classification", "claim-entailment"]:
             assert self.labels2id is not None, "Must provide labels2id for classification evaluation"
             if isinstance(predictions[0], str):
                 predictions = [self.labels2id[p] for p in predictions]
