@@ -23,9 +23,13 @@ from stancemining.finetune import (
     get_model_save_path,
     print_metrics,
     get_prediction,
-    setup_model_and_tokenizer
+    setup_model_and_tokenizer,
+    STANCE_LABELS_2_ID,
+    CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID,
+    CLAIM_ENTAILMENT_7_WAY_LABELS_2_ID,
+    CLASSIFICATION_TASKS,
+    GENERATION_TASKS
 )
-from stancemining.metrics import bertscore_f1_targets, bleu_targets
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):
@@ -37,12 +41,8 @@ def _main(config, args):
         project_name = 'stance-detection'
     elif args.task == "topic-extraction":
         project_name = 'stance-target-extraction'
-    elif args.task == 'claim-extraction':
-        project_name = 'claim-extraction'
-    elif args.task == 'claim-entailment':
-        project_name = 'claim-entailment'
     else:
-        raise ValueError(f"Invalid task: {args.task}")
+        project_name = args.task
 
     wandb_config = omegaconf.OmegaConf.to_object(args)
     wandb_config.update(omegaconf.OmegaConf.to_object(config.data))
@@ -60,13 +60,12 @@ def _main(config, args):
         model_name=args.model_name,
         quantization=args.quantization if args.quantization in ['8bit', '4bit'] else None,
         task=args.task,
-        num_labels=2 if args.task == "argument-classification" else 3,
         classification_method=args.classification_method,
         generation_method=args.generation_method,
         device_map={"": config.device_id},
         prompt=load_prompt(args.task, args.prompting_method, args.generation_method),
         parent_prompt=load_parent_prompt(args.task, args.prompting_method),
-        attn_implementation=args.attn_implementation
+        attn_implementation=args.attn_implementation,
     )
     
     data_config = DataConfig(
@@ -84,14 +83,14 @@ def _main(config, args):
     # Initialize components
     trainer = ModelTrainer(model_config, training_config)
     processor = DataProcessor(model_config, data_config)
-    evaluator = ModelEvaluator(model_config.task, labels2id=data_config.labels2id)
+    evaluator = ModelEvaluator(model_config.task, labels2id=model_config.labels2id)
     
     # Load HF token
     # dotenv.load_dotenv()
     hf_token = config.hf_token
     
     # Setup model path
-    output_type = model_config.classification_method if model_config.task in ["stance-classification", "claim-entailment"] else model_config.generation_method
+    output_type = model_config.classification_method if model_config.task in CLASSIFICATION_TASKS else model_config.generation_method
     model_save_path = get_model_save_path(args.task, args.save_model_path, args.model_name, data_config.dataset_name, output_type)
 
     model_kwargs = {
@@ -123,7 +122,7 @@ def _main(config, args):
         val_data = load_validation_data(data_config.dataset_name, model_config.task, model_config.generation_method)
 
         # Setup model and tokenizer
-        model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_name=model_config.model_name)
+        model, tokenizer = setup_model_and_tokenizer(model_config, model_kwargs=model_kwargs, model_name=model_config.model_name)
         trainer.set_model_and_tokenizer(model, tokenizer)
 
         train_dataset = processor.process_data(train_data, model_config.classification_method, model_config.generation_method)
@@ -135,9 +134,11 @@ def _main(config, args):
         trainer.train(train_dataset, val_dataset, model_save_path, evaluator)
     
     if args.do_eval:
-        model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_save_path=model_save_path)
+        if not os.path.exists(model_save_path):
+            raise ValueError("Model path does not exist")
+        model, tokenizer = setup_model_and_tokenizer(model_config, model_kwargs=model_kwargs, model_save_path=model_save_path)
 
-        if model_config.task in ['stance-classification', 'claim-entailment'] and model_config.classification_method == 'head':
+        if model_config.task in CLASSIFICATION_TASKS and model_config.classification_method == 'head':
             # merge adapter into model and save for vllm
             model = model.merge_and_unload()
             # save new model
@@ -173,10 +174,10 @@ def _main(config, args):
                 trainer.model_config.generation_method,
                 generate_kwargs=generate_kwargs
             ))
-        
-        datasets = test_dataset['dataset']
-        if model_config.task in ["argument-classification", "stance-classification", 'claim-entailment']:
-            references = test_dataset['class']
+
+        datasets = test_dataset.to_polars()['dataset'].to_list()
+        if model_config.task in CLASSIFICATION_TASKS:
+            references = test_dataset.to_polars()['class'].to_list()  # for some insane reason test_dataset['class'] does not work
         else:
             references = test_data['Target'].to_list()
 
@@ -200,9 +201,9 @@ def _main(config, args):
         metadata['prompt'] = model_config.prompt
         if model_config.parent_prompt is not None:
             metadata['parent_prompt'] = model_config.parent_prompt
-        if model_config.task in ['stance-classification', 'claim-entailment']:
+        if model_config.task in CLASSIFICATION_TASKS:
             metadata['classification_method'] = model_config.classification_method
-        elif model_config.task in ['topic-extraction', 'claim-extraction']:
+        elif model_config.task in GENERATION_TASKS:
             metadata['generation_method'] = model_config.generation_method
         else:
             raise ValueError()

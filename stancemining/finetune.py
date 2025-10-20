@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+import gc
 import json
 import multiprocessing
 import os
@@ -25,12 +26,16 @@ import wandb
 import stancemining.datasets
 import stancemining.metrics
 
+CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-3way', 'claim-entailment-7way']
+GENERATION_TASKS = ['topic-extraction', 'claim-extraction']
+
 def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
     return stancemining.datasets.load_dataset(
         dataset_name, 
         split=split, 
-        group=(generation_method=='list') and (task in ['topic-extraction', 'claim-extraction']), 
-        remove_synthetic_neutral=task!="stance-classification"
+        group=(generation_method=='list') and (task in GENERATION_TASKS), 
+        remove_synthetic_neutral=task not in CLASSIFICATION_TASKS,
+        task=task
     )
 
 def load_training_data(dataset_name: str, task: str, generation_method: str) -> pl.DataFrame:
@@ -61,8 +66,10 @@ def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_t
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-topic-extraction"
     elif task == "claim-extraction":
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-extraction"
-    elif task == "claim-entailment":
-        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-entailment"
+    elif task == "claim-entailment-3way":
+        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-entailment-3way"
+    elif task == "claim-entailment-7way":
+        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-entailment-7way"
     else:
         raise ValueError("Task not found")
     if isinstance(dataset_name, str):
@@ -97,8 +104,10 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
-    elif task == "claim-entailment":
+    elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/stancemining/prompt_claim_entailment.txt'
+    elif task == "claim-entailment-7way":
+        file_path = top_dir / 'models/stancemining/prompt_claim_entailment_7_way.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -123,8 +132,10 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
-    elif task == "claim-entailment":
+    elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment.txt'
+    elif task == "claim-entailment-7way":
+        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_7_way.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -135,7 +146,7 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
     prompts = []
     for i in range(len(examples['text'])):
         text = examples['text'][i]
-        topic = examples['topic'][i]
+        target = examples['topic'][i]
         if 'parenttexts' in examples:
             parenttexts = examples['parenttexts'][i]
         else:
@@ -149,10 +160,10 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
                     parent_chain.append(f"{i+1}. [Reply to {i}]: '{p_text}'")
 
             parent_chain = '\n'.join(parent_chain)
-            prompt = parent_prompt_template.format(target=topic, parent_chain=parent_chain, text=text)
+            prompt = parent_prompt_template.format(target=target, parent_chain=parent_chain, text=text)
             prompts.append(prompt)
         else:
-            prompt = prompt_template.format(target=topic, text=text)
+            prompt = prompt_template.format(target=target, text=text)
             prompts.append(prompt)
     return prompts
 
@@ -213,7 +224,6 @@ def deactivate_neftune(model, accelerator, neftune_hook_handle):
     neftune_hook_handle.remove()
     del embeddings.neftune_noise_alpha, unwrapped_model
 
-@dataclass
 class ModelConfig:
     model_name: str
     task: str
@@ -228,6 +238,50 @@ class ModelConfig:
     attn_implementation: Optional[str] = "flash_attention_2"
     torch_dtype: Optional[Union[str, torch.dtype]] = torch.bfloat16
     quantization: Optional[str] = None
+    labels2id: Dict[str, int] = field(default_factory=lambda: STANCE_LABELS_2_ID)
+
+    def __init__(
+        self,
+        model_name: str,
+        task: str,
+        prompt: str,
+        device_map: Dict[str, int] = 'auto',
+        parent_prompt: Optional[str] = None,
+        tokenizer: Optional[transformers.PreTrainedTokenizer] = None,
+        model: Optional[transformers.PreTrainedModel] = None,
+        classification_method: Optional[str] = "head",
+        generation_method: Optional[str] = "beam",
+        attn_implementation: Optional[str] = "flash_attention_2",
+        torch_dtype: Optional[Union[str, torch.dtype]] = torch.bfloat16,
+        quantization: Optional[str] = None
+    ):
+        self.model_name = model_name
+        self.task = task
+        self.prompt = prompt
+        self.device_map = device_map
+        self.parent_prompt = parent_prompt
+        self.tokenizer = tokenizer
+        self.model = model
+        self.classification_method = classification_method
+        self.generation_method = generation_method
+        self.attn_implementation = attn_implementation
+        self.torch_dtype = torch_dtype
+        self.quantization = quantization
+        if task == 'stance-classification':
+            self.num_labels = 3
+            self.labels2id = STANCE_LABELS_2_ID
+        elif task == 'argument-classification':
+            self.num_labels = 2
+            self.labels2id = {'Argumentative': 1, 'Non-Argumentative': 0}
+        elif task == 'claim-entailment-3way':
+            self.num_labels = 3
+            self.labels2id = CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID
+        elif task == 'claim-entailment-7way':
+            self.num_labels = 7
+            self.labels2id = CLAIM_ENTAILMENT_7_WAY_LABELS_2_ID
+        else:
+            self.num_labels = None
+            self.labels2id = None
 
 class ChatTemplateTokenizer:
     def __init__(self, model_config: ModelConfig):
@@ -271,12 +325,12 @@ class ChatTemplateTokenizer:
     
     def create_input_sequence_for_training(self, sample):
         text = sample['text']
-        if self.task == 'stance-classification' or (self.task in ['topic-extraction', 'claim-extraction'] and self.generation_method == 'beam'):
+        if self.task in CLASSIFICATION_TASKS or (self.task in GENERATION_TASKS and self.generation_method == 'beam'):
             label = sample['labels'].strip()
-        elif self.task in ['topic-extraction', 'claim-extraction'] and self.generation_method == 'list':
+        elif self.task in GENERATION_TASKS and self.generation_method == 'list':
             label = convert_list_to_quoted_str(sample['topic'])
         else:
-            raise ValueError()
+            raise ValueError(f"Unknown task: {self.task}")
 
         if self.tokenizer.chat_template is not None:
             messages = to_message_format(text, label)
@@ -324,16 +378,31 @@ class ChatTemplateTokenizer:
             "labels": labels
         }
 
-LABELS_2_ID = {
+STANCE_LABELS_2_ID = {
     "neutral": 0,
     "favor": 1,
     "against": 2
 }
 
+CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID = {
+    'supporting': 1,
+    'refuting': 2,
+    'neutral': 0
+}
+
+CLAIM_ENTAILMENT_7_WAY_LABELS_2_ID = {
+    'supporting': 0,
+    'refuting': 1,
+    'leaning refuting': 2,
+    'leaning supporting': 3,
+    'querying': 4,
+    'irrelevant': 5,
+    'discussing': 6
+}
+
 @dataclass
 class DataConfig:
     dataset_name: str
-    labels2id: Dict[str, int] = field(default_factory=lambda: LABELS_2_ID)
 
 class DataProcessor:
     def __init__(self, model_config: ModelConfig, data_config: DataConfig):
@@ -342,9 +411,9 @@ class DataProcessor:
         
     def process_data(self, df: pd.DataFrame, classification_method: str, generation_method: str, train: bool = True, tokenize=True, truncate_beyond=None) -> datasets.Dataset:
         """Process dataframe into a format suitable for model input"""
-        if self.model_config.task == "stance-classification":
+        if self.model_config.task in CLASSIFICATION_TASKS:
             df = self._process_stance_classification(df, classification_method)
-        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
+        elif self.model_config.task in GENERATION_TASKS:
             df = self._process_topic_extraction(df, generation_method)
         else:
             raise ValueError(f"Unknown task: {self.model_config.task}")
@@ -382,7 +451,7 @@ class DataProcessor:
             df = df.rename({"Stance": "class"})
         if 'class' in df.columns:
             if classification_method == 'head':
-                df = df.with_columns(pl.col('class').replace_strict(self.data_config.labels2id))
+                df = df.with_columns(pl.col('class').replace_strict(self.model_config.labels2id))
             cols.append('class')
             
         if 'Text' in df.columns and 'text' not in df.columns:
@@ -411,14 +480,14 @@ class DataProcessor:
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
         prompt = self.model_config.prompt
         parent_prompt = self.model_config.parent_prompt
-        if self.model_config.task == "stance-classification":
+        if self.model_config.task in CLASSIFICATION_TASKS:
             return dataset.map(
                 lambda examples: {
                     "text": stance_examples_to_prompt(prompt, parent_prompt, examples)
                 },
                 batched=True
             )
-        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
+        elif self.model_config.task in GENERATION_TASKS:
             return dataset.map(
                 lambda examples: {
                     "text": stance_target_examples_to_prompt(prompt, examples)
@@ -434,7 +503,7 @@ class DataProcessor:
             num_proc = multiprocessing.cpu_count() // 2
         else:
             num_proc = 1
-        if self.model_config.task in ["stance-classification", "argument-classification"]:
+        if self.model_config.task in CLASSIFICATION_TASKS:
             if train:
                 dataset = dataset.rename_column("class", "labels")
                 if classification_method == 'head':
@@ -444,11 +513,14 @@ class DataProcessor:
             else:
                 dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=num_proc)
 
-        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
+        elif self.model_config.task in GENERATION_TASKS:
             if train:
                 dataset = dataset.map(tokenizer.create_input_sequence_for_training, num_proc=num_proc)
             else:
                 dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=len(dataset) > 1, num_proc=num_proc)
+        else:
+            raise ValueError(f"Unknown task: {self.model_config.task}")
+
         return dataset
 
 def _evaluate_generation_set(predictions, references):
@@ -474,14 +546,14 @@ class ModelEvaluator:
         self.metrics = self._setup_metrics()
     
     def _setup_metrics(self) -> Dict[str, Any]:
-        if self.task in ["stance-classification", "argument-classification", "claim-entailment"]:
+        if self.task in CLASSIFICATION_TASKS:
             return {
                 'accuracy': evaluate.load("accuracy"),
                 'f1': evaluate.load("f1"),
                 'precision': evaluate.load("precision"),
                 'recall': evaluate.load("recall")
             }
-        elif self.task in ["topic-extraction", "claim-extraction"]:
+        elif self.task in GENERATION_TASKS:
             return {
                 'bertscore': evaluate.load("bertscore"),
                 'bleu': evaluate.load("bleu")
@@ -489,14 +561,16 @@ class ModelEvaluator:
         raise ValueError(f"Unknown task: {self.model_config.task}")
     
     def evaluate(self, predictions: List[Any], references: List[Any], datasets: List[Any]) -> Dict[str, float]:
-        if self.task in ["stance-classification", "argument-classification", "claim-entailment"]:
+        if self.task in CLASSIFICATION_TASKS:
             assert self.labels2id is not None, "Must provide labels2id for classification evaluation"
             if isinstance(predictions[0], str):
                 predictions = [self.labels2id[p] for p in predictions]
                 references = [self.labels2id[r] for r in references]
             return self._evaluate_classification(predictions, references, datasets)
-        else:
+        elif self.task in GENERATION_TASKS:
             return self._evaluate_generation(predictions, references, datasets)
+        else:
+            raise ValueError(f"Unknown task: {self.task}")
     
     def _evaluate_classification(self, predictions: List[Any], references: List[Any], datasets: List[Any]) -> Dict[str, float]:
         pred_metrics = {
@@ -578,22 +652,24 @@ class ModelTrainer:
             self.model_config.model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
-            
-        if (self.model_config.task in ["stance-classification", "argument-classification"] and self.model_config.classification_method == 'head' and self.training_config.grad_accum_steps > 1) \
+
+        if (self.model_config.task in CLASSIFICATION_TASKS and self.model_config.classification_method == 'head' and self.training_config.grad_accum_steps > 1) \
             or (self.model_config.quantization is not None):
             self.model_config.model = peft.prepare_model_for_kbit_training(self.model_config.model)
         
         # Setup LoRA
         modules = self._find_all_linear_names()
         lora_kwargs = {}
-        if self.model_config.task in ["stance-classification", "argument-classification"]:
+        if self.model_config.task in CLASSIFICATION_TASKS:
             if self.model_config.classification_method == 'head':
                 lora_kwargs['task_type'] = "SEQ_CLS"
                 lora_kwargs['modules_to_save'] = ['score']
             elif self.model_config.classification_method == 'generation':
                 lora_kwargs['task_type'] = "CAUSAL_LM"
-        elif self.model_config.task in ["topic-extraction", "claim-extraction"]:
+        elif self.model_config.task in GENERATION_TASKS:
             lora_kwargs['task_type'] = "CAUSAL_LM"
+        else:
+            raise ValueError(f"Unknown task: {self.model_config.task}")
 
         if self.model_config.quantization is None:
             lora_config = peft.LoraConfig(
@@ -703,9 +779,9 @@ class ModelTrainer:
         """Main training loop"""
         best_eval_metric = -float('inf')
 
-        chosen_metric = 'f1_macro' if self.model_config.task == 'stance-classification' else 'bertscore_f1'
+        chosen_metric = 'f1_macro' if self.model_config.task in CLASSIFICATION_TASKS else 'bertscore_f1'
 
-        if self.model_config.task == 'stance-classification' and self.model_config.classification_method == 'head':
+        if self.model_config.task in CLASSIFICATION_TASKS and self.model_config.classification_method == 'head':
             batch_keys = ['input_ids', 'attention_mask']
             train_labels = np.array(train_dataset['labels'])
             class_wts = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
@@ -761,10 +837,12 @@ class ModelTrainer:
                         )
                         metrics = self._validation_step(eval_loader, eval_dataset, evaluator)
                         state_str = f"Step {step},"
-                        if self.model_config.task == 'stance-classification':
+                        if self.model_config.task in CLASSIFICATION_TASKS:
                             report_keys = ['f1_macro', 'precision', 'recall']
-                        elif self.model_config.task in ['topic-extraction', 'claim-extraction']:
+                        elif self.model_config.task in GENERATION_TASKS:
                             report_keys = ['bertscore_f1', 'bleu_f1']
+                        else:
+                            raise ValueError("Task not found")
                         for key in report_keys:
                             val = metrics[key]
                             state_str += f" {key.title()}: {val:.4f},"
@@ -805,17 +883,28 @@ class ModelTrainer:
                     self.model_config.generation_method
                 )
                 all_preds.extend(preds)
+
+                # delete batch to reduce memory usage
+                del batch
         pbar.close()
 
-        if self.model_config.task in ["stance-classification", "argument-classification"]:
-            all_labels = eval_dataset['class']
+        if self.model_config.task in CLASSIFICATION_TASKS:
+            all_labels = eval_dataset.to_polars()['class'].to_list() # for some insane reason eval_dataset['class'] does not work
+        elif self.model_config.task in GENERATION_TASKS:
+            all_labels = eval_dataset.to_polars()['topic'].to_list()
         else:
-            all_labels = eval_dataset['topic']
-        datasets = eval_dataset['dataset']
+            raise ValueError("Task not found")
+        datasets = eval_dataset.to_polars()['dataset'].to_list()
         
-        return evaluator.evaluate(all_preds, all_labels, datasets)
+        metrics = evaluator.evaluate(all_preds, all_labels, datasets)
 
-def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwargs={}, model_save_path=None, model_name=None, full_saved_model=False):
+        # clear memory
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        return metrics
+
+def setup_model_and_tokenizer(model_config: ModelConfig, model_kwargs={}, model_save_path=None, model_name=None, full_saved_model=False):
     """Initialize model and tokenizer based on config"""
     model_path = model_save_path if model_save_path else model_name
     tokenizer_kwargs = {}
@@ -825,19 +914,19 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwa
         model_path, 
         **tokenizer_kwargs
     )
-    
-    if task in ["stance-classification", "argument-classification"]:
-        if classification_method == 'head':
+
+    if model_config.task in CLASSIFICATION_TASKS:
+        if model_config.classification_method == 'head':
             if model_save_path and not full_saved_model:
                 create_fn = peft.AutoPeftModelForSequenceClassification.from_pretrained
             else:
                 create_fn = transformers.AutoModelForSequenceClassification.from_pretrained
             model = create_fn(
                 model_path,
-                num_labels=num_labels,
+                num_labels=model_config.num_labels,
                 **model_kwargs
             )
-        elif classification_method == 'generation':
+        elif model_config.classification_method == 'generation':
             if model_save_path:
                 create_fn = peft.AutoPeftModelForCausalLM.from_pretrained
             else:
@@ -848,7 +937,18 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwa
             )
         else:
             raise ValueError("Classification method not found")
-    elif task in ["topic-extraction", "claim-extraction"]:
+        
+        # set labels2id and id2labels
+        model.config.update({
+            'label2id': model_config.labels2id,
+            'id2label': {v: k for k, v in model_config.labels2id.items()}
+        })
+        if model_config.classification_method == 'head':
+            model.config.pad_token_id = tokenizer.pad_token_id
+        elif model_config.classification_method == 'generation':
+            model.generation_config.pad_token_id = tokenizer.pad_token_id
+
+    elif model_config.task in GENERATION_TASKS:
         if model_save_path:
             create_fn = peft.AutoPeftModelForCausalLM.from_pretrained
         else:
@@ -857,17 +957,13 @@ def setup_model_and_tokenizer(task, classification_method, num_labels, model_kwa
             model_path,
             **model_kwargs
         )
+
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+    else:
+        raise ValueError("Task not found")
     
     tokenizer.padding_side = 'left'
     tokenizer.pad_token = tokenizer.eos_token
-    # Setup tokens
-    if task in ["stance-classification", "argument-classification"]:
-        if classification_method == 'head':
-            model.config.pad_token_id = tokenizer.pad_token_id
-        elif classification_method == 'generation':
-            model.generation_config.pad_token_id = tokenizer.pad_token_id
-    elif task in ["topic-extraction", "claim-extraction"]:
-        model.generation_config.pad_token_id = tokenizer.pad_token_id
         
     return model, tokenizer
 
@@ -876,7 +972,7 @@ def parse_list_completions(completions):
 
 def get_prediction(inputs, task, model, tokenizer, classification_method, generation_method, generate_kwargs={}):
     """Get model predictions"""
-    if task in ["stance-classification", "argument-classification"]:
+    if task in CLASSIFICATION_TASKS:
         if classification_method == 'head':
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
             output = model(**inputs)
@@ -912,7 +1008,7 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
                         return 'favor'
                     return 'neutral'
             return [get_label(c) for c in completions]
-    else:
+    elif task in GENERATION_TASKS:
         if 'labels' in inputs:
             prompt = {
                 "input_ids": inputs["input_ids"][inputs['labels'] == -100].unsqueeze(0),
@@ -944,11 +1040,13 @@ def get_prediction(inputs, task, model, tokenizer, classification_method, genera
             return batched_completions
         else:
             raise NotImplementedError("Generation method not found.")
+    else:
+        raise ValueError("Task not found")
             
 
 def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
     
-    output_type = config['classification_method'] if task == "stance-classification" else config['generation_method']
+    output_type = config['classification_method'] if task in CLASSIFICATION_TASKS else config['generation_method']
     if 'hf_model' in config:
         model_save_path = config['hf_model']
         file_path = huggingface_hub.hf_hub_download(repo_id=model_save_path, filename='metadata.json')
@@ -961,16 +1059,25 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
         prompt = load_prompt(task, config['prompting_method'], generation_method=config['generation_method'] if 'generation_method' in config else None)
         parent_prompt = load_parent_prompt(task, prompting_method=config['prompting_method'])
 
+    if task in ['stance-classification', 'claim-entailment-3-way']:
+        num_labels = 3
+    elif task == 'argument-classification':
+        num_labels = 2
+    elif task in ['claim-entailment-7-way']:
+        num_labels = 7
+    else:
+        num_labels = None
+
     # Setup configurations
     model_config = ModelConfig(
         model_name=None,
         task=task,
-        num_labels=2 if task == "argument-classification" else 3,
+        num_labels=num_labels,
         device_map=model_kwargs['device_map'],
         prompt=prompt,
         parent_prompt=parent_prompt,
-        classification_method=config['classification_method'] if task == 'stance-classification' else None,
-        generation_method=config['generation_method'] if task in ['topic-extraction', 'claim-extraction'] else None,
+        classification_method=config['classification_method'] if task in CLASSIFICATION_TASKS else None,
+        generation_method=config['generation_method'] if task in GENERATION_TASKS else None,
         output_type=output_type,
     )
     
@@ -1010,10 +1117,10 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
             model_config.generation_method,
             generate_kwargs=generate_kwargs
         ))
-    
-    if task in ["stance-classification", "argument-classification"]:
+
+    if task in CLASSIFICATION_TASKS:
         if model_config.classification_method == 'head':
-            id2labels = {v: k for k, v in data_config.labels2id.items()}
+            id2labels = {v: k for k, v in model_config.labels2id.items()}
             predictions = [id2labels[p] for p in predictions]
 
     return predictions

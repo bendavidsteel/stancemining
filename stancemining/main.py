@@ -55,7 +55,7 @@ class StanceMining:
             target_extraction_generation_kwargs={},
             embedding_model='intfloat/multilingual-e5-small',
             embedding_model_inference='vllm',
-            topic_model='toponymy',
+            topic_model='bertopic',
             cosine_similarity_threshold=0.8,
             verbose=False,
             use_embedding_cache=True,
@@ -226,10 +226,10 @@ class StanceMining:
             pl.DataFrame: DataFrame containing the documents with their stance targets and classifications.
         """
         if not generate_targets:
-            assert len(targets) > 0, "If not generating targets, you must provide a list of targets."
+            assert len(targets) > 0 or (isinstance(docs, pl.DataFrame) and 'Targets' in docs.columns), "If not generating targets, you must provide a list of targets or 'Targets' column in the DataFrame."
 
-        if targets and not generate_targets:
-            logger.info("Using provided targets")
+        if targets and generate_targets:
+            logger.info("Using provided targets in addition to generating targets")
 
         if embedding_cache is not None:
             assert isinstance(embedding_cache, pl.DataFrame), "embedding_cache must be a polars DataFrame"
@@ -248,24 +248,37 @@ class StanceMining:
                 document_df = document_df.with_row_index(name='ID')
         
         logger.info("Loading embedding model...")
-        embed_model = self._get_embedding_model()
-        if targets and not generate_targets:
-            logger.info("Using provided targets")
-            document_df = document_df.with_columns(pl.lit(targets).alias('Targets'))
-        elif 'Targets' not in document_df.columns:
-            logger.info("Getting base targets")
-            document_df = self.get_base_targets(docs, embedding_model=embed_model, text_column=text_column, parent_text_column=parent_text_column)
+        embed_model = None
+        if 'Targets' not in document_df.columns:
+            if generate_targets:
+                logger.info("Getting base targets")
+                embed_model = self._get_embedding_model()
+                document_df = self.get_base_targets(docs, embedding_model=embed_model, text_column=text_column, parent_text_column=parent_text_column)
+        
+            if targets and not generate_targets:
+                logger.info("Using provided targets")
+                document_df = document_df.with_columns(pl.lit(targets).alias('Targets'))
+            elif targets and generate_targets:
+                logger.info("Adding provided targets to generated targets")
+                document_df = document_df.with_columns(
+                    pl.col('Targets').list.concat(pl.lit(targets))
+                )
         else:
             assert isinstance(document_df.schema['Targets'], pl.List), "Targets column must be a list of strings"
+            logger.info("Using existing targets in DataFrame")
         
         # cluster initial stance targets
         logger.debug("Exploding targets to get unique targets")
         if generate_higher_level_targets:
+            if embed_model is None:
+                embed_model = self._get_embedding_model()
             document_df, cluster_df = self._generate_higher_level_targets(document_df, embed_model, topic_model_kwargs, max_layers)
 
         if generate_targets and deduplicate_all_targets:
             logger.info("Removing similar stance targets")
             # remove targets that are too similar
+            if embed_model is None:
+                embed_model = self._get_embedding_model()
             document_df = self._filter_all_similar_targets(document_df, embed_model)
 
         if get_stance:
@@ -375,6 +388,7 @@ class StanceMining:
         return target_df['Targets'].to_list()
 
     def _ask_llm_stance(self, docs, stance_targets, parent_docs=None):
+        task = 'stance-classification' if self.stance_target_type == 'noun-phrases' else 'claim-entailment-7way'
         if self.llm_method == 'zero-shot':
             llm = self._get_llm()
             return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets)
@@ -384,9 +398,9 @@ class StanceMining:
                 # convert to list
                 data = data.with_columns(pl.col('ParentTexts').cast(pl.List(pl.String)))
             if self.model_inference == 'transformers':
-                results = finetune.get_predictions("stance-classification", data, self.stance_detection_finetune_kwargs, model_kwargs=self.stance_detection_model_kwargs)
+                results = finetune.get_predictions(task, data, self.stance_detection_finetune_kwargs, model_kwargs=self.stance_detection_model_kwargs)
             elif self.model_inference == 'vllm':
-                results = llms.get_vllm_predictions("stance-classification", data, self.stance_detection_finetune_kwargs, verbose=self.verbose)
+                results = llms.get_vllm_predictions(task, data, self.stance_detection_finetune_kwargs, verbose=self.verbose, model_kwargs=self.stance_detection_model_kwargs, generate_kwargs=self.stance_detection_generation_kwargs)
             results = [r.upper() for r in results]
             return results
 
@@ -456,14 +470,16 @@ class StanceMining:
             .rename({'Targets': 'Target'})\
             .group_by('Target')\
             .agg(pl.len().alias('count'))
-        logger.debug("Getting target embeddings")
-        embeddings = self._get_embeddings(target_df['Target'], model=embedding_model)
         logger.debug("Create mapping of small count targets to larger count similar targets")
         if self.stance_target_type == 'noun-phrases':
             max_distance = 0.2
         elif self.stance_target_type == 'claims':
             max_distance = 0.1
-        target_mapper = utils.get_similar_target_mapper(embeddings, target_df, max_distance=max_distance)
+        batch_size = 2500000
+        if len(target_df) <= batch_size:
+            target_mapper = utils._get_similar_target_mapper(target_df, embedding_model=embedding_model, max_distance=max_distance)
+        else:
+            target_mapper = utils._get_similar_target_mapper_batch(target_df, embedding_model=embedding_model, max_embedding_distance=max_distance, batch_size=batch_size)
         logger.debug("Replacing small count targets with larger count similar targets")
         documents_df = documents_df.with_columns(
             pl.col('Targets').list.eval(pl.element().replace(target_mapper)).list.unique()
@@ -503,12 +519,18 @@ class StanceMining:
                     import parampacmap
                     umap_model = parampacmap.ParamPaCMAP(**umap_kwargs)
                 except ImportError:
-                    logger.warning("ParamRepulsor is not installed, using pacmap for dimensionality reduction.")
+                    try:
+                        logger.warning("ParamRepulsor is not installed, using pacmap for dimensionality reduction.")
+                        import pacmap
+                        umap_model = pacmap.PaCMAP(**umap_kwargs)
+                    except ImportError:
+                        raise ImportError("Neither ParamRepulsor nor pacmap is installed. Please install one of them with 'pip install parampacmap' or 'pip install pacmap'.")
+            else:
+                try:
                     import pacmap
                     umap_model = pacmap.PaCMAP(**umap_kwargs)
-            else:
-                import pacmap
-                umap_model = pacmap.PaCMAP(**umap_kwargs)
+                except ImportError:
+                    raise ImportError("Pacmap is not installed. Please install it with 'pip install pacmap'.")
             kwargs['umap_model'] = umap_model
         if 'hdbscan_model' not in kwargs:
             if torch.cuda.is_available():
@@ -526,7 +548,7 @@ class StanceMining:
 
         batch_size = 2500000
         if len(targets) <= batch_size:
-            embeddings = self._get_embeddings(targets, model=embed_model)
+            embeddings = self._get_embeddings(targets, model=embedding_model)
 
             # Reduce dimensionality and fit UMAP model
             umap_embeddings = topic_model._reduce_dimensionality(embeddings)
@@ -547,13 +569,16 @@ class StanceMining:
                 else:
                     umap_embeddings = np.vstack([umap_embeddings, batch_umap_embeddings])
 
+        logger.debug("Successfully computed UMAP embeddings, now clustering with HDBSCAN")
         document_df, _ = topic_model._cluster_embeddings(umap_embeddings, document_df)
+        logger.debug("Successfully clustered embeddings")
 
         # Sort and Map Topic IDs by their frequency
         if not topic_model.nr_topics:
             document_df = topic_model._sort_mappings_by_frequency(document_df)
 
         # Extract topics by calculating c-TF-IDF, reduce topics if needed, and get representations.
+        logger.debug("Extracting topics and representations")
         topic_model._extract_topics(
             document_df, embeddings=None, verbose=topic_model.verbose, fine_tune_representation=not topic_model.nr_topics
         )
@@ -616,7 +641,7 @@ class StanceMining:
             import pacmap
             umap_model = pacmap.PaCMAP(**umap_kwargs)
 
-        embeddings = self._get_embeddings(doc_targets, model=embed_model)
+        embeddings = self._get_embeddings(targets, model=embedding_model)
         clusterable_vectors = umap_model.fit_transform(embeddings)
 
         # running toponymy fit method except topic naming step which we do ourselves
@@ -793,8 +818,7 @@ class StanceMining:
         parent_docs = target_df[parent_text_column] if parent_text_column in target_df.columns else None
         target_stance = self._ask_llm_stance(target_df[text_column], target_df['Target'], parent_docs=parent_docs)
         target_df = target_df.with_columns(pl.Series(name='stance', values=target_stance))
-        target_df = target_df.with_columns(pl.col('stance').replace_strict({'FAVOR': 1, 'AGAINST': -1, 'NEUTRAL': 0}).alias('stance'))
-
+        
         document_df = document_df.drop('Targets')\
             .join(
                 target_df.group_by('ID')\

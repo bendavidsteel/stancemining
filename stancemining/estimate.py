@@ -11,6 +11,7 @@ from gpytorch.mlls import VariationalELBO, MarginalLogLikelihood
 from gpytorch.utils.generic import length_safe_zip
 import huggingface_hub
 from linear_operator.utils.errors import NotPSDError
+import numba
 import numpy as np
 import polars as pl
 import pyro
@@ -21,7 +22,7 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
 
-from stancemining.finetune import LABELS_2_ID
+from stancemining.finetune import STANCE_LABELS_2_ID
 from stancemining.main import logger
 
 MAX_FULL_GP_BATCH = 10000
@@ -879,23 +880,118 @@ def _get_classifier_profiles(
     classifier_profiles = {
         0: {
             'true_against': {
-                'predicted_against': confusion_matrix[LABELS_2_ID['against']][LABELS_2_ID['against']],
-                'predicted_neutral': confusion_matrix[LABELS_2_ID['against']][LABELS_2_ID['neutral']],
-                'predicted_favor': confusion_matrix[LABELS_2_ID['against']][LABELS_2_ID['favor']]
+                'predicted_against': confusion_matrix[STANCE_LABELS_2_ID['against']][STANCE_LABELS_2_ID['against']],
+                'predicted_neutral': confusion_matrix[STANCE_LABELS_2_ID['against']][STANCE_LABELS_2_ID['neutral']],
+                'predicted_favor': confusion_matrix[STANCE_LABELS_2_ID['against']][STANCE_LABELS_2_ID['favor']]
             },
             'true_neutral': {
-                'predicted_against': confusion_matrix[LABELS_2_ID['neutral']][LABELS_2_ID['against']],
-                'predicted_neutral': confusion_matrix[LABELS_2_ID['neutral']][LABELS_2_ID['neutral']],
-                'predicted_favor': confusion_matrix[LABELS_2_ID['neutral']][LABELS_2_ID['favor']]
+                'predicted_against': confusion_matrix[STANCE_LABELS_2_ID['neutral']][STANCE_LABELS_2_ID['against']],
+                'predicted_neutral': confusion_matrix[STANCE_LABELS_2_ID['neutral']][STANCE_LABELS_2_ID['neutral']],
+                'predicted_favor': confusion_matrix[STANCE_LABELS_2_ID['neutral']][STANCE_LABELS_2_ID['favor']]
             },
             'true_favor': {
-                'predicted_favor': confusion_matrix[LABELS_2_ID['favor']][LABELS_2_ID['favor']],
-                'predicted_neutral': confusion_matrix[LABELS_2_ID['favor']][LABELS_2_ID['neutral']],
-                'predicted_against': confusion_matrix[LABELS_2_ID['favor']][LABELS_2_ID['against']]
+                'predicted_favor': confusion_matrix[STANCE_LABELS_2_ID['favor']][STANCE_LABELS_2_ID['favor']],
+                'predicted_neutral': confusion_matrix[STANCE_LABELS_2_ID['favor']][STANCE_LABELS_2_ID['neutral']],
+                'predicted_against': confusion_matrix[STANCE_LABELS_2_ID['favor']][STANCE_LABELS_2_ID['against']]
             }
         }
     }
     return classifier_profiles
+
+
+@numba.njit
+def _adjust_shape(dat, k_vars):
+    """ Returns an array of shape (nobs, k_vars) for use with `gpke`."""
+    dat = np.asarray(dat)
+    nobs = len(dat)
+    dat = np.reshape(dat, (nobs, k_vars))
+    return dat
+
+def gaussian(h, Xi, x):
+    """
+    Vectorized gaussian kernel.
+    Xi: shape (n_bootstrap, nobs, k_vars)
+    x: shape (N_predict, k_vars)
+    Returns: shape (n_bootstrap, N_predict, nobs)
+    """
+    # Reshape for broadcasting: (N_predict, 1, k_vars) - (1, nobs, k_vars)
+    diff = x[np.newaxis, :, np.newaxis, :] - Xi[:, np.newaxis, ...]
+    return (1. / np.sqrt(2 * np.pi)) * np.exp(-np.sum(diff**2, axis=3) / (h**2 * 2.))
+
+def _est_loc_linear(bw, endog, exog, data_predict):
+    """
+    Fully vectorized local linear estimation for multiple prediction points.
+    data_predict: shape (N_predict, k_vars)
+    Returns: mean (n_bootstrap, N_predict,), mfx (n_bootstrap, N_predict, k_vars)
+    """
+    n_bootstrap, nobs, k_vars = exog.shape
+    N_predict = data_predict.shape[0]
+    
+    # Compute kernels for all prediction points at once
+    # ker shape: (N_predict, nobs)
+    ker = gaussian(bw[0], exog, data_predict) / (bw[0] * float(nobs))
+    
+    M12 = exog[:, np.newaxis, :, :] - data_predict[np.newaxis, :, np.newaxis, :] # shape (n_bootstrap, N_predict, nobs, k_vars)
+    ker_weighted = ker[..., np.newaxis] # shape (n_bootstrap, N_predict, nobs, 1)
+    
+    # M22: (N_predict, k_vars, k_vars)
+    # For each i: M12[i].T @ (M12[i] * ker[i])
+    M22 = np.einsum('bpnk,bpnj->bpkj', M12 * ker_weighted, M12) # shape (n_bootstrap, N_predict, k_vars, k_vars)
+    M12_sum = (M12 * ker_weighted).sum(axis=-2) # shape (n_bootstrap, N_predict, k_vars)
+    
+    # Build M matrix: (N_predict, k_vars+1, k_vars+1)
+    M = np.zeros((n_bootstrap, N_predict, k_vars + 1, k_vars + 1))
+    M[..., 0, 0] = ker.sum(axis=-1)
+    M[..., 0, 1:] = M12_sum
+    M[..., 1:, 0] = M12_sum
+    M[..., 1:, 1:] = M22
+
+    # ker_endog: (N_predict, nobs, 1)
+    ker_endog = ker_weighted * endog[:, np.newaxis, :, :] # shape (n_bootstrap, N_predict, nobs, 1)
+    
+    # Build V vector: (n_bootstrap, N_predict, k_vars+1, 1)
+    V = np.zeros((n_bootstrap, N_predict, k_vars + 1, 1))
+    V[..., 0, 0] = ker_endog.sum(axis=(-2, -1))
+    V[..., 1:, 0] = (M12 * ker_endog).sum(axis=-2)
+
+    # Solve all linear systems at once
+    # (N_predict, k_vars+1, k_vars+1) @ (N_predict, k_vars+1, 1)
+    mean_mfx = np.linalg.pinv(M) @ V
+
+    means = mean_mfx[..., 0, 0]
+    mfx_all = mean_mfx[..., 1:, 0]
+
+    return means, mfx_all
+
+def kernel_reg_fit(endog, exog, data_predict, bw):
+    k_vars = 1
+    endog = endog[..., np.newaxis]  # shape (n_bootstrap, nobs, 1)
+    exog = exog[..., np.newaxis]  # shape (n_bootstrap, nobs, 1)
+    data_predict = data_predict[:, np.newaxis]  # shape (N_predict, 1)
+    bw = np.asarray(bw)
+
+    mean, _ = _est_loc_linear(
+        bw, 
+        endog, 
+        exog,
+        data_predict
+    )
+
+    return mean
+
+
+def bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_samples, n_bootstrap=100):
+    indices = np.random.choice(n_samples, size=(n_bootstrap, n_samples), replace=True)
+
+    # Resample with replacement
+    boot_endog = stance[indices]
+    boot_exog = timestamps[indices]
+
+    # Fit kernel regression on bootstrap sample
+    all_preds = kernel_reg_fit(boot_endog, boot_exog, test_x, [bandwidth])
+
+    all_preds = np.clip(all_preds, -1, 1)
+    return all_preds
 
 def _get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column, time_scale):
     
@@ -929,11 +1025,11 @@ def _get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column
     return df.select(((pl.col(time_column) - start_date).dt.total_hours() / num_hours).alias('timestamps'))['timestamps'].to_numpy()
 
 
-def _get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
-    sorted_df = filtered_df.sort(time_column)
+def _get_time_series_data(filtered_df: pl.DataFrame, stance_target_type: str, time_column, time_scale):
+    filtered_df = filtered_df.sort(time_column)
     start_date = filtered_df[time_column].min().date()
     end_date = filtered_df[time_column].max().date()
-    timestamps = _get_timestamps(sorted_df, start_date, time_column, time_scale)
+    timestamps = _get_timestamps(filtered_df, start_date, time_column, time_scale)
 
     days = []
     current_date = start_date
@@ -944,7 +1040,7 @@ def _get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
 
     # Calculate volume
     day_df = day_df.join(
-            sorted_df.select(pl.col(time_column).dt.date())\
+            filtered_df.select(pl.col(time_column).dt.date())\
                 .group_by(time_column)\
                 .len()\
                 .rename({'len': 'volume'}),
@@ -958,7 +1054,27 @@ def _get_time_series_data(filtered_df: pl.DataFrame, time_column, time_scale):
 
     test_x = _get_timestamps(day_df, start_date, time_column, time_scale)
     
-    stance = sorted_df['Stance'].to_numpy()
+    if stance_target_type == 'noun-phrases':
+        mapping = {
+            'AGAINST': -1.,
+            'NEUTRAL': 0.,
+            'FAVOR': 1.
+        }
+    elif stance_target_type == 'claims':
+        mapping = {
+            'SUPPORTING': 1.,
+            'LEANING SUPPORTING': 0.5,
+            'IRRELEVANT': 0.,
+            'DISCUSSING': 0.,
+            'QUERYING': 0.,
+            'LEANING REFUTING': -0.5,
+            'REFUTING': -1.
+        }
+    else:
+        raise ValueError("stance_target_type must be either 'noun-phrases' or 'claims'")
+    
+    filtered_df = filtered_df.with_columns(pl.col('Stance').replace_strict(mapping).cast(pl.Float32))
+    stance = filtered_df['Stance'].to_numpy()
 
     classifier_ids = np.zeros_like(timestamps, dtype=np.uint16)
 
@@ -1013,6 +1129,7 @@ def _combine_trend_df(trend_df: pl.DataFrame, pred, lower, upper, target_name, f
 def _calculate_trends_for_filtered_df_with_batching(
         target_df: pl.DataFrame, 
         target_name: str, 
+        stance_target_type: str,
         filter_type: str, 
         classifier_profiles,
         lengthscale_loc: float,
@@ -1044,6 +1161,7 @@ def _calculate_trends_for_filtered_df_with_batching(
             batch_trend_df, batch_interpolation_outputs_batch = _batch_calculate_trends_for_filtered_df(
                 target_df, 
                 target_name, 
+                stance_target_type,
                 filter_type, 
                 batch, 
                 classifier_profiles,
@@ -1072,6 +1190,7 @@ def _calculate_trends_for_filtered_df_with_batching(
 def _batch_calculate_trends_for_filtered_df(
         target_df: pl.DataFrame, 
         target_name: str, 
+        stance_target_type: str,
         filter_type: str, 
         unique_values: List[str], 
         classifier_profiles,
@@ -1097,6 +1216,8 @@ def _batch_calculate_trends_for_filtered_df(
         all_classifier_ids.append(classifier_ids)
         all_test_x.append(test_x)
         all_day_dfs.append(day_df)
+
+    assert stance_target_type == 'noun-phrases', "GP only supports noun-phrase targets"
 
     models = []
     batch_classifier_ids = []
@@ -1146,6 +1267,7 @@ def _batch_calculate_trends_for_filtered_df(
 def _calculate_trends_for_filtered_df(
         filtered_df: pl.DataFrame, 
         target_name, 
+        stance_target_type,
         filter_type, 
         filter_value, 
         classifier_profiles,
@@ -1169,9 +1291,10 @@ def _calculate_trends_for_filtered_df(
         logger.warning(f"Skipping {target_name} {filter_type} {filter_value} - not enough data")
         return None, None
 
-    timestamps, stance, classifier_ids, test_x, trend_df = _get_time_series_data(filtered_df, time_column, time_scale)
+    timestamps, stance, classifier_ids, test_x, trend_df = _get_time_series_data(filtered_df, stance_target_type, time_column, time_scale)
     
     if interpolation_method == 'gp':
+        assert stance_target_type == 'noun-phrases', "GP only supports noun-phrase targets"
         try:
             lengthscale, likelihood_sigma, losses, pred, lower, upper = _get_gp_timeseries(timestamps, stance, classifier_ids, classifier_profiles, test_x, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, verbose)
         except Exception as ex:
@@ -1189,7 +1312,7 @@ def _calculate_trends_for_filtered_df(
             'filter_type': filter_type,
             'filter_value': filter_value
         }
-    else:
+    elif interpolation_method == 'lowess':
         try:
             from statsmodels.nonparametric.smoothers_lowess import lowess
         except ImportError:
@@ -1208,8 +1331,39 @@ def _calculate_trends_for_filtered_df(
         # Interpolate NaN values
         pred[np.isnan(pred)] = np.interp(np.flatnonzero(np.isnan(pred)), np.flatnonzero(~np.isnan(pred)), pred[~np.isnan(pred)])
 
+        pred = np.clip(pred, -1, 1)
+
         trend_df = _combine_trend_df(trend_df, pred, np.full_like(pred, np.nan), np.full_like(pred, np.nan), target_name, filter_type, filter_value)
         interpolation_outputs = {}
+
+    elif interpolation_method == 'kernelreg':
+        n_bootstrap = 100
+        bandwidth = 10.0
+        n_samples = len(stance)
+
+        if n_samples >= 10**3:
+            # batch out bootstrapping to avoid memory issues
+            batch_size = int(max(n_bootstrap // np.log10(n_samples), 1))
+            all_preds = None
+            for i in range(0, n_bootstrap, batch_size):
+                current_batch_size = min(batch_size, n_bootstrap - i)
+                batch_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_samples, current_batch_size)
+                if all_preds is None:
+                    all_preds = batch_preds
+                else:
+                    all_preds = np.vstack([all_preds, batch_preds])
+        else:
+            all_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_samples, n_bootstrap)
+
+        # Compute statistics
+        pred_mean = np.mean(all_preds, axis=0)
+        pred_lower = np.percentile(all_preds, 5, axis=0)
+        pred_upper = np.percentile(all_preds, 95, axis=0)
+
+        trend_df = _combine_trend_df(trend_df, pred_mean, pred_lower, pred_upper, target_name, filter_type, filter_value)
+        interpolation_outputs = {}
+    else:
+        raise ValueError(f"Unknown interpolation method: {interpolation_method}")
 
     return trend_df, interpolation_outputs
 
@@ -1218,6 +1372,7 @@ def infer_stance_trends_for_target(
         target_name, 
         filter_columns: List[str], 
         time_column: str = 'createtime',
+        stance_target_type: str = 'noun-phrases',
         interpolation_method='gp',
         classifier_profiles=None,
         min_filter_count=5,
@@ -1286,6 +1441,7 @@ def infer_stance_trends_for_target(
             batch_trend_df, batch_interpolation_outputs = _calculate_trends_for_filtered_df_with_batching(
                 filtered_df, 
                 target_name, 
+                stance_target_type,
                 filter_column, 
                 classifier_profiles,
                 lengthscale_loc,
@@ -1311,6 +1467,7 @@ def infer_stance_trends_for_target(
                     trend_df, interpolation_outputs = _calculate_trends_for_filtered_df(
                         filtered_df, 
                         target_name, 
+                        stance_target_type,
                         filter_column, 
                         filter_value, 
                         classifier_profiles,
@@ -1343,6 +1500,7 @@ def infer_stance_trends_for_target(
     trend_df, interpolation_outputs = _calculate_trends_for_filtered_df(
         target_df, 
         target_name, 
+        stance_target_type,
         'all', 
         'all', 
         classifier_profiles,
@@ -1379,6 +1537,7 @@ def _document_to_targets(document_df: pl.DataFrame, min_count):
 def infer_stance_trends_for_all_targets(
         document_df: pl.DataFrame, 
         time_column: str = 'createtime', 
+        stance_target_type: str = 'noun-phrases',
         filter_columns: List[str] = [], 
         min_count: int = 5, 
         time_scale: str = '1mo',
@@ -1395,7 +1554,7 @@ def infer_stance_trends_for_all_targets(
         time_scale (str): Time scale for the trends, e.g., '1mo', '1w'.
             Can be any combination of an integer and a time unit from ['h', 'd', 'w', 'mo', 'y'].
             If time scale is changed from '1mo', the lengthscale prior should be adjusted accordingly.
-        interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process and 'lowess' for LOWESS. Defaults to 'gp'.
+        interpolation_method (str): The method to use for interpolation, 'gp' for Gaussian Process, 'lowess' for LOWESS, and 'kernelreg' for Kernel Regression. Defaults to 'gp'.
             Gaussian Process is better for noise and modelling error, but is slower.
             LOWESS is faster, but does not model error, and does not allow setting a prior to properly model noise.
         verbose (bool): Whether to print progress information.
@@ -1424,6 +1583,7 @@ def infer_stance_trends_for_all_targets(
             target_name, 
             filter_columns, 
             time_column,
+            stance_target_type=stance_target_type,
             interpolation_method=interpolation_method,
             classifier_profiles=classifier_profiles,
             min_filter_count=min_count,

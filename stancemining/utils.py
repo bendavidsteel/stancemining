@@ -1,7 +1,7 @@
 import gc
 import logging
 import subprocess
-from typing import List
+from typing import List, Union
 
 from nltk.corpus import stopwords
 import numpy as np
@@ -13,16 +13,30 @@ import vllm
 
 logger = logging.getLogger('StanceMining.utils')
 
-class VLLMEmbedder:
-        def __init__(self, model: str = "all-MiniLM-L6-v2", kwargs: dict = {}):
-            self.llm = vllm.LLM(model=model, task='embed', **kwargs)
+class Embedder:
+    def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
+        raise NotImplementedError("Embedder is an abstract base class")
+    
+class SentenceTransformerEmbedder(Embedder):
+    def __init__(self, model: str = "all-MiniLM-L6-v2", kwargs: dict = {}):
+        from sentence_transformers import SentenceTransformer
+        self.model = SentenceTransformer(model, **kwargs)
 
-        def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
-            outputs = self.llm.embed(texts, use_tqdm=show_progress_bar)
-            logger.debug(f"Generated {len(outputs)} embeddings with shape {len(outputs[0].outputs.embedding)} using VLLM model {self.llm}")
-            embeddings = np.vstack([np.asarray(o.outputs.embedding, dtype=np.float32) for o in outputs])
-            logger.debug(f"Combined embeddings into array of shape {embeddings.shape}")
-            return embeddings
+    def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
+        embeddings = self.model.encode(texts, show_progress_bar=show_progress_bar, convert_to_numpy=True, normalize_embeddings=True)
+        logger.debug(f"Generated embeddings with shape {embeddings.shape} using SentenceTransformer model {self.model}")
+        return embeddings
+
+class VLLMEmbedder(Embedder):
+    def __init__(self, model: str = "all-MiniLM-L6-v2", kwargs: dict = {}):
+        self.llm = vllm.LLM(model=model, task='embed', **kwargs)
+
+    def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
+        outputs = self.llm.embed(texts, use_tqdm=show_progress_bar)
+        logger.debug(f"Generated {len(outputs)} embeddings with shape {len(outputs[0].outputs.embedding)} using VLLM model {self.llm}")
+        embeddings = np.vstack([np.asarray(o.outputs.embedding, dtype=np.float32) for o in outputs])
+        logger.debug(f"Combined embeddings into array of shape {embeddings.shape}")
+        return embeddings
 
 def cluster_target_embeddings(embeddings, max_distance = 0.2):
     normalized_embeddings = sklearn.preprocessing.normalize(embeddings, axis=1, norm='l2')
@@ -220,7 +234,13 @@ def _dbscan_clustering(normalized_embeddings, max_distance=0.2):
     
     return embed_clusters
 
-def get_similar_target_mapper(embeddings: np.ndarray, target_df: pl.DataFrame, max_distance=0.2):
+def _get_similar_target_mapper(target_df: pl.DataFrame, embedding_model: Union[str, Embedder], max_distance=0.2):
+
+    if isinstance(embedding_model, str):
+        embedding_model = VLLMEmbedder(model=embedding_model)
+
+    embeddings = embedding_model.encode(target_df['Target'].to_list(), show_progress_bar=True)
+
     assert 'count' in target_df.columns, "target_df must contain 'count' column"
     assert 'Target' in target_df.columns, "target_df must contain 'Target' column"
     assert embeddings.shape[0] == target_df.shape[0], "embeddings must match the number of targets in target_df"
@@ -302,10 +322,12 @@ def _minhash_clustering(target_df: pl.DataFrame, threshold=0.7):
 
     return final_labels
 
-def _get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model_name: str, minhash_threshold=0.7, max_embedding_distance=0.2, batch_size=1000):
+def _get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model: Union[str, Embedder], minhash_threshold=0.7, max_embedding_distance=0.2, batch_size=1000):
     hash_clusters = _minhash_clustering(target_df, threshold=minhash_threshold)
     target_cluster_df = target_df.with_columns(pl.Series(name='cluster', values=hash_clusters))
-    embedding_model = VLLMEmbedder(model=embedding_model_name)
+
+    if isinstance(embedding_model, str):
+        embedding_model = VLLMEmbedder(model=embedding_model)
     cluster_df = target_cluster_df.with_row_index()\
         .group_by('cluster')\
         .agg([pl.col('Target'), pl.col('index'), pl.col('Target').len().alias('cluster_size')])\

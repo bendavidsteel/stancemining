@@ -157,7 +157,7 @@ def main():
     processor = finetune.DataProcessor(model_config, data_config)
     test_dataset = processor.process_data(df, model_config.classification_method, model_config.generation_method, train=False)
     
-    id2labels = {v: k for k, v in data_config.labels2id.items()}
+    id2labels = {v: k for k, v in model_config.labels2id.items()}
 
     vllm_preds = []
     hf_preds = []

@@ -5,15 +5,15 @@ import re
 
 import polars as pl
 
-def load_dataset(name, split='test', group=True, remove_synthetic_neutral=True):
+def load_dataset(name, split='test', group=True, remove_synthetic_neutral=True, task=None):
     if isinstance(name, str):
-        return _load_one_dataset(name, split, group, remove_synthetic_neutral)
+        return _load_one_dataset(name, split, group, remove_synthetic_neutral, task)
     elif isinstance(name, Iterable):
-        return pl.concat([_load_one_dataset(n, split, group, remove_synthetic_neutral) for n in name], how='diagonal_relaxed')
+        return pl.concat([_load_one_dataset(n, split, group, remove_synthetic_neutral, task) for n in name], how='diagonal_relaxed')
     else:
         raise ValueError(f'Unknown dataset: {name}')
-    
-def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=True):
+
+def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=True, task=None):
     datasets_path = os.path.join('.', 'data', 'datasets')
     if name == 'semeval':
         if split == 'val':
@@ -224,20 +224,118 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
                 continue
         df = pl.DataFrame(data)
         mapping = {}
-    elif name == 'watclaimcheck':
-        path = os.path.join(datasets_path, 'WatClaimCheck_dataset')
-        if split in ['train', 'val']:
-            file_name = 'train.json'
-        elif split == 'test':
-            file_name = 'valid.json'
-        else:
-            raise ValueError(f'Unknown split: {split}')
-        file_path = os.path.join(path, file_name)
-        with open(file_path) as f:
-            data = json.load(f)
+    elif name == 'stanceosaurus':
+        path = os.path.join(datasets_path, 'stanceosaurus')
 
-        for item in data:
-            pass
+        split_mapper = {
+            'train': 'train',
+            'dev': 'val',
+            'test': 'test'
+        }
+
+        def recurse_children(item, claim, posts):
+            childless_item = item.copy()
+            del childless_item['children']
+            for child in item['children']:
+                child = child.copy()
+                child_thread = []
+                for ancestor in childless_item.get('thread', []):
+                    ancestor = ancestor.copy()
+                    if 'thread' in ancestor:
+                        del ancestor['thread']
+                    child_thread.append(ancestor)
+                child_thread.append(childless_item)
+                child['thread'] = child_thread
+                recurse_children(child, claim, posts)
+                del child['children']
+                child['claim'] = claim
+                posts.append(child)
+
+        languages = os.listdir(path)
+        df = pl.DataFrame()
+
+        for language in languages:
+            language_df = pl.DataFrame()
+
+            for language_root, dirs, filenames in os.walk(os.path.join(path, language)):
+                for filename in filenames:
+                    if not (filename.endswith('.json') or filename.endswith('.jsonl')):
+                        continue
+
+                    if filename == 'masked.json':
+                        continue
+
+                    if language_root in ['dev', 'test', 'train']:
+                        if split != split_mapper[language_root]:
+                            continue
+
+                    file_path = os.path.join(language_root, filename)
+                    try:
+                        with open(file_path) as f:
+                            if filename.endswith('.json'):
+                                items = json.load(f)
+                            else:
+                                items = [json.loads(line) for line in f]
+                    except json.JSONDecodeError:
+                        with open(file_path, 'r') as f:
+                            items = [json.loads(line) for line in f]
+                    
+                    if not items:
+                        continue
+
+                    posts = []
+                    for item in items:
+                        post = item['root_tweet']
+                        recurse_children(item['root_tweet'], item['claim'], posts)
+                        post['claim'] = item['claim']
+                        del post['children']
+                        post['thread'] = []
+                        posts.append(post)
+
+                    language_df = pl.concat([language_df, pl.from_dicts(posts)], how='diagonal_relaxed')
+
+            if language == 'hindi':
+                # hindi has messed up json formatting where stance attribute is under leaning and stance has nonsensical values
+                language_df = language_df.drop('stance')\
+                    .rename({'leaning': 'stance'})\
+                    .filter(pl.col('stance') != 'Discussing') # remove discussing because we don't have leaning data
+
+            if language != 'english':
+                # need to filter to split
+                if split == 'train':
+                    language_df = language_df.head(int(0.8 * len(language_df)))
+                elif split == 'val':
+                    language_df = language_df.slice(int(0.8 * len(language_df)), int(0.1 * len(language_df)))
+                elif split == 'test':
+                    language_df = language_df.tail(int(0.1 * len(language_df)))
+
+            language_df = language_df.with_columns(pl.lit(language).alias('language'))
+            df = pl.concat([df, language_df], how='diagonal_relaxed')
+
+        # clean up trailing spaces
+        spelling_mistakes = {
+            'Dicussing': 'Discussing',
+        }
+        df = df.with_columns(pl.col('stance').str.strip_chars().replace(spelling_mistakes))
+
+        df = df.with_columns(pl.col('thread').list.eval(pl.col('').struct.field('text')).alias('ParentTexts'))\
+            .rename({'text': 'Text', 'claim': 'Target', 'stance': 'Stance'})
+        
+        if task == 'claim-entailment-3way':
+            df = df.with_columns(pl.when(pl.col('leaning').is_in(['Refuting', 'Supporting'])).then(pl.col('leaning')).otherwise(pl.col('Stance')).alias('Stance'))\
+                .with_columns(pl.when(pl.col('Stance').is_in(['Supporting', 'Refuting'])).then(pl.col('Stance')).otherwise(pl.lit('Other')).alias('Stance'))
+            
+            mapping = {
+                'Refuting': 'refuting',
+                'Supporting': 'supporting',
+                'Other': 'neutral'
+            }
+        elif task == 'claim-entailment-7way':
+            df = df.with_columns(pl.when(pl.col('leaning').is_in(['Refuting', 'Supporting'])).then(pl.format("Leaning {}", pl.col('leaning'))).otherwise(pl.col('Stance')).alias('Stance'))
+            mapping = {l: l.lower() for l in df['Stance'].unique()}
+        else:
+            raise ValueError(f'Unknown task: {task}')
+        
     else:
         raise ValueError(f'Unknown dataset: {name}')
     
