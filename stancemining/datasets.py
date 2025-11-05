@@ -196,6 +196,45 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
             'AGAINST': 'against',
             'NEITHER': 'neutral'
         }
+    elif name == 'catalonia':
+        target = 'Catalonia independence'
+        sp_df = pl.read_csv(os.path.join(datasets_path, 'catalonia', f'spanish_{split}.csv'), separator='\t', schema_overrides={'id_str': pl.Utf8})
+        ct_df = pl.read_csv(os.path.join(datasets_path, 'catalonia', f'catalan_{split}.csv'), separator='\t', schema_overrides={'id_str': pl.Utf8})
+        df = pl.concat([sp_df, ct_df], how='diagonal_relaxed').drop('id_str')
+        df = df.with_columns(pl.lit(target).alias('Target'))
+        df = df.rename({'TWEET': 'Text', 'LABEL': 'Stance'})
+        mapping = {
+            'FAVOR': 'favor',
+            'AGAINST': 'against',
+            'NEUTRAL': 'neutral'
+        }
+    elif name == 'french-election':
+        lepen_df = pl.read_csv(os.path.join(datasets_path, 'french-election', 'lepen_fr.csv'))
+        macron_df = pl.read_csv(os.path.join(datasets_path, 'french-election', 'macron_fr.csv'))
+        referendum_df = pl.read_csv(os.path.join(datasets_path, 'french-election', 'referendum_it.csv'))
+        lepen_target = 'Marine Le Pen'
+        macron_target = 'Emmanuel Macron'
+        referendum_target = 'Constitutional Referendum'
+        lepen_df = lepen_df.with_columns(pl.lit(lepen_target).alias('Target'))
+        macron_df = macron_df.with_columns(pl.lit(macron_target).alias('Target'))
+        referendum_df = referendum_df.with_columns(pl.lit(referendum_target).alias('Target'))
+        df = pl.concat([lepen_df, macron_df, referendum_df], how='diagonal_relaxed')
+        if split == 'train':
+            df = df.filter(pl.col('Set') == 'Training')
+        elif split == 'val':
+            df = df.filter(pl.col('Set') == 'Test').sample(fraction=0.5, seed=42)
+        elif split == 'test':
+            df = df.filter(pl.col('Set') == 'Test').sample(fraction=0.5, seed=42)
+        df = df.select(['Tweet', 'Target', 'Stance'])
+        df = df.rename({'Tweet': 'Text'})
+        mapping = {
+            'FAVOUR': 'favor',
+            'AGAINST': 'against',
+            'NONE': 'neutral',
+            'none': 'neutral',
+            'favor': 'favor',
+            'agains': 'against'
+        }
     elif name == 'romain_claims':
         path = 'romain_claims/train-v1-valid.jsonl'
         with open(os.path.join(datasets_path, path)) as f:
