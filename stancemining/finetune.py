@@ -26,7 +26,7 @@ import wandb
 import stancemining.datasets
 import stancemining.metrics
 
-CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-3way', 'claim-entailment-7way']
+CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-3way', 'claim-entailment-5way', 'claim-entailment-7way']
 GENERATION_TASKS = ['topic-extraction', 'claim-extraction']
 
 def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
@@ -58,20 +58,10 @@ def print_metrics(metrics: Dict[str, float]) -> None:
         print(f"{metric}: {value}")
 
 def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_type):
-    if task == "stance-classification":
-        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-stance-classification"
-    elif task == "argument-classification":
+    if task == "argument-classification":
         model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-argument-detection"
-    elif task == "topic-extraction":
-        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-topic-extraction"
-    elif task == "claim-extraction":
-        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-extraction"
-    elif task == "claim-entailment-3way":
-        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-entailment-3way"
-    elif task == "claim-entailment-7way":
-        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-claim-entailment-7way"
     else:
-        raise ValueError("Task not found")
+        model_path_name = model_path_dir + "/" + model_name.replace('/', '-') + "-" + task
     if isinstance(dataset_name, str):
         model_path_name = model_path_name + f"-{dataset_name}"
     elif isinstance(dataset_name, Iterable):
@@ -106,6 +96,8 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
     elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/stancemining/prompt_claim_entailment.txt'
+    elif task == "claim-entailment-5way":
+        file_path = top_dir / 'models/stancemining/prompt_claim_entailment_5_way.txt'
     elif task == "claim-entailment-7way":
         file_path = top_dir / 'models/stancemining/prompt_claim_entailment_7_way.txt'
     else:
@@ -134,6 +126,8 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
     elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment.txt'
+    elif task == "claim-entailment-5way":
+        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_5_way.txt'
     elif task == "claim-entailment-7way":
         file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_7_way.txt'
     else:
@@ -142,7 +136,19 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
         system_message = file.read()
     return system_message
 
-def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str, examples):
+def load_context_prompt(task: str, prompting_method: str) -> str:
+    top_dir = pathlib.Path(__file__).parent.parent
+    if task == "claim-entailment-5way":
+        file_path = top_dir / 'models/stancemining/prompt_context_claim_entailment_5_way.txt'
+    elif task == "stance-classification":
+        file_path = top_dir / 'models/stancemining/prompt_context_stance.txt'
+    else:
+        raise ValueError("Task not found")
+    with open(file_path, 'r') as file:
+        system_message = file.read()
+    return system_message
+
+def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str, context_prompt_template: str, examples):
     prompts = []
     for i in range(len(examples['text'])):
         text = examples['text'][i]
@@ -151,7 +157,14 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
             parenttexts = examples['parenttexts'][i]
         else:
             parenttexts = None
-        if parenttexts:
+        if 'context' in examples:
+            context = examples['context'][i]
+        else:
+            context = None
+        if context:
+            prompt = context_prompt_template.format(target=target, context=context, text=text)
+            prompts.append(prompt)
+        elif parenttexts:
             parent_chain = []
             for i, p_text in enumerate(parenttexts):
                 if i == 0:
@@ -231,6 +244,7 @@ class ModelConfig:
     prompt: str
     device_map: Dict[str, int] = 'auto'
     parent_prompt: Optional[str] = None
+    context_prompt: Optional[str] = None
     tokenizer: Optional[transformers.PreTrainedTokenizer] = None
     model: Optional[transformers.PreTrainedModel] = None
     classification_method: Optional[str] = "head"
@@ -247,6 +261,7 @@ class ModelConfig:
         prompt: str,
         device_map: Dict[str, int] = 'auto',
         parent_prompt: Optional[str] = None,
+        context_prompt: Optional[str] = None,
         tokenizer: Optional[transformers.PreTrainedTokenizer] = None,
         model: Optional[transformers.PreTrainedModel] = None,
         classification_method: Optional[str] = "head",
@@ -260,6 +275,7 @@ class ModelConfig:
         self.prompt = prompt
         self.device_map = device_map
         self.parent_prompt = parent_prompt
+        self.context_prompt = context_prompt
         self.tokenizer = tokenizer
         self.model = model
         self.classification_method = classification_method
@@ -276,6 +292,9 @@ class ModelConfig:
         elif task == 'claim-entailment-3way':
             self.num_labels = 3
             self.labels2id = CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID
+        elif task == 'claim-entailment-5way':
+            self.num_labels = 5
+            self.labels2id = CLAIM_ENTAILMENT_5_WAY_LABELS_2_ID
         elif task == 'claim-entailment-7way':
             self.num_labels = 7
             self.labels2id = CLAIM_ENTAILMENT_7_WAY_LABELS_2_ID
@@ -390,6 +409,14 @@ CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID = {
     'neutral': 0
 }
 
+CLAIM_ENTAILMENT_5_WAY_LABELS_2_ID = {
+    'supporting': 0,
+    'refuting': 1,
+    'querying': 2,
+    'irrelevant': 3,
+    'discussing': 4
+}
+
 CLAIM_ENTAILMENT_7_WAY_LABELS_2_ID = {
     'supporting': 0,
     'refuting': 1,
@@ -443,24 +470,25 @@ class DataProcessor:
     
     def _process_stance_classification(self, df: pl.DataFrame, classification_method: str) -> pl.DataFrame:
         cols = ['text', 'topic']
-        if 'Dataset' in df.columns and 'dataset' not in df.columns:
-            df = df.rename({'Dataset': 'dataset'})
+        df = df.rename({
+            'Target': 'topic',
+            'Text': 'text',
+            'Dataset': 'dataset',
+            'Stance': 'class',
+            'ParentTexts': 'parenttexts',
+            'Context': 'context'
+        }, strict=False)
         if 'dataset' in df.columns:
             cols.append('dataset')
-        if 'Stance' in df.columns and 'class' not in df.columns:
-            df = df.rename({"Stance": "class"})
         if 'class' in df.columns:
             if classification_method == 'head':
                 df = df.with_columns(pl.col('class').replace_strict(self.model_config.labels2id))
             cols.append('class')
             
-        if 'Text' in df.columns and 'text' not in df.columns:
-            df = df.rename({"Text": "text"})
-        if 'ParentTexts' in df.columns and 'parenttexts' not in df.columns:
-            df = df.rename({'ParentTexts': 'parenttexts'})
+        if 'parenttexts' in df.columns:
             cols.append('parenttexts')
-        if 'Target' in df.columns and 'topic' not in df.columns:
-            df = df.rename({"Target": "topic"})
+        if 'context' in df.columns:
+            cols.append('context')
         return df.select(cols)
     
     def _process_topic_extraction(self, df: pl.DataFrame, generation_method: str) -> pl.DataFrame:
@@ -480,10 +508,11 @@ class DataProcessor:
     def _add_prompts(self, dataset: datasets.Dataset) -> datasets.Dataset:
         prompt = self.model_config.prompt
         parent_prompt = self.model_config.parent_prompt
+        context_prompt = self.model_config.context_prompt
         if self.model_config.task in CLASSIFICATION_TASKS:
             return dataset.map(
                 lambda examples: {
-                    "text": stance_examples_to_prompt(prompt, parent_prompt, examples)
+                    "text": stance_examples_to_prompt(prompt, parent_prompt, context_prompt, examples)
                 },
                 batched=True
             )
@@ -616,7 +645,6 @@ class TrainingConfig:
     weight_decay: float = 0.01
     grad_accum_steps: int = 8
     batch_size: int = 1
-    eval_steps: int = 100
     warmup_steps: int = 500
     neftune_noise_alpha: float = 5
 
@@ -794,75 +822,77 @@ class ModelTrainer:
         else:
             batch_keys = ['input_ids', 'attention_mask', 'labels']
             loss_func = None
-
-        assert self.training_config.num_epochs * len(train_loader) >= self.training_config.eval_steps * self.training_config.grad_accum_steps, \
-            "Not enough steps to evaluate"
         
         self.model_config.model, neftune_hook = activate_neftune(
             self.model_config.model,
             self.accelerator,
             self.training_config.neftune_noise_alpha
         )
-        global_step = 0
-        loss = float('inf')
-        pbar = tqdm.tqdm(total=self.training_config.eval_steps * self.training_config.grad_accum_steps, desc=f"Training round, loss: {loss:.4f}")
         for epoch in range(self.training_config.num_epochs):
-            self.model_config.model.train()
-            for step, batch in enumerate(train_loader):
-                model_batch = {k: batch[k].to(self.model_config.model.device) for k in batch_keys}
-                outputs = self.model_config.model(**model_batch)
-                if loss_func is not None:
-                    labels = batch['labels'].to(self.model_config.model.device)
-                    loss = loss_func(outputs.logits, labels) / self.training_config.grad_accum_steps
-                else:
-                    loss = outputs.loss / self.training_config.grad_accum_steps
-                self.accelerator.backward(loss)
-
-                wandb.log({"train/loss": loss.item()})
-                pbar.set_description(f"Training round, loss: {loss.item():.4e}")
-                pbar.update(1)
-                
-                if (step + 1) % self.training_config.grad_accum_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    scheduler.step()
-                    global_step += 1
+            print(f"Epoch {epoch + 1}/{self.training_config.num_epochs}")
+            self._train_step(
+                train_loader,
+                optimizer,
+                scheduler,
+                loss_func,
+                batch_keys
+            )
                     
-                    # Evaluation
-                    if global_step % self.training_config.eval_steps == 0:
-                        deactivate_neftune(
-                            self.model_config.model,
-                            self.accelerator,
-                            neftune_hook
-                        )
-                        metrics = self._validation_step(eval_loader, eval_dataset, evaluator)
-                        state_str = f"Step {step},"
-                        if self.model_config.task in CLASSIFICATION_TASKS:
-                            report_keys = ['f1_macro', 'precision', 'recall']
-                        elif self.model_config.task in GENERATION_TASKS:
-                            report_keys = ['bertscore_f1', 'bleu_f1']
-                        else:
-                            raise ValueError("Task not found")
-                        for key in report_keys:
-                            val = metrics[key]
-                            state_str += f" {key.title()}: {val:.4f},"
-                        print(state_str)
-                        eval_metrics = {f"eval/{key}": val for key, val in metrics.items()}
-                        wandb.log(eval_metrics)
-                        
-                        # Save best model
-                        if metrics[chosen_metric] > best_eval_metric:
-                            best_eval_metric = metrics[chosen_metric]
-                            self.model_config.model.save_pretrained(model_save_path)
-                            self.model_config.tokenizer.save_pretrained(model_save_path)
-                            
-                        self.model_config.model, neftune_hook = activate_neftune(
-                            self.model_config.model,
-                            self.accelerator,
-                            self.training_config.neftune_noise_alpha
-                        )
+            # Evaluation
+            deactivate_neftune(
+                self.model_config.model,
+                self.accelerator,
+                neftune_hook
+            )
+            metrics = self._validation_step(eval_loader, eval_dataset, evaluator)
+            state_str = ""
+            if self.model_config.task in CLASSIFICATION_TASKS:
+                report_keys = ['f1_macro', 'precision', 'recall']
+            elif self.model_config.task in GENERATION_TASKS:
+                report_keys = ['bertscore_f1', 'bleu_f1']
+            else:
+                raise ValueError("Task not found")
+            for key in report_keys:
+                val = metrics[key]
+                state_str += f" {key.title()}: {val:.4f},"
+            print(state_str)
+            eval_metrics = {f"eval/{key}": val for key, val in metrics.items()}
+            wandb.log(eval_metrics)
+            
+            # Save best model
+            if metrics[chosen_metric] > best_eval_metric:
+                best_eval_metric = metrics[chosen_metric]
+                self.model_config.model.save_pretrained(model_save_path)
+                self.model_config.tokenizer.save_pretrained(model_save_path)
+                
+            self.model_config.model, neftune_hook = activate_neftune(
+                self.model_config.model,
+                self.accelerator,
+                self.training_config.neftune_noise_alpha
+            )
 
-                        pbar = tqdm.tqdm(total=self.training_config.eval_steps * self.training_config.grad_accum_steps, desc=f"Training round, loss: {loss:.4f}")
+    def _train_step(self, train_loader, optimizer, scheduler, loss_func, batch_keys):
+        self.model_config.model.train()
+        loss = float('inf')
+        pbar = tqdm.tqdm(total=len(train_loader), desc=f"Training round, loss: {loss:.4f}")
+        for step, batch in enumerate(train_loader):
+            model_batch = {k: batch[k].to(self.model_config.model.device) for k in batch_keys}
+            outputs = self.model_config.model(**model_batch)
+            if loss_func is not None:
+                labels = batch['labels'].to(self.model_config.model.device)
+                loss = loss_func(outputs.logits, labels) / self.training_config.grad_accum_steps
+            else:
+                loss = outputs.loss / self.training_config.grad_accum_steps
+            self.accelerator.backward(loss)
+
+            wandb.log({"train/loss": loss.item()})
+            pbar.set_description(f"Training round, loss: {loss.item():.4e}")
+            pbar.update(1)
+            
+            if (step + 1) % self.training_config.grad_accum_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
 
     def _validation_step(self, eval_loader, eval_dataset, evaluator: ModelEvaluator):
         """Run validation step"""

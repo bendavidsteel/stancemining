@@ -1,3 +1,5 @@
+import tqdm
+
 from .llms import BaseLLM
 
 NOUN_PHRASE_AGGREGATE_PROMPT = [
@@ -374,9 +376,13 @@ def ask_llm_multi_doc_targets(generator, docs):
     outputs = parse_generated_targets(outputs)
     return outputs
 
-def ask_llm_zero_shot_stance(generator, docs, stance_targets):
+def ask_llm_zero_shot_stance(generator, docs, stance_targets, verbose=False):
     all_outputs = []
-    for doc, stance_target in zip(docs, stance_targets):
+    if verbose:
+        iterator = tqdm.tqdm(zip(docs, stance_targets), total=len(docs))
+    else:
+        iterator = zip(docs, stance_targets)
+    for doc, stance_target in iterator:
         # Stance Classification Prompt
         prompt = [
             "You are an expert at analyzing stances in documents.",

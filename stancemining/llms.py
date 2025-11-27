@@ -24,6 +24,26 @@ from stancemining.finetune import (
 
 logger = logging.getLogger(__name__)
 
+def prompts_to_conversations(prompts, system_prompt_allowed=True):
+    conversations = []
+    for prompt in prompts:
+        if isinstance(prompt, str):
+            conversation = [
+                {'role': 'user', 'content': prompt}
+            ]
+        elif isinstance(prompt, list):
+            conversation = []
+            if system_prompt_allowed:
+                conversation.append({'role': 'system', 'content': prompt[0]})
+            role = 'user'
+            for p in prompt[1:]:
+                conversation.append({'role': role, 'content': p})
+                role = 'assistant' if role == 'user' else 'user'
+        else:
+            raise ValueError('Prompt must be a string or list of strings')
+        conversations.append(conversation)
+    return conversations
+
 class BaseLLM:
     def __init__(self, model_name):
         self.model_name = model_name
@@ -53,23 +73,7 @@ class Transformers(BaseLLM):
         self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
     
     def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
-        conversations = []
-        for prompt in prompts:
-            if isinstance(prompt, str):
-                conversation = [
-                    {'role': 'user', 'content': prompt}
-                ]
-            elif isinstance(prompt, list):
-                conversation = []
-                conversation.append({'role': 'system', 'content': prompt[0]})
-                role = 'user'
-                for i, p in enumerate(prompt[1:]):
-                    conversation.append({'role': role, 'content': p})
-                    role = 'assistant' if role == 'user' else 'user'
-            else:
-                raise ValueError('Prompt must be a string or list of strings')
-            conversations.append(conversation)
-        
+        conversations = prompts_to_conversations(prompts)
         all_outputs = []
         if len(conversations) == 1:
             iterator = conversations
@@ -135,8 +139,6 @@ def load_vllm_model(model_name, model_kwargs, sampling_param_kwargs):
 class VLLM(BaseLLM):
     def __init__(self, model_name, model_kwargs, verbose=False):
         super().__init__(model_name)
-        
-        self.model_name = model_name
         self.model_kwargs = model_kwargs
         self.verbose = verbose
 
@@ -148,22 +150,7 @@ class VLLM(BaseLLM):
         self.model, self.sampling_params = load_vllm_model(model_name, model_kwargs, sampling_param_kwargs)
 
     def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
-        conversations = []
-        for prompt in prompts:
-            if isinstance(prompt, str):
-                conversation = [
-                    {'role': 'user', 'content': prompt}
-                ]
-            elif isinstance(prompt, list):
-                conversation = []
-                conversation.append({'role': 'system', 'content': prompt[0]})
-                role = 'user'
-                for i, p in enumerate(prompt[1:]):
-                    conversation.append({'role': role, 'content': p})
-                    role = 'assistant' if role == 'user' else 'user'
-            else:
-                raise ValueError('Prompt must be a string or list of strings')
-            conversations.append(conversation)
+        conversations = prompts_to_conversations(prompts)
         
         self.sampling_params.max_tokens = max_new_tokens
         self.sampling_params.n = num_samples
@@ -183,6 +170,37 @@ class VLLM(BaseLLM):
         self.model = None
         torch.cuda.empty_cache()
 
+class Anthropic(BaseLLM):
+    def __init__(self, model_name, model_kwargs):
+        super().__init__(model_name)
+        import anthropic
+        assert 'api_key' in model_kwargs, "Anthropic API key must be provided in model_kwargs"
+        self.client = anthropic.Anthropic(api_key=model_kwargs['api_key'])
+
+    def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
+        conversations = prompts_to_conversations(prompts, system_prompt_allowed=False)
+
+        system_prompts = [p[0] for p in prompts]
+        assert len(set(system_prompts)) == 1, "All system prompts must be the same for Anthropic"
+        system_prompt = system_prompts[0]
+
+        all_outputs = []
+        if len(conversations) == 1:
+            iterator = conversations
+        else:
+            iterator = tqdm.tqdm(conversations)
+        for conversation in iterator:
+            if continue_final_message:
+                conversation[-1]['content'] = conversation[-1]['content'].rstrip()
+            message = self.client.messages.create(
+                max_tokens=max_new_tokens,
+                messages=conversation,
+                model=self.model_name,
+                system=system_prompt
+            )
+            all_outputs.append([c.text.strip() for c in message.content])
+
+        return all_outputs
 
 def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, generate_kwargs={}):
     import vllm

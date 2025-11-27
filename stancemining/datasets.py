@@ -369,12 +369,31 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
                 'Supporting': 'supporting',
                 'Other': 'neutral'
             }
+        elif task == 'claim-entailment-5way':
+            mapping = {l: l.lower() for l in df['Stance'].unique()}
         elif task == 'claim-entailment-7way':
             df = df.with_columns(pl.when(pl.col('leaning').is_in(['Refuting', 'Supporting'])).then(pl.format("Leaning {}", pl.col('leaning'))).otherwise(pl.col('Stance')).alias('Stance'))
             mapping = {l: l.lower() for l in df['Stance'].unique()}
         else:
             raise ValueError(f'Unknown task: {task}')
-        
+    elif name == 'kirk':
+        kirk_context = "On September 10, 2025, Charlie Kirk, an American right-wing political activist, was assassinated while addressing an audience at Utah Valley University for a Turning Point USA speaking event. Kirk was fatally shot in the neck by a shooter on a building roof. The suspected shooter, Tyler Robinson, was identified 2 days later. Video footage spread rapidly on social media. Kirk's memorial was held at State Farm Stadium on September 21."
+        path = os.path.join(datasets_path, 'df_entailment_4da257ab_claude_tagging_threshold_0_7_claims_added_to_text_False_with_entailment.parquet.zstd')
+        df = pl.read_parquet(path)
+        if split == 'train':
+            df = df.head(int(0.8 * len(df)))
+        elif split == 'val':
+            df = df.slice(int(0.8 * len(df)), int(0.1 * len(df)))
+        elif split == 'test':
+            df = df.tail(int(0.1 * len(df)))
+        df = df.with_columns(pl.lit(kirk_context).alias('Context'))
+        df = df.rename({'MainClaims': 'Target', 'stance': 'Stance'})
+        mapping = {
+            'leaning refuting': 'discussing',
+            'leaning supporting': 'discussing',
+            'neutral': 'discussing'
+        }
+        mapping = {**mapping, **{l: l.lower() for l in df['Stance'].unique() if l not in mapping}}
     else:
         raise ValueError(f'Unknown dataset: {name}')
     
@@ -392,6 +411,8 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
     cols = ['Text', 'Target', 'Stance', 'Dataset']
     if 'ParentTexts' in df.columns:
         cols.append('ParentTexts')
+    if 'Context' in df.columns:
+        cols.append('Context')
     df = df.select(cols)
 
     return df

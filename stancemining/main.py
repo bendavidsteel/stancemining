@@ -17,9 +17,9 @@ class StanceMining:
     
     Args:
         stance_target_type (str): Type of stance target to extract, either 'noun-phrases' or 'claims'.
-        llm_method (str): Method to use for LLM inference, either 'zero-shot' or 'finetuned'.
+        llm_method (str): Method to use for LLM inference, either 'prompting' or 'finetuned'.
         model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
-        model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'zero-shot', for stance target extraction and detection.
+        model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'prompting', for stance target extraction and detection.
         model_kwargs (dict): Additional keyword arguments for the LLM model.
         tokenizer_kwargs (dict): Additional keyword arguments for the tokenizer.
         stance_detection_model (str): Name of the stance detection model to use. Defaults to 'bendavidsteel/SmolLM2-360M-Instruct-stance-detection' if not provided.
@@ -63,9 +63,10 @@ class StanceMining:
         """Initialize the StanceMining class.
         """
         assert stance_target_type in ['noun-phrases', 'claims'], f"Stance target type must be either 'noun-phrases' or 'claims', not '{stance_target_type}'"
-        assert llm_method in ['zero-shot', 'finetuned'], f"LLM method must be either 'zero-shot' or 'finetuned', not '{llm_method}'"
+        assert llm_method in ['prompting', 'finetuned'], f"LLM method must be either 'prompting' or 'finetuned', not '{llm_method}'"
         self.stance_target_type = stance_target_type
         self.llm_method = llm_method
+        assert model_inference in ['vllm', 'transformers', 'anthropic'], f"Model inference method must be either 'vllm', 'transformers' or 'anthropic', not '{model_inference}'"
         self.model_inference = model_inference
         self.model_name = model_name
         self.model_kwargs = model_kwargs
@@ -360,7 +361,7 @@ class StanceMining:
 
     def _ask_llm_stance_target(self, docs: List[str]):
         num_samples = 3
-        if self.llm_method == 'zero-shot':
+        if self.llm_method == 'prompting':
             llm = self._get_llm()
             targets = prompting.ask_llm_zero_shot_stance_target(llm, docs, {'num_samples': num_samples})
         elif self.llm_method == 'finetuned':
@@ -375,7 +376,7 @@ class StanceMining:
             elif self.model_inference == 'vllm':
                 results = llms.get_vllm_predictions(task_type, df, self.target_extraction_finetune_kwargs, verbose=self.verbose, model_kwargs=self.target_extraction_model_kwargs, generate_kwargs=self.target_extraction_generation_kwargs)
             else:
-                raise ValueError()
+                raise ValueError(f"Cannot run finetuned LLM with model_inference method: {self.model_inference}")
 
             if isinstance(results[0], str):
                 targets = [[r] for r in results]
@@ -389,9 +390,10 @@ class StanceMining:
 
     def _ask_llm_stance(self, docs, stance_targets, parent_docs=None):
         task = 'stance-classification' if self.stance_target_type == 'noun-phrases' else 'claim-entailment-7way'
-        if self.llm_method == 'zero-shot':
+        if self.llm_method == 'prompting':
             llm = self._get_llm()
-            return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets)
+            assert parent_docs is None, "Parent documents not supported for prompting stance detection"
+            return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets, verbose=self.verbose)
         elif self.llm_method == 'finetuned':
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentTexts': parent_docs})
             if isinstance(data.schema['ParentTexts'], pl.String):
@@ -401,6 +403,8 @@ class StanceMining:
                 results = finetune.get_predictions(task, data, self.stance_detection_finetune_kwargs, model_kwargs=self.stance_detection_model_kwargs)
             elif self.model_inference == 'vllm':
                 results = llms.get_vllm_predictions(task, data, self.stance_detection_finetune_kwargs, verbose=self.verbose, model_kwargs=self.stance_detection_model_kwargs, generate_kwargs=self.stance_detection_generation_kwargs)
+            else:
+                raise ValueError(f"Cannot run finetuned LLM with model_inference method: {self.model_inference}")
             results = [r.upper() for r in results]
             return results
 
@@ -846,6 +850,8 @@ class StanceMining:
             return llms.Transformers(self.model_name, self.model_kwargs, self.tokenizer_kwargs)
         elif self.model_inference == 'vllm':
             return llms.VLLM(self.model_name, self.model_kwargs, verbose=self.verbose)
+        elif self.model_inference == 'anthropic':
+            return llms.Anthropic(self.model_name, self.model_kwargs)
         else:
             raise ValueError(f"LLM library '{self.model_inference}' not implemented")
         

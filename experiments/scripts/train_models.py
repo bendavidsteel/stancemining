@@ -17,6 +17,7 @@ from stancemining.finetune import (
     ModelEvaluator, 
     load_prompt,
     load_parent_prompt,
+    load_context_prompt,
     load_training_data,
     load_validation_data,
     load_test_data,
@@ -65,6 +66,7 @@ def _main(config, args):
         device_map={"": config.device_id},
         prompt=load_prompt(args.task, args.prompting_method, args.generation_method),
         parent_prompt=load_parent_prompt(args.task, args.prompting_method),
+        context_prompt=load_context_prompt(args.task, args.prompting_method),
         attn_implementation=args.attn_implementation,
     )
     
@@ -74,7 +76,6 @@ def _main(config, args):
     
     training_config = TrainingConfig(
         num_epochs=args.num_epochs,
-        eval_steps=args.eval_steps,
         batch_size=args.batch_size,
         grad_accum_steps=args.grad_accum_steps,
         learning_rate=args.learning_rate
@@ -122,13 +123,18 @@ def _main(config, args):
         val_data = load_validation_data(data_config.dataset_name, model_config.task, model_config.generation_method)
 
         # Setup model and tokenizer
-        model, tokenizer = setup_model_and_tokenizer(model_config, model_kwargs=model_kwargs, model_name=model_config.model_name)
+        if args.continue_training:
+            setup_kwargs = {'model_save_path': model_save_path}
+        else:
+            setup_kwargs = {'model_name': model_config.model_name}
+        model, tokenizer = setup_model_and_tokenizer(model_config, model_kwargs=model_kwargs, **setup_kwargs)
         trainer.set_model_and_tokenizer(model, tokenizer)
 
         train_dataset = processor.process_data(train_data, model_config.classification_method, model_config.generation_method)
         val_dataset = processor.process_data(val_data, model_config.classification_method, model_config.generation_method, train=False)
 
-        trainer.prepare_for_training()
+        if not args.continue_training:
+            trainer.prepare_for_training()
         
         # Train model
         trainer.train(train_dataset, val_dataset, model_save_path, evaluator)
