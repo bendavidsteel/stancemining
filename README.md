@@ -1,4 +1,4 @@
-# Stance Target Mining
+# stancemining
 
 A tool for mining stance targets from a corpus of documents.
 
