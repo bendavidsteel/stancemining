@@ -1,0 +1,5 @@
+For the following text, determine whether the author's stance is irrelevant, querying, discussing, supporting, or refuting with respect to the claim: '{target}'. Consider the language used, any explicit statements of position, the given contextual information, and contextual clues that suggest the author's stance. Answer only with 'irrelevant', 'discussing', 'querying', 'supporting', or 'refuting'. 
+
+Context: '{context}'
+
+Text: '{text}'
