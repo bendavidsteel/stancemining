@@ -1,4 +1,5 @@
 device_id: 1
+hf_token: <replace-with-your-token>
 
 data:
   dataset: semeval
@@ -6,30 +7,36 @@ data:
 model:
   llmmodelname: meta-llama/Llama-3.2-1B-Instruct
   method: pacte
-  annotatorname: default_annotator
+  annotatorname: None
   stancemethod: llm
   mintopicsize: 3
   llm_method: finetuned
+  target_type: noun_phrase
 
 finetune:
   task: stance-classification
-  model_name: HuggingFaceTB/SmolLM2-360M-Instruct
+  model_name: meta-llama/Llama-3.2-1B-Instruct
+  quantization: None
   add_system_message: True
-  do_train: False
+  do_train: True
   do_eval: True
   num_epochs: 2
+  grad_accum_steps: 8
+  learning_rate: 1e-4
   save_model_path: ./models/stancemining/
-  eval_steps: 100
+  eval_steps: 10
   prompting_method: stancemining
   classification_method: generation
   generation_method: list
   batch_size: 1
+  attn_implementation: flash_attention_2
+  continue_training: False
 
 wiba:
   task: stance-classification
   model_name: meta-llama/Llama-3.2-1B-Instruct
   add_system_message: True
-  do_train: False
+  do_train: True
   do_eval: True
   num_epochs: 2
   save_model_path: ./models/wiba/
@@ -38,3 +45,6 @@ wiba:
   classification_method: head
   generation_method: beam
   batch_size: 1
+  quantization: None
+  grad_accum_steps: 8
+  learning_rate: 1e-4
