@@ -1,4 +1,4 @@
-device_id: 1
+device_map: 'auto'
 hf_token: <replace-with-your-token>
 
 data:
