@@ -51,6 +51,14 @@ export STANCE_AUTH_URL_PATH=<your-auth-url/login>
 docker compose -f ./app/compose.yaml up
 ```
 
+## To train new finetuned LLM models
+
+Rename `./config/config_default.yaml` to `./config/config.yaml` and set the parameters in the file.
+Run:
+```
+python ./experiments/scripts/train_models.py
+```
+
 ## To reproduce experimental results
 Rename `./config/config_default.yaml` to `./config/config.yaml` and set the parameters in the file.
 Run:
