@@ -55,6 +55,8 @@ def save_predictions(predictions: List[Any], df: pd.DataFrame, save_path: str) -
 
 def print_metrics(metrics: Dict[str, float]) -> None:
     for metric, value in metrics.items():
+        if metric in ['accuracy', 'f1', 'precision', 'recall', 'bertscore_f1', 'bertscore_p', 'bertscore_r', 'bleu_f1', 'bleu_p', 'bleu_r']:
+            value = round(value, 3)
         print(f"{metric}: {value}")
 
 def get_model_save_path(task, model_path_dir, model_name, dataset_name, output_type):
@@ -619,19 +621,19 @@ class ModelEvaluator:
         num_labels, labels2id = get_labels_2_id(self.task)
         id_2_label = {v: k for k, v in labels2id.items()}
 
-        df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
-        for key, label_df in df.partition_by('reference', as_dict=True).items():
-            label_id = key[0]
-            label = id_2_label[label_id]
-            l_predictions = label_df['prediction'].to_numpy()
-            l_references = label_df['reference'].to_numpy()
+        label_metrics = {
+            'f1': self.metrics['f1'].compute(predictions=predictions, references=references, average=None)['f1'],
+            'precision': self.metrics['precision'].compute(predictions=predictions, references=references, average=None)['precision'],
+            'recall': self.metrics['recall'].compute(predictions=predictions, references=references, average=None)['recall']
+        }
+        for label, label_id in labels2id.items():
             pred_metrics[label] = {
-                'accuracy': self.metrics['accuracy'].compute(predictions=l_predictions, references=l_references)['accuracy'],
-                'f1_macro': self.metrics['f1'].compute(predictions=l_predictions, references=l_references, average='macro')['f1'],
-                'precision': self.metrics['precision'].compute(predictions=l_predictions, references=l_references, average='macro')['precision'],
-                'recall': self.metrics['recall'].compute(predictions=l_predictions, references=l_references, average='macro')['recall']
+                'f1': float(label_metrics['f1'][label_id]),
+                'precision': float(label_metrics['precision'][label_id]),
+                'recall': float(label_metrics['recall'][label_id])
             }
 
+        df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
         for key, dataset_df in df.partition_by('dataset', as_dict=True).items():
             dataset = key[0]
             d_predictions = dataset_df['prediction'].to_numpy()
@@ -643,16 +645,16 @@ class ModelEvaluator:
                 'recall': self.metrics['recall'].compute(predictions=d_predictions, references=d_references, average='macro')['recall']
             }
 
-            for l_key, label_df in dataset_df.partition_by('reference', as_dict=True).items():
-                label_id = l_key[0]
-                label = id_2_label[label_id]
-                dl_predictions = label_df['prediction'].to_numpy()
-                dl_references = label_df['reference'].to_numpy()
+            label_metrics = {
+                'f1': self.metrics['f1'].compute(predictions=d_predictions, references=d_references, average=None)['f1'],
+                'precision': self.metrics['precision'].compute(predictions=d_predictions, references=d_references, average=None)['precision'],
+                'recall': self.metrics['recall'].compute(predictions=d_predictions, references=d_references, average=None)['recall']
+            }
+            for label, label_id in labels2id.items():
                 pred_metrics[dataset][label] = {
-                    'accuracy': self.metrics['accuracy'].compute(predictions=dl_predictions, references=dl_references)['accuracy'],
-                    'f1_macro': self.metrics['f1'].compute(predictions=dl_predictions, references=dl_references, average='macro')['f1'],
-                    'precision': self.metrics['precision'].compute(predictions=dl_predictions, references=dl_references, average='macro')['precision'],
-                    'recall': self.metrics['recall'].compute(predictions=dl_predictions, references=dl_references, average='macro')['recall']
+                    'f1': float(label_metrics['f1'][label_id]),
+                    'precision': float(label_metrics['precision'][label_id]),
+                    'recall': float(label_metrics['recall'][label_id])
                 }
 
         return pred_metrics
