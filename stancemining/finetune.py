@@ -237,6 +237,28 @@ def deactivate_neftune(model, accelerator, neftune_hook_handle):
     neftune_hook_handle.remove()
     del embeddings.neftune_noise_alpha, unwrapped_model
 
+def get_labels_2_id(task: str):
+    if task == 'stance-classification':
+        num_labels = 3
+        labels2id = STANCE_LABELS_2_ID
+    elif task == 'argument-classification':
+        num_labels = 2
+        labels2id = {'Argumentative': 1, 'Non-Argumentative': 0}
+    elif task == 'claim-entailment-3way':
+        num_labels = 3
+        labels2id = CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID
+    elif task == 'claim-entailment-5way':
+        num_labels = 5
+        labels2id = CLAIM_ENTAILMENT_5_WAY_LABELS_2_ID
+    elif task == 'claim-entailment-7way':
+        num_labels = 7
+        labels2id = CLAIM_ENTAILMENT_7_WAY_LABELS_2_ID
+    else:
+        num_labels = None
+        labels2id = None
+    return num_labels, labels2id
+
+
 class ModelConfig:
     model_name: str
     task: str
@@ -283,25 +305,8 @@ class ModelConfig:
         self.attn_implementation = attn_implementation
         self.torch_dtype = torch_dtype
         self.quantization = quantization
-        if task == 'stance-classification':
-            self.num_labels = 3
-            self.labels2id = STANCE_LABELS_2_ID
-        elif task == 'argument-classification':
-            self.num_labels = 2
-            self.labels2id = {'Argumentative': 1, 'Non-Argumentative': 0}
-        elif task == 'claim-entailment-3way':
-            self.num_labels = 3
-            self.labels2id = CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID
-        elif task == 'claim-entailment-5way':
-            self.num_labels = 5
-            self.labels2id = CLAIM_ENTAILMENT_5_WAY_LABELS_2_ID
-        elif task == 'claim-entailment-7way':
-            self.num_labels = 7
-            self.labels2id = CLAIM_ENTAILMENT_7_WAY_LABELS_2_ID
-        else:
-            self.num_labels = None
-            self.labels2id = None
-
+        self.num_labels, self.labels2id = get_labels_2_id(task)
+        
 class ChatTemplateTokenizer:
     def __init__(self, model_config: ModelConfig):
         self.tokenizer = model_config.tokenizer
@@ -611,7 +616,22 @@ class ModelEvaluator:
 
         pred_metrics['confusion_matrix'] = confusion_matrix(references, predictions)
 
+        num_labels, labels2id = get_labels_2_id(self.task)
+        id_2_label = {v: k for k, v in labels2id.items()}
+
         df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
+        for key, label_df in df.partition_by('reference', as_dict=True).items():
+            label_id = key[0]
+            label = id_2_label[label_id]
+            l_predictions = label_df['prediction'].to_numpy()
+            l_references = label_df['reference'].to_numpy()
+            pred_metrics[label] = {
+                'accuracy': self.metrics['accuracy'].compute(predictions=l_predictions, references=l_references)['accuracy'],
+                'f1_macro': self.metrics['f1'].compute(predictions=l_predictions, references=l_references, average='macro')['f1'],
+                'precision': self.metrics['precision'].compute(predictions=l_predictions, references=l_references, average='macro')['precision'],
+                'recall': self.metrics['recall'].compute(predictions=l_predictions, references=l_references, average='macro')['recall']
+            }
+
         for key, dataset_df in df.partition_by('dataset', as_dict=True).items():
             dataset = key[0]
             d_predictions = dataset_df['prediction'].to_numpy()
@@ -622,6 +642,18 @@ class ModelEvaluator:
                 'precision': self.metrics['precision'].compute(predictions=d_predictions, references=d_references, average='macro')['precision'],
                 'recall': self.metrics['recall'].compute(predictions=d_predictions, references=d_references, average='macro')['recall']
             }
+
+            for l_key, label_df in dataset_df.partition_by('reference', as_dict=True).items():
+                label_id = l_key[0]
+                label = id_2_label[label_id]
+                dl_predictions = label_df['prediction'].to_numpy()
+                dl_references = label_df['reference'].to_numpy()
+                pred_metrics[dataset][label] = {
+                    'accuracy': self.metrics['accuracy'].compute(predictions=dl_predictions, references=dl_references)['accuracy'],
+                    'f1_macro': self.metrics['f1'].compute(predictions=dl_predictions, references=dl_references, average='macro')['f1'],
+                    'precision': self.metrics['precision'].compute(predictions=dl_predictions, references=dl_references, average='macro')['precision'],
+                    'recall': self.metrics['recall'].compute(predictions=dl_predictions, references=dl_references, average='macro')['recall']
+                }
 
         return pred_metrics
 

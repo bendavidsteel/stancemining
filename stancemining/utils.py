@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 import subprocess
 from typing import List, Union
 
@@ -462,6 +463,94 @@ def _filter_phrases(target_embeds, similarity_threshold=0.9):
     ]
     return filtered_sublist
 
+class Transcription:
+    def __init__(self, whisper_model, hf_token, inference_engine='whisperx'):
+        try:
+            import whisperx
+            from pyannote.audio import Pipeline
+            from whisperx.audio import SAMPLE_RATE
+        except ImportError:
+            raise ImportError("whisperx and/or pyannote is not installed. Please install them with `pip install whisperx pyannote.audio`.")
+
+        self.sample_rate = SAMPLE_RATE
+
+        device_name = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device_name)
+        compute_type = "float16" # change to "int8" if low on GPU mem (may reduce accuracy)
+        self.inference_engine = inference_engine
+        if self.inference_engine == 'vllm':
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+            import vllm
+            self.model = vllm.LLM(
+                model="openai/whisper-large-v3",
+                max_model_len=448,
+                max_num_seqs=5,
+                limit_mm_per_prompt={"audio": 1}
+            )
+        elif self.inference_engine == 'whisperx':
+            self.model = whisperx.load_model(whisper_model, device_name, compute_type=compute_type)
+        elif self.inference_engine == 'nemo':
+            import nemo.collections.asr as nemo_asr
+            self.model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
+        self.diarize_model = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token).to(device)
+
+    def transcribe(self, audio):
+        result = self.model.transcribe(audio, batch_size=self.batch_size)
+
+        # delete model if low on GPU resources
+        # import gc; gc.collect(); torch.cuda.empty_cache(); del model
+
+        # 2. Align whisper output
+        language = result['language']
+        try:
+            model_a, metadata = whisperx.load_align_model(language_code=language, device=self.device)
+        except ValueError:
+            return result, None, None
+
+        result = whisperx.align(result["segments"], model_a, metadata, audio, self.device, return_char_alignments=False)
+
+        # delete model if low on GPU resources
+        # import gc; gc.collect(); torch.cuda.empty_cache(); del model_a
+
+        # 3. Assign speaker labels
+        # add min/max number of speakers if known
+        audio_data = {
+            'waveform': torch.from_numpy(audio[None, :]),
+            'sample_rate': self.sample_rate
+        }
+        segments, embeddings = self.diarize_model(audio_data, return_embeddings=True)
+        diarize_segments = pl.DataFrame(segments.itertracks(yield_label=True), schema=['segment', 'label', 'speaker'])
+        diarize_segments = diarize_segments.with_columns([
+            pl.col('segment').map_elements(lambda s: s.start, pl.Float64).alias('start'),
+            pl.col('segment').map_elements(lambda s: s.end, pl.Float64).alias('end')
+        ]).to_pandas()
+        
+        result = whisperx.assign_word_speakers(diarize_segments, result)
+        result['language'] = language
+
+        segments = diarize_segments[['label', 'start', 'end', 'speaker']].to_dict(orient='records')
+
+        return result, segments, embeddings
+
+def load_audio_from_video_file(video_path, sample_rate):
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-threads", "0",
+        "-i", video_path,
+        "-f", "s16le",
+        "-ac", "1",
+        "-acodec", "pcm_s16le", 
+        "-ar", str(sample_rate),
+        "-"
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ffmpeg command failed with error: {e.stderr.decode()}") from e
+    audio = np.frombuffer(result.stdout, np.int16).flatten().astype(np.float32) / 32768.0
+    return audio
 
 def get_transcripts_from_video_files(
         video_paths: List[str], 
@@ -492,26 +581,6 @@ def get_transcripts_from_video_files(
         from whisperx.audio import SAMPLE_RATE
     except ImportError:
         raise ImportError("whisperx is not installed. Please install it with `pip install whisperx`.")
-
-    def load_audio_from_video_file(video_path):
-        cmd = [
-            "ffmpeg",
-            "-nostdin",
-            "-threads", "0",
-            "-i", video_path,
-            "-f", "s16le",
-            "-ac", "1",
-            "-acodec", "pcm_s16le", 
-            "-ar", str(SAMPLE_RATE),
-            "-"
-        ]
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"ffmpeg command failed with error: {e.stderr.decode()}") from e
-        audio = np.frombuffer(result.stdout, np.int16).flatten().astype(np.float32) / 32768.0
-        return audio
 
     return _get_transcripts_from_audio(
         video_paths, 
@@ -580,33 +649,15 @@ def _get_transcripts_from_audio(
     ) -> pl.DataFrame:
     import torch
 
-    try:
-        import whisperx
-        from pyannote.audio import Pipeline
-        from whisperx.audio import SAMPLE_RATE
-    except ImportError:
-        raise ImportError("whisperx and/or pyannote is not installed. Please install them with `pip install whisperx pyannote.audio`.")
-
-    device_name = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device_name)
-    compute_type = "float16" # change to "int8" if low on GPU mem (may reduce accuracy)
-    model = whisperx.load_model(whisper_model, device_name, compute_type=compute_type)
-    diarize_model = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token).to(device)
+    transcriber = Transcription(whisper_model, hf_token)
 
     results = []
     for item in tqdm(items, disable=not verbose, desc="Transcribing"):
         try:
             audio = audio_loader(item)
-            result = model.transcribe(audio, batch_size=batch_size)
+            result, segments, embeddings = transcriber.transcribe(audio)
 
-            # delete model if low on GPU resources
-            # import gc; gc.collect(); torch.cuda.empty_cache(); del model
-
-            # 2. Align whisper output
-            language = result['language']
-            try:
-                model_a, metadata = whisperx.load_align_model(language_code=language, device=device)
-            except ValueError:
+            if segments is None:
                 d = {
                     'path': item,
                     'result': result,
@@ -614,31 +665,10 @@ def _get_transcripts_from_audio(
                 results.append(d)
                 continue
 
-            result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
-
-            # delete model if low on GPU resources
-            # import gc; gc.collect(); torch.cuda.empty_cache(); del model_a
-
-            # 3. Assign speaker labels
-            # add min/max number of speakers if known
-            audio_data = {
-                'waveform': torch.from_numpy(audio[None, :]),
-                'sample_rate': SAMPLE_RATE
-            }
-            segments, embeddings = diarize_model(audio_data, return_embeddings=True)
-            diarize_segments = pl.DataFrame(segments.itertracks(yield_label=True), schema=['segment', 'label', 'speaker'])
-            diarize_segments = diarize_segments.with_columns([
-                pl.col('segment').map_elements(lambda s: s.start, pl.Float64).alias('start'),
-                pl.col('segment').map_elements(lambda s: s.end, pl.Float64).alias('end')
-            ]).to_pandas()
-            
-            result = whisperx.assign_word_speakers(diarize_segments, result)
-            result['language'] = language
-
             d = {
                 'path': item,
                 'result': result,
-                'diarize_segments': diarize_segments[['label', 'start', 'end', 'speaker']].to_dict(orient='records'),
+                'diarize_segments': segments,
             }
 
             if save_speaker_embeddings:

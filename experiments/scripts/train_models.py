@@ -63,7 +63,7 @@ def _main(config, args):
         task=args.task,
         classification_method=args.classification_method,
         generation_method=args.generation_method,
-        device_map={"": config.device_id},
+        device_map=config.device_map,
         prompt=load_prompt(args.task, args.prompting_method, args.generation_method),
         parent_prompt=load_parent_prompt(args.task, args.prompting_method),
         context_prompt=load_context_prompt(args.task, args.prompting_method),
