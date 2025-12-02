@@ -26,7 +26,7 @@ import wandb
 import stancemining.datasets
 import stancemining.metrics
 
-CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-3way', 'claim-entailment-5way', 'claim-entailment-7way']
+CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-3way', 'claim-entailment-4way', 'claim-entailment-5way', 'claim-entailment-7way']
 GENERATION_TASKS = ['topic-extraction', 'claim-extraction']
 
 def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
@@ -98,6 +98,8 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
     elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/stancemining/prompt_claim_entailment.txt'
+    elif task == "claim-entailment-4way":
+        file_path = top_dir / 'models/stancemining/prompt_claim_entailment_4_way.txt'
     elif task == "claim-entailment-5way":
         file_path = top_dir / 'models/stancemining/prompt_claim_entailment_5_way.txt'
     elif task == "claim-entailment-7way":
@@ -128,6 +130,8 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
         file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
     elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment.txt'
+    elif task == "claim-entailment-4way":
+        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_4_way.txt'
     elif task == "claim-entailment-5way":
         file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_5_way.txt'
     elif task == "claim-entailment-7way":
@@ -140,7 +144,9 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
 
 def load_context_prompt(task: str, prompting_method: str) -> str:
     top_dir = pathlib.Path(__file__).parent.parent
-    if task == "claim-entailment-5way":
+    if task == 'claim-entailment-4way':
+        file_path = top_dir / 'models/stancemining/prompt_context_claim_entailment_4_way.txt'
+    elif task == "claim-entailment-5way":
         file_path = top_dir / 'models/stancemining/prompt_context_claim_entailment_5_way.txt'
     elif task == "stance-classification":
         file_path = top_dir / 'models/stancemining/prompt_context_stance.txt'
@@ -249,6 +255,9 @@ def get_labels_2_id(task: str):
     elif task == 'claim-entailment-3way':
         num_labels = 3
         labels2id = CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID
+    elif task == 'claim-entailment-4way':
+        num_labels = 4
+        labels2id = CLAIM_ENTAILMENT_4_WAY_LABELS_2_ID
     elif task == 'claim-entailment-5way':
         num_labels = 5
         labels2id = CLAIM_ENTAILMENT_5_WAY_LABELS_2_ID
@@ -414,6 +423,13 @@ CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID = {
     'supporting': 1,
     'refuting': 2,
     'neutral': 0
+}
+
+CLAIM_ENTAILMENT_4_WAY_LABELS_2_ID = {
+    'supporting': 0,
+    'refuting': 1,
+    'discussing': 2,
+    'irrelevant': 3,
 }
 
 CLAIM_ENTAILMENT_5_WAY_LABELS_2_ID = {

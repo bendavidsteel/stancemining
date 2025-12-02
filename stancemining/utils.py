@@ -484,7 +484,7 @@ class Transcription:
             self.model = vllm.LLM(
                 model="openai/whisper-large-v3",
                 max_model_len=448,
-                max_num_seqs=5,
+                max_num_seqs=1,
                 limit_mm_per_prompt={"audio": 1}
             )
         elif self.inference_engine == 'whisperx':

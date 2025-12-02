@@ -361,14 +361,11 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
             .rename({'text': 'Text', 'claim': 'Target', 'stance': 'Stance'})
         
         if task == 'claim-entailment-3way':
-            df = df.with_columns(pl.when(pl.col('leaning').is_in(['Refuting', 'Supporting'])).then(pl.col('leaning')).otherwise(pl.col('Stance')).alias('Stance'))\
-                .with_columns(pl.when(pl.col('Stance').is_in(['Supporting', 'Refuting'])).then(pl.col('Stance')).otherwise(pl.lit('Other')).alias('Stance'))
-            
-            mapping = {
-                'Refuting': 'refuting',
-                'Supporting': 'supporting',
-                'Other': 'neutral'
-            }
+            df = df.with_columns(pl.when(pl.col('Stance').is_in(['Supporting', 'Refuting'])).then(pl.col('Stance')).otherwise(pl.lit('Neutral')).alias('Stance'))
+            mapping = {l: l.lower() for l in df['Stance'].unique()}
+        elif task == 'claim-entailment-4way':
+            df = df.with_columns(pl.when(pl.col('Stance') == 'Querying').then(pl.lit('Discussing')).otherwise(pl.col('Stance')).alias('Stance'))
+            mapping = {l: l.lower() for l in df['Stance'].unique()}
         elif task == 'claim-entailment-5way':
             mapping = {l: l.lower() for l in df['Stance'].unique()}
         elif task == 'claim-entailment-7way':
@@ -388,11 +385,21 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
             df = df.tail(int(0.1 * len(df)))
         df = df.with_columns(pl.lit(kirk_context).alias('Context'))
         df = df.rename({'MainClaims': 'Target', 'stance': 'Stance'})
-        mapping = {
-            'leaning refuting': 'discussing',
-            'leaning supporting': 'discussing',
-            'neutral': 'discussing'
-        }
+        if task == 'claim-entailment-5way':
+            mapping = {
+                'leaning refuting': 'discussing',
+                'leaning supporting': 'discussing',
+                'neutral': 'discussing'
+            }
+        elif task == 'claim-entailment-4way':
+            mapping = {
+                'leaning refuting': 'discussing',
+                'leaning supporting': 'discussing',
+                'neutral': 'discussing',
+                'querying': 'discussing'
+            }
+        else:
+            raise ValueError(f'Unknown task: {task}')
         mapping = {**mapping, **{l: l.lower() for l in df['Stance'].unique() if l not in mapping}}
     else:
         raise ValueError(f'Unknown dataset: {name}')
