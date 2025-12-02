@@ -1,5 +1,6 @@
 import gc
 import logging
+import math
 import os
 import subprocess
 from typing import List, Union
@@ -478,9 +479,19 @@ class Transcription:
         self.device = torch.device(device_name)
         compute_type = "float16" # change to "int8" if low on GPU mem (may reduce accuracy)
         self.inference_engine = inference_engine
+
         if self.inference_engine == 'vllm':
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
             import vllm
+            from vllm.config import SpeechToTextConfig
+            from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
+
+            # Use vLLM's SpeechToTextConfig with default parameters
+            self.asr_config = SpeechToTextConfig()
+
+            # Store reference to vLLM's class for calling methods
+            self._vllm_stt_class = OpenAISpeechToText
+
             self.model = vllm.LLM(
                 model="openai/whisper-large-v3",
                 max_model_len=448,
@@ -492,10 +503,45 @@ class Transcription:
         elif self.inference_engine == 'nemo':
             import nemo.collections.asr as nemo_asr
             self.model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
-        self.diarize_model = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token).to(device)
+        self.diarize_model = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token).to(self.device)
+
+    def _find_split_point(self, wav: np.ndarray, start_idx: int, end_idx: int) -> int:
+        """Delegate to vLLM's split point finding function."""
+        if self.inference_engine == 'vllm':
+            return self._vllm_stt_class._find_split_point(self, wav, start_idx, end_idx)
+        raise NotImplementedError("_find_split_point only available for vllm inference engine")
 
     def transcribe(self, audio):
-        result = self.model.transcribe(audio, batch_size=self.batch_size)
+        if self.inference_engine == 'whisperx':
+            result = self.model.transcribe(audio, batch_size=self.batch_size)
+        elif self.inference_engine == 'vllm':
+            # Calculate audio duration and chunk if necessary
+            duration = len(audio) / self.sample_rate
+            do_split_audio = duration > self.asr_config.max_audio_clip_s
+
+            if do_split_audio:
+                # Use vLLM's chunking function directly by calling as unbound method
+                chunks = self._vllm_stt_class._split_audio(self, audio, int(self.sample_rate))
+                logger.info(f"Split audio of {duration:.1f}s into {len(chunks)} chunks")
+            else:
+                chunks = [audio]
+
+            # Process each chunk
+            all_text = ""
+            for chunk in chunks:
+                # Format audio data as (audio_array, sample_rate) tuple as expected by vLLM
+                outputs = self.model.generate(
+                    {
+                        'prompt': '<|startoftranscript|>',
+                        'multi_modal_data': {'audio': (chunk, self.sample_rate)}
+                    },
+                )
+                # Concatenate text from all chunks
+                all_text += outputs[0].outputs[0].text
+
+            # For now, create a minimal result dict for compatibility
+            # Full parsing of segments/language will be implemented later
+            result = {'text': all_text, 'language': 'en', 'segments': []}
 
         # delete model if low on GPU resources
         # import gc; gc.collect(); torch.cuda.empty_cache(); del model
