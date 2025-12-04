@@ -6,7 +6,9 @@ config
 3*
 =*
 wandb
-models
+models/stancemining
+models/wiba
+models/polar
 .vscode
 data
 

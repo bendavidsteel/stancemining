@@ -84,7 +84,7 @@ def _main(config, args):
     # Initialize components
     trainer = ModelTrainer(model_config, training_config)
     processor = DataProcessor(model_config, data_config)
-    evaluator = ModelEvaluator(model_config.task, labels2id=model_config.labels2id)
+    evaluator = ModelEvaluator(model_config.task)
     
     # Load HF token
     # dotenv.load_dotenv()

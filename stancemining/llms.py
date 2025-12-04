@@ -18,11 +18,33 @@ from stancemining.finetune import (
     get_model_save_path, 
     load_prompt, 
     load_parent_prompt,
-    parse_list_completions,
     to_message_format
 )
 
 logger = logging.getLogger(__name__)
+
+def parse_list_completions(completions):
+    return [re.findall('"(.*?)"', c) for c in completions] 
+
+def parse_answer_from_thinking(completion):
+    return completion.split('</think>')[-1].strip()
+
+def parse_category_completions(completions, task):
+    if task == 'stance-detection':
+        valid_categories = ['in favor', 'against', 'neutral']
+        default = 'neutral'
+    elif task == 'claim-entailment':
+        valid_categories = ['supporting', 'refuting', 'discussing']
+        default = 'discussing'
+    elif task == 'claim-entailment-4way':
+        valid_categories = ['supporting', 'refuting', 'discussing', 'irrelevant']
+        default = 'irrelevant'
+    else:
+        raise ValueError(f"Unknown task for category parsing: {task}")
+    predictions = [re.search('|'.join(valid_categories), c.strip().lower()) for c in completions]
+    predictions = [p.group(0) if p else default for p in predictions]
+    return predictions
+
 
 def prompts_to_conversations(prompts, system_prompt_allowed=True):
     conversations = []
@@ -48,17 +70,18 @@ class BaseLLM:
     def __init__(self, model_name):
         self.model_name = model_name
 
-    def generate(self, prompt, max_new_tokens=100, num_samples=3):
+    def generate(self, prompt, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
         raise NotImplementedError
     
     
 class Transformers(BaseLLM):
-    def __init__(self, model_name, model_kwargs={}, tokenizer_kwargs={}, lazy=False):
+    def __init__(self, model_name, model_kwargs={}, tokenizer_kwargs={}, verbose=False):
         super().__init__(model_name)
         
         self.model_name = model_name
         self.model_kwargs = model_kwargs
         self.tokenizer_kwargs = tokenizer_kwargs
+        self.verbose = verbose
 
         self.load_model()
 
@@ -75,10 +98,11 @@ class Transformers(BaseLLM):
     def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
         conversations = prompts_to_conversations(prompts)
         all_outputs = []
-        if len(conversations) == 1:
-            iterator = conversations
-        else:
+        if self.verbose:
             iterator = tqdm.tqdm(conversations)
+        else:
+            iterator = conversations
+            
         for conversation in iterator:
             inputs = self.tokenizer.apply_chat_template(conversation, return_dict=True, return_tensors='pt', add_generation_prompt=add_generation_prompt, continue_final_message=continue_final_message)
             inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
@@ -103,6 +127,7 @@ class Transformers(BaseLLM):
         torch.cuda.empty_cache()
 
 def load_vllm_model(model_name, model_kwargs, sampling_param_kwargs):
+    os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
     import vllm
     model = None
     while model is None:
@@ -202,6 +227,22 @@ class Anthropic(BaseLLM):
 
         return all_outputs
 
+def get_max_new_tokens(task, model_config):
+    if task in CLASSIFICATION_TASKS and model_config.classification_method == 'generation':
+        if task == 'stance-detection':
+            max_new_tokens = 1
+        elif task == 'claim-entailment':
+            max_new_tokens = 2
+        else:
+            max_new_tokens = 3
+    elif task == 'topic-extraction':
+        max_new_tokens = 30
+    elif task == 'claim-extraction':
+        max_new_tokens = 200
+    else:
+        max_new_tokens = None
+    return max_new_tokens
+
 def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, generate_kwargs={}):
     import vllm
     import vllm.lora.request
@@ -294,14 +335,7 @@ def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, gener
 
     model_kwargs['enable_prefix_caching'] = True
 
-    if task in CLASSIFICATION_TASKS and model_config.classification_method == 'generation':
-        max_new_tokens = 1
-    elif task == 'topic-extraction':
-        max_new_tokens = 30
-    elif task == 'claim-extraction':
-        max_new_tokens = 200
-    else:
-        max_new_tokens = None
+    
 
     # greedy decoding
     sampling_param_kwargs = {

@@ -1,0 +1,6 @@
+For the following text, determine whether the author's stance is supporting, refuting, or neutral with respect to the claim: '{target}'. Consider the language used, any explicit statements of position, the chain of parent texts that the author is replying to, and contextual clues that suggest the author's attitude. Answer only with 'supporting', 'refuting', or 'neutral'.
+
+Parent Document Chain (from oldest to most recent):
+{parent_chain}
+
+Text: '{text}'

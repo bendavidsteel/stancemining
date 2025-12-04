@@ -5,12 +5,12 @@ import stancemining
 def main():
     document_df = pl.from_dicts([
         {
-            'text': "I love the new features of the product, especially the user-friendly interface.",
-            'Targets': ["new features", "user-friendly interface"],
+            'text': "Immigration policies under Trudeau's Liberals has been a disaster for Canada.",
+            'Targets': ["Justin Trudeau is a good prime-minister", "The Liberal party immigration policy is bad"],
         },
         {
-            'text': "The recent update has made the app slower and more buggy. Not happy with it.",
-            'Targets': ["recent update", "app performance"],
+            'text': "I'm all for climate action, but the carbon tax implemented by the government is just too high and is hurting everyday Canadians.",
+            'Targets': ["The carbon tax is too high", "Climate action is necessary"],
         }
     ])
 
@@ -18,7 +18,7 @@ def main():
     # MoE architecture: 30.5B total params, only 3.3B active during inference
     # FP8 quantization allows it to fit in 24GB VRAM with excellent performance
     model = stancemining.StanceMining(
-        model_name='Qwen/Qwen3-30B-A3B-Thinking-2507-FP8',
+        model_name='nvidia/Qwen3-30B-A3B-NVFP4',
         stance_target_type='claims',
         llm_method='prompting',
         model_kwargs={

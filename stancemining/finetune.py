@@ -79,7 +79,7 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
         if prompting_method == 'wiba':
             file_path = top_dir / 'models/wiba/system_message_arg.txt'
         elif prompting_method == 'stancemining':
-            file_path = top_dir / 'models/stancemining/prompt_stance.txt'
+            file_path = top_dir / 'models/prompts/prompt_stance.txt'
         else:
             raise ValueError("Prompting method not found")
     elif task == "topic-extraction":
@@ -87,23 +87,23 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
             file_path = top_dir / 'models/wiba/system_message_cte.txt'
         elif prompting_method == 'stancemining':
             if generation_method == 'beam':
-                file_path = top_dir / 'models/stancemining/prompt_stance_target.txt'
+                file_path = top_dir / 'models/prompts/prompt_stance_target.txt'
             elif generation_method == 'list':
-                file_path = top_dir / 'models/stancemining/prompt_stance_target_list.txt'
+                file_path = top_dir / 'models/prompts/prompt_stance_target_list.txt'
             else:
                 raise ValueError("Generation method not found")
         else:
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
-        file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
+        file_path = top_dir / 'models/prompts/prompt_claim_extraction.txt'
     elif task == "claim-entailment-3way":
-        file_path = top_dir / 'models/stancemining/prompt_claim_entailment.txt'
+        file_path = top_dir / 'models/prompts/prompt_claim_entailment.txt'
     elif task == "claim-entailment-4way":
-        file_path = top_dir / 'models/stancemining/prompt_claim_entailment_4_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_claim_entailment_4_way.txt'
     elif task == "claim-entailment-5way":
-        file_path = top_dir / 'models/stancemining/prompt_claim_entailment_5_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_claim_entailment_5_way.txt'
     elif task == "claim-entailment-7way":
-        file_path = top_dir / 'models/stancemining/prompt_claim_entailment_7_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_claim_entailment_7_way.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -116,26 +116,26 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
         if prompting_method == 'wiba':
             return ''
         elif prompting_method == 'stancemining':
-            file_path = top_dir / 'models/stancemining/prompt_parent_stance.txt'
+            file_path = top_dir / 'models/prompts/prompt_parent_stance.txt'
         else:
             raise ValueError("Prompting method not found")
     elif task == "topic-extraction":
         if prompting_method == 'wiba':
             return ''
         elif prompting_method == 'stancemining':
-            file_path = top_dir / 'models/stancemining/prompt_parent_stance_target.txt'
+            file_path = top_dir / 'models/prompts/prompt_parent_stance_target.txt'
         else:
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
-        file_path = top_dir / 'models/stancemining/prompt_claim_extraction.txt'
+        file_path = top_dir / 'models/prompts/prompt_claim_extraction.txt'
     elif task == "claim-entailment-3way":
-        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment.txt'
+        file_path = top_dir / 'models/prompts/prompt_parent_claim_entailment.txt'
     elif task == "claim-entailment-4way":
-        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_4_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_parent_claim_entailment_4_way.txt'
     elif task == "claim-entailment-5way":
-        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_5_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_parent_claim_entailment_5_way.txt'
     elif task == "claim-entailment-7way":
-        file_path = top_dir / 'models/stancemining/prompt_parent_claim_entailment_7_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_parent_claim_entailment_7_way.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -145,11 +145,11 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
 def load_context_prompt(task: str, prompting_method: str) -> str:
     top_dir = pathlib.Path(__file__).parent.parent
     if task == 'claim-entailment-4way':
-        file_path = top_dir / 'models/stancemining/prompt_context_claim_entailment_4_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_context_claim_entailment_4_way.txt'
     elif task == "claim-entailment-5way":
-        file_path = top_dir / 'models/stancemining/prompt_context_claim_entailment_5_way.txt'
+        file_path = top_dir / 'models/prompts/prompt_context_claim_entailment_5_way.txt'
     elif task == "stance-classification":
-        file_path = top_dir / 'models/stancemining/prompt_context_stance.txt'
+        file_path = top_dir / 'models/prompts/prompt_context_stance.txt'
     else:
         raise ValueError("Task not found")
     with open(file_path, 'r') as file:
@@ -169,9 +169,13 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
             context = examples['context'][i]
         else:
             context = None
+        kwargs = {
+            'target': target,
+            'text': text,
+        }
         if context:
-            prompt = context_prompt_template.format(target=target, context=context, text=text)
-            prompts.append(prompt)
+            kwargs['context'] = context
+            prompt_template = context_prompt_template
         elif parenttexts:
             parent_chain = []
             for i, p_text in enumerate(parenttexts):
@@ -181,11 +185,16 @@ def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str,
                     parent_chain.append(f"{i+1}. [Reply to {i}]: '{p_text}'")
 
             parent_chain = '\n'.join(parent_chain)
-            prompt = parent_prompt_template.format(target=target, parent_chain=parent_chain, text=text)
-            prompts.append(prompt)
+            kwargs['parent_chain'] = parent_chain
+            prompt_template = parent_prompt_template
+
+        if isinstance(prompt_template, str):
+            prompt = prompt_template.format(**kwargs)
+        elif isinstance(prompt_template, list):
+            prompt = [{k: v.format(**kwargs) for k, v in p.items()} for p in prompt_template]
         else:
-            prompt = prompt_template.format(target=target, text=text)
-            prompts.append(prompt)
+            raise ValueError("Prompt template must be str or list")
+        prompts.append(prompt)
     return prompts
 
 def convert_list_to_quoted_str(topic):
@@ -201,9 +210,9 @@ def stance_target_examples_to_prompt(prompt_template: str, examples):
         prompts.append(prompt)
     return prompts
 
-def to_message_format(text, label=None):
+def to_message_format(text, label=None, system_message="You are a helpful assistant."):
     messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "system", "content": system_message},
         {"role": "user", "content": text},
     ]
     if label is not None:
@@ -334,9 +343,9 @@ class ChatTemplateTokenizer:
     def create_input_sequence_for_generation(self, sample):
         if self.tokenizer.chat_template is not None:
             if isinstance(sample['text'], str):
-                messages = to_message_format(sample['text'], None)
+                messages = to_message_format(sample['text'])
             elif isinstance(sample['text'], list):
-                messages = [to_message_format(text, None) for text in sample['text']]
+                messages = [to_message_format(text) for text in sample['text']]
             inputs = self.tokenizer.apply_chat_template(
                 messages, 
                 add_generation_prompt=True,
@@ -592,9 +601,9 @@ def _evaluate_generation_set(predictions, references):
     }
 
 class ModelEvaluator:
-    def __init__(self, task, labels2id=None):
+    def __init__(self, task):
         self.task = task
-        self.labels2id = labels2id
+        _, self.labels2id = get_labels_2_id(task)
         self.metrics = self._setup_metrics()
     
     def _setup_metrics(self) -> Dict[str, Any]:
@@ -1046,9 +1055,6 @@ def setup_model_and_tokenizer(model_config: ModelConfig, model_kwargs={}, model_
     tokenizer.pad_token = tokenizer.eos_token
         
     return model, tokenizer
-
-def parse_list_completions(completions):
-    return [re.findall('"(.*?)"', c) for c in completions] 
 
 def get_prediction(inputs, task, model, tokenizer, classification_method, generation_method, generate_kwargs={}):
     """Get model predictions"""

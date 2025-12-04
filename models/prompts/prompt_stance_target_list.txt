@@ -1,0 +1,6 @@
+Given a piece of text, identify the stance targets - the noun phrases that the text expresses a stance on. The stance targets should be noun phrases that can be agreed or disagreed with.
+Return only a quoted, comma-separated list of stance targets, like so: "target1", "target2"
+
+Text: '{text}'
+
+Stance targets:

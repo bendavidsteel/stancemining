@@ -1,6 +1,6 @@
 import tqdm
 
-from .llms import BaseLLM
+from .llms import BaseLLM, get_max_new_tokens, parse_category_completions
 
 NOUN_PHRASE_AGGREGATE_PROMPT = [
     "You are an expert at analyzing and categorizing topics.",
@@ -242,6 +242,198 @@ CLAIM_AGGREGATE_PROMPT = [
     Generalized target: """
 ]
 
+CLAIM_STANCE_DETECTION_4_LABELS = ["""You are a specialist in claim entailment. Using instructions determine whether the claim can be logically inferred from the text.""",
+"""Classify the text's relationship to the claim. CRITICAL: Entities in the text must match those in the claim for supporting/refuting classifications.
+
+Categories:
+
+supporting: Text directly confirms the claim or states something more specific that logically entails it. No inference needed.
+
+refuting: Text directly contradicts or disproves the claim.
+
+discussing: Text provides relevant context but doesn't confirm/refute the claim's specific proposition. Common with entity mismatches.
+
+irrelevant: No meaningful connection to the claim.
+
+Entity Rules:
+- Specific entities in claims (e.g., "left-wing individuals") must be present in text
+- Generic terms ("people", "someone") don't match specific entity claims
+- Don't infer entity attributes absent from the text
+
+Examples:
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Some people celebrated Charlie Kirk's death on social media"
+Classification: Supporting
+Reasoning: Text explicitly states "celebrating his execution" and "cheering when it happened".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Charlie Kirk's death was met with universal mourning"
+Classification: Refuting
+Reasoning: Text shows people "celebrating" and "cheering," directly contradicting "universal mourning".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Left-wing individuals celebrated Kirk's death"
+Classification: Discussing
+Reasoning: Text confirms celebrations but doesn't identify celebrants' political affiliation. Entity mismatch.
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Vaccine mandates increased political polarization"
+Classification: Irrelevant
+Reasoning: Text discusses Kirk's death, unrelated to vaccines.
+
+Text: "{text}"
+Claim: "{target}"
+Classification: """
+]
+
+CLAIM_CONTEXT_STANCE_DETECTION_4_LABELS = [
+    {
+        'role': 'system',
+        'content': """You are a specialist in claim entailment. Using the context and instructions determine whether the claim can be logically inferred from the text.""",
+    },
+    {
+        'role': 'user',
+        'content': """Classify the text's relationship to the claim. CRITICAL: Entities in the text must match those in the claim for supporting/refuting classifications.
+
+Categories:
+
+supporting: Text directly confirms the claim or states something more specific that logically entails it. No inference needed.
+
+refuting: Text directly contradicts or disproves the claim.
+
+discussing: Text provides relevant context but doesn't confirm/refute the claim's specific proposition. Common with entity mismatches.
+
+irrelevant: No meaningful connection to the claim.
+
+Entity Rules:
+- Specific entities in claims (e.g., "left-wing individuals") must be present in text
+- Generic terms ("people", "someone") don't match specific entity claims
+- Don't infer entity attributes absent from the text
+
+Contextual information:
+{context}
+
+Examples:
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Some people celebrated Charlie Kirk's death on social media"
+Classification: Supporting
+Reasoning: Text explicitly states "celebrating his execution" and "cheering when it happened".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Charlie Kirk's death was met with universal mourning"
+Classification: Refuting
+Reasoning: Text shows people "celebrating" and "cheering," directly contradicting "universal mourning".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Left-wing individuals celebrated Kirk's death"
+Classification: Discussing
+Reasoning: Text confirms celebrations but doesn't identify celebrants' political affiliation. Entity mismatch.
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Vaccine mandates increased political polarization"
+Classification: Irrelevant
+Reasoning: Text discusses Kirk's death, unrelated to vaccines.
+
+Text: "{text}"
+Claim: "{target}\""""
+    },
+    {
+        'role': 'assistant',
+        'content': """Classification: """
+    }
+]
+
+NOUN_PHRASE_STANCE_DETECTION = [
+    {
+        'role': 'system',
+        'content': """You are an expert at analyzing stances in documents."""
+    },
+    {
+        'role': 'user',
+        'content': """Your task is to determine the stance expressed towards a specific target in the given document. Consider both explicit and implicit indicators of stance.
+
+Instructions:
+1. Carefully read the document while focusing on content related to the provided stance target.
+2. Classify the stance as one of:
+- FAVOR: Supporting, promoting, or agreeing with the target
+- AGAINST: Opposing, criticizing, or disagreeing with the target
+- NEUTRAL: Presenting balanced or objective information about the target
+
+Input:
+Document: [text]
+Stance target: [noun phrase]
+
+Output format:
+Stance: [FAVOR/AGAINST/NEUTRAL]
+Reasoning: [Brief explanation citing specific evidence from the text]
+
+Examples:
+
+Input:
+Document: "Research shows that diverse communities have higher rates of innovation. Cities with more international residents see increased patent filings and startups."
+Stance target: immigration""",
+    },
+    {
+        'role': 'assistant',
+        'content': """Output:
+Stance: FAVOR
+Reasoning: Text implicitly supports immigration by highlighting its positive economic impacts through innovation and business creation.
+"""
+    },
+    {
+        'role': 'user',
+        'content': """Input:
+Document: "Tech companies want self-governance of social media, while lawmakers push for oversight. Recent polls show the public remains divided."
+Stance target: social media regulation"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Output:
+Stance: NEUTRAL
+Reasoning: Presents both industry and government perspectives without favoring either side.
+"""
+    },
+    {
+        'role': 'user',
+        'content': """Input:
+Document: "Standardized test scores correlate more with family income than academic ability, while countries using alternative assessments report better outcomes."
+Stance target: standardized testing"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Output:
+Stance: AGAINST
+Reasoning: Implies tests are flawed by linking them to wealth rather than ability and noting superior alternatives.
+"""
+    },
+    {
+        'role': 'user',
+        'content': """Input:
+Document: "Some remote workers report higher productivity, others struggle with collaboration. Companies are testing hybrid models."
+Stance target: remote work"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Output:
+Stance: NEUTRAL
+Reasoning: Balances positive and negative aspects of remote work without taking a position.
+"""
+    },
+    {
+        'role': 'user',
+        'content': """---
+Document: "{text}"
+Stance target: {target}"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Output:
+Stance: """
+    }
+]
+
 def parse_generated_targets(outputs):
     outputs = [o.replace('stance', '').strip() for o in outputs if o != 'none' and o is not None and o != '']
     outputs = list(set(outputs))
@@ -376,72 +568,34 @@ def ask_llm_multi_doc_targets(generator, docs):
     outputs = parse_generated_targets(outputs)
     return outputs
 
-def ask_llm_zero_shot_stance(generator, docs, stance_targets, verbose=False):
-    all_outputs = []
-    if verbose:
-        iterator = tqdm.tqdm(zip(docs, stance_targets), total=len(docs))
+def ask_llm_zero_shot_stance(generator: BaseLLM, docs, stance_targets, stance_target_type='noun-phrases', verbose=False):
+    prompts = []
+    if stance_target_type == 'noun-phrases':
+        prompt_template = NOUN_PHRASE_STANCE_DETECTION
     else:
-        iterator = zip(docs, stance_targets)
-    for doc, stance_target in iterator:
+        prompt_template = CLAIM_STANCE_DETECTION_4_LABELS
+    for doc, stance_target in zip(docs, stance_targets):
         # Stance Classification Prompt
-        prompt = [
-            "You are an expert at analyzing stances in documents.",
-            """Your task is to determine the stance expressed towards a specific target in the given document. Consider both explicit and implicit indicators of stance.
+        prompt = [p.format(doc=doc, stance_target=stance_target) for p in prompt_template]
+        prompts.append(prompt)
 
-            Instructions:
-            1. Carefully read the document while focusing on content related to the provided stance target.
-            2. Classify the stance as one of:
-            - FAVOR: Supporting, promoting, or agreeing with the target
-            - AGAINST: Opposing, criticizing, or disagreeing with the target
-            - NEUTRAL: Presenting balanced or objective information about the target
+    max_new_tokens = get_max_new_tokens()
 
-            Input:
-            Document: [text]
-            Stance target: [noun phrase]
+    if prompts[0][-1]['role'] == 'assistant':
+        add_generation_prompt = False
+        continue_final_message = True
+    else:
+        add_generation_prompt = True
+        continue_final_message = False
 
-            Output format:
-            Stance: [FAVOR/AGAINST/NEUTRAL]
-            Reasoning: [Brief explanation citing specific evidence from the text]
-
-            Examples:
-
-            Input:
-            Document: "Research shows that diverse communities have higher rates of innovation. Cities with more international residents see increased patent filings and startups."
-            Stance target: immigration""",
-            """Output:
-            Stance: FAVOR
-            Reasoning: Text implicitly supports immigration by highlighting its positive economic impacts through innovation and business creation.
-            """,
-            """Input:
-            Document: "Tech companies want self-governance of social media, while lawmakers push for oversight. Recent polls show the public remains divided."
-            Stance target: social media regulation""",
-            """Output:
-            Stance: NEUTRAL
-            Reasoning: Presents both industry and government perspectives without favoring either side.
-            """,
-            """Input:
-            Document: "Standardized test scores correlate more with family income than academic ability, while countries using alternative assessments report better outcomes."
-            Stance target: standardized testing""",
-            """Output:
-            Stance: AGAINST
-            Reasoning: Implies tests are flawed by linking them to wealth rather than ability and noting superior alternatives.
-            """,
-            """Input:
-            Document: "Some remote workers report higher productivity, others struggle with collaboration. Companies are testing hybrid models."
-            Stance target: remote work""",
-            """Output:
-            Stance: NEUTRAL
-            Reasoning: Balances positive and negative aspects of remote work without taking a position.
-            """,
-            f"""---
-            Document: "{doc}"
-            Stance target: {stance_target}""",
-            """Output:
-            Stance: """
-        ]
-        outputs = generator.generate([prompt], max_new_tokens=2, num_samples=1, add_generation_prompt=False, continue_final_message=True)[0]
-        outputs = [o.split('Reasoning:')[0].split('\n')[0].strip() for o in outputs]
-        all_outputs.append(outputs[0])
+    outputs = generator.generate(
+        prompts, 
+        max_new_tokens=max_new_tokens, 
+        num_samples=1, 
+        add_generation_prompt=add_generation_prompt, 
+        continue_final_message=continue_final_message
+    )
+    all_outputs = parse_category_completions(outputs)
     return all_outputs
 
 

@@ -6,7 +6,7 @@ import hydra
 import torch
 import tqdm
 
-from train_models import _main
+from experiments.scripts.train_model import _main
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(config):

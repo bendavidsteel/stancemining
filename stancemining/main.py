@@ -393,7 +393,7 @@ class StanceMining:
         if self.llm_method == 'prompting':
             llm = self._get_llm()
             assert parent_docs is None, "Parent documents not supported for prompting stance detection"
-            return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets, verbose=self.verbose)
+            return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets, stance_target_type=self.stance_target_type, verbose=self.verbose)
         elif self.llm_method == 'finetuned':
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentTexts': parent_docs})
             if isinstance(data.schema['ParentTexts'], pl.String):

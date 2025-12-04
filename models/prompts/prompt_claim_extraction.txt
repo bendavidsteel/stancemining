@@ -1,0 +1,6 @@
+Given a piece of text, identify the atomic claims that they make.
+Return only a quoted, comma-separated list of claims, like so: "claim1", "claim2"
+
+Text: '{text}'
+
+Claims:

@@ -1,0 +1,5 @@
+Given a piece of text, identify the primary stance target - the noun phrase that the text expresses a stance on. The stance target should be a noun phrase that can be agreed or disagreed with.
+
+Text: '{text}'
+
+Stance target: 
