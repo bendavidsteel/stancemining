@@ -177,9 +177,6 @@ def main(config):
         **llm_kwargs
     )
 
-    prompts = prompts[:100]
-    test_dataset = test_dataset.take(100)
-
     if model_config.task in GENERATION_TASKS or (model_config.task in CLASSIFICATION_TASKS and model_config.classification_method == 'generation'):
         outputs = llm.chat(messages=prompts, **generate_kwargs, use_tqdm=True)
         predictions = [o.outputs[0].text for o in outputs]
