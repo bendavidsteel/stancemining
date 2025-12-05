@@ -242,8 +242,14 @@ CLAIM_AGGREGATE_PROMPT = [
     Generalized target: """
 ]
 
-CLAIM_STANCE_DETECTION_4_LABELS = ["""You are a specialist in claim entailment. Using instructions determine whether the claim can be logically inferred from the text.""",
-"""Classify the text's relationship to the claim. CRITICAL: Entities in the text must match those in the claim for supporting/refuting classifications.
+CLAIM_STANCE_DETECTION_4_LABELS = [
+    {
+        'role': 'system',
+        'content': """You are a specialist in stance detection."""
+    },
+    {
+        'role': 'user',
+        'content': """Using the instructions determine the stance of the author of the text on the claim. CRITICAL: Entities in the text must match those in the claim for supporting/refuting classifications.
 
 Categories:
 
@@ -284,17 +290,81 @@ Reasoning: Text discusses Kirk's death, unrelated to vaccines.
 
 Text: "{text}"
 Claim: "{target}"
-Classification: """
+"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Classification: """
+    }
+]
+
+CLAIM_PARENT_STANCE_DETECTION_4_LABELS = [
+    {
+        'role': 'system',
+        'content': """You are a specialist in stance detection."""
+    },
+    {
+        'role': 'user',
+        'content': """Using the instructions and the parent texts provided, determine the stance of the author of the text on the claim. CRITICAL: Entities in the text must match those in the claim for supporting/refuting classifications.
+
+Categories:
+
+supporting: Text directly confirms the claim or states something more specific that logically entails it. No inference needed.
+
+refuting: Text directly contradicts or disproves the claim.
+
+discussing: Text provides relevant context but doesn't confirm/refute the claim's specific proposition. Common with entity mismatches.
+
+irrelevant: No meaningful connection to the claim.
+
+Entity Rules:
+- Specific entities in claims (e.g., "left-wing individuals") must be present in text
+- Generic terms ("people", "someone") don't match specific entity claims
+- Don't infer entity attributes absent from the text
+
+Parent Text Chain (from oldest to most recent):
+{parent_chain}
+
+Examples:
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Some people celebrated Charlie Kirk's death on social media"
+Classification: Supporting
+Reasoning: Text explicitly states "celebrating his execution" and "cheering when it happened".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Charlie Kirk's death was met with universal mourning"
+Classification: Refuting
+Reasoning: Text shows people "celebrating" and "cheering," directly contradicting "universal mourning".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Left-wing individuals celebrated Kirk's death"
+Classification: Discussing
+Reasoning: Text confirms celebrations but doesn't identify celebrants' political affiliation. Entity mismatch.
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Vaccine mandates increased political polarization"
+Classification: Irrelevant
+Reasoning: Text discusses Kirk's death, unrelated to vaccines.
+
+Text: "{text}"
+Claim: "{target}"
+"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Classification: """
+    }
 ]
 
 CLAIM_CONTEXT_STANCE_DETECTION_4_LABELS = [
     {
         'role': 'system',
-        'content': """You are a specialist in claim entailment. Using the context and instructions determine whether the claim can be logically inferred from the text.""",
+        'content': """You are a specialist in stance detection.""",
     },
     {
         'role': 'user',
-        'content': """Classify the text's relationship to the claim. CRITICAL: Entities in the text must match those in the claim for supporting/refuting classifications.
+        'content': """Using the instructions and the provided context, determine the stance of the author of the text on the claim. CRITICAL: Entities in the text must match those in the claim for supporting/refuting classifications.
 
 Categories:
 

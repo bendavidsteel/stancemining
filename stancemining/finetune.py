@@ -156,44 +156,50 @@ def load_context_prompt(task: str, prompting_method: str) -> str:
         system_message = file.read()
     return system_message
 
+def stance_example_to_prompt(examples, i, prompt_template: str, parent_prompt_template: str, context_prompt_template: str):
+    text = examples['text'][i]
+    target = examples['topic'][i]
+    if 'parenttexts' in examples:
+        parenttexts = examples['parenttexts'][i]
+    else:
+        parenttexts = None
+    if 'context' in examples:
+        context = examples['context'][i]
+    else:
+        context = None
+    kwargs = {
+        'target': target,
+        'text': text,
+    }
+    if context:
+        kwargs['context'] = context
+        prompt_template = context_prompt_template
+    elif len(parenttexts) > 0:
+        parent_chain = []
+        for i, p_text in enumerate(parenttexts):
+            if i == 0:
+                parent_chain.append(f"1. [Original Post]: '{p_text}'")
+            else:
+                parent_chain.append(f"{i+1}. [Reply to {i}]: '{p_text}'")
+
+        parent_chain = '\n'.join(parent_chain)
+        kwargs['parent_chain'] = parent_chain
+        prompt_template = parent_prompt_template
+    else:
+        prompt_template = prompt_template
+
+    if isinstance(prompt_template, str):
+        prompt = prompt_template.format(**kwargs)
+    elif isinstance(prompt_template, list):
+        prompt = [{k: v.format(**kwargs) for k, v in p.items()} for p in prompt_template]
+    else:
+        raise ValueError("Prompt template must be str or list")
+    return prompt
+
 def stance_examples_to_prompt(prompt_template: str, parent_prompt_template: str, context_prompt_template: str, examples):
     prompts = []
     for i in range(len(examples['text'])):
-        text = examples['text'][i]
-        target = examples['topic'][i]
-        if 'parenttexts' in examples:
-            parenttexts = examples['parenttexts'][i]
-        else:
-            parenttexts = None
-        if 'context' in examples:
-            context = examples['context'][i]
-        else:
-            context = None
-        kwargs = {
-            'target': target,
-            'text': text,
-        }
-        if context:
-            kwargs['context'] = context
-            prompt_template = context_prompt_template
-        elif parenttexts:
-            parent_chain = []
-            for i, p_text in enumerate(parenttexts):
-                if i == 0:
-                    parent_chain.append(f"1. [Original Post]: '{p_text}'")
-                else:
-                    parent_chain.append(f"{i+1}. [Reply to {i}]: '{p_text}'")
-
-            parent_chain = '\n'.join(parent_chain)
-            kwargs['parent_chain'] = parent_chain
-            prompt_template = parent_prompt_template
-
-        if isinstance(prompt_template, str):
-            prompt = prompt_template.format(**kwargs)
-        elif isinstance(prompt_template, list):
-            prompt = [{k: v.format(**kwargs) for k, v in p.items()} for p in prompt_template]
-        else:
-            raise ValueError("Prompt template must be str or list")
+        prompt = stance_example_to_prompt(examples, i, prompt_template, parent_prompt_template, context_prompt_template)
         prompts.append(prompt)
     return prompts
 
@@ -342,10 +348,13 @@ class ChatTemplateTokenizer:
 
     def create_input_sequence_for_generation(self, sample):
         if self.tokenizer.chat_template is not None:
-            if isinstance(sample['text'], str):
-                messages = to_message_format(sample['text'])
-            elif isinstance(sample['text'], list):
-                messages = [to_message_format(text) for text in sample['text']]
+            if set(sample['text'][0][0].keys()) == {'role', 'content'}:
+                messages = sample['text']
+            else:
+                if isinstance(sample['text'], str):
+                    messages = to_message_format(sample['text'])
+                elif isinstance(sample['text'], list):
+                    messages = [to_message_format(text) for text in sample['text']]
             inputs = self.tokenizer.apply_chat_template(
                 messages, 
                 add_generation_prompt=True,

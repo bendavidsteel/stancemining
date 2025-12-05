@@ -7,6 +7,7 @@ import numpy as np
 import omegaconf
 import polars as pl
 import torch
+import transformers
 import vllm
 import vllm.lora.request
 import wandb
@@ -65,12 +66,13 @@ def main(config):
         if args.task == 'stance-classification':
             prompt = stancemining.prompting.NOUN_PHRASE_STANCE_DETECTION
             context_prompt = None
+            parent_prompt = None
         elif args.task == 'claim-entailment-4way':
             prompt = stancemining.prompting.CLAIM_STANCE_DETECTION_4_LABELS
             context_prompt = stancemining.prompting.CLAIM_CONTEXT_STANCE_DETECTION_4_LABELS
+            parent_prompt = stancemining.prompting.CLAIM_PARENT_STANCE_DETECTION_4_LABELS
         else:
             raise ValueError(f"In-context prompting not supported for task {args.task}")
-        parent_prompt = None
     else:
         prompt = load_prompt(args.task, args.prompting_method, args.generation_method)
         parent_prompt = load_parent_prompt(args.task, args.prompting_method)
@@ -88,6 +90,7 @@ def main(config):
         parent_prompt=parent_prompt,
         context_prompt=context_prompt,
         attn_implementation=args.attn_implementation,
+        tokenizer=transformers.AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     )
     
     data_config = DataConfig(
@@ -109,9 +112,27 @@ def main(config):
         model_save_path = get_model_save_path(args.task, args.save_model_path, args.model_name, data_config.dataset_name, output_type)
 
     test_data = load_test_data(data_config.dataset_name, model_config.task, model_config.generation_method)
-
     # drop long text
-    test_data = test_data.with_columns(pl.col('Text').str.len_chars().alias('text_len')).filter(pl.col('text_len') < 30000).drop('text_len')
+    max_model_len = 8192
+
+    test_data = test_data.with_columns([
+            pl.col('Text').str.len_chars().alias('text_len'),
+            pl.col('Target').str.len_chars().alias('target_len'),
+            pl.col('ParentTexts').list.eval(pl.col('').str.len_chars()).list.sum().alias('parent_text_len')
+        ])\
+        .with_columns((pl.col('text_len') + pl.col('target_len') + pl.col('parent_text_len')).alias('total_len'))
+
+    if test_data.filter(pl.col('total_len') >= max_model_len).height > 0:
+        print(f"Warning: Dropping {test_data.filter(pl.col('total_len') >= max_model_len).height} test samples exceeding max model length of {max_model_len} tokens.")
+        test_data = test_data.filter(pl.col('total_len') < max_model_len)
+
+    longest_item = test_data.sort('total_len', descending=True)\
+        .slice(0, 1)
+    longest_dataset = processor.process_data(longest_item, model_config.classification_method, model_config.generation_method, train=False, tokenize=False)
+    longest_prompt = model_config.tokenizer.apply_chat_template(longest_dataset['text'][0])
+    longest_seq_len = len(longest_prompt)
+
+    test_data = test_data.drop(['text_len', 'target_len', 'parent_text_len', 'total_len'])
 
     test_dataset = processor.process_data(test_data, model_config.classification_method, model_config.generation_method, train=False, tokenize=False)
     
@@ -122,9 +143,10 @@ def main(config):
 
     llm_kwargs = {
         'gpu_memory_utilization': 0.90,
-        'max_model_len': 8192,
+        'max_model_len': max_model_len,
         'enable_prefix_caching': True,
     }
+    assert longest_seq_len < llm_kwargs['max_model_len'], f"Longest sequence length {longest_seq_len} exceeds model max length {llm_kwargs['max_model_len']}"
     generate_kwargs = {}
     if model_config.task in GENERATION_TASKS or (model_config.task in CLASSIFICATION_TASKS and model_config.classification_method == 'generation'):
         llm_kwargs['task'] = 'generate'
@@ -164,12 +186,15 @@ def main(config):
 
     generate_kwargs['chat_template_kwargs'] = { 'enable_thinking': config.test.enable_thinking }
 
-    max_new_tokens = get_max_new_tokens(model_config.task, model_config)
+    if config.test.enable_thinking:
+        max_new_tokens = None
+    else:
+        max_new_tokens = get_max_new_tokens(model_config.task, model_config)
 
     # greedy decoding
     generate_kwargs['sampling_params'] = vllm.SamplingParams(
         temperature=0.0,
-        max_tokens=None
+        max_tokens=max_new_tokens
     )
 
     llm = vllm.LLM(
