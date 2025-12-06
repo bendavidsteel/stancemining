@@ -361,7 +361,10 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
             .rename({'text': 'Text', 'claim': 'Target', 'stance': 'Stance'})
         
         if task == 'claim-entailment-2way':
-            df = df.with_columns(pl.when(pl.col('Stance') != 'Supporting').then(pl.lit('Other')).otherwise(pl.col('Stance')).alias('Stance'))
+            df = df.with_columns(pl.when(pl.col('Stance') == 'Supporting').then(pl.col('Stance'))\
+                                .when(pl.col('leaning') == 'Supporting').then(pl.lit('Supporting'))\
+                                .otherwise(pl.lit('Other'))\
+                                .alias('Stance'))
             mapping = {l: l.lower() for l in df['Stance'].unique()}
         elif task == 'claim-entailment-3way':
             df = df.with_columns(pl.when(pl.col('Stance').is_in(['Supporting', 'Refuting'])).then(pl.col('Stance')).otherwise(pl.lit('Neutral')).alias('Stance'))
@@ -404,7 +407,7 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
         elif task == 'claim-entailment-2way':
             mapping = {
                 'leaning refuting': 'other',
-                'leaning supporting': 'other',
+                'leaning supporting': 'supporting',
                 'neutral': 'other',
                 'querying': 'other',
                 'discussing': 'other',

@@ -145,7 +145,8 @@ def main(config):
 
     test_data = test_data.drop([c for c in test_data.columns if c.endswith('_len')])
 
-    test_data = test_data.sample(100)
+    if config.test.sample_dataset is not None:
+        test_data = test_data.sample(config.test.sample_dataset, shuffle=True, seed=42)
 
     test_dataset = processor.process_data(test_data, model_config.classification_method, model_config.generation_method, train=False, tokenize=False)
     

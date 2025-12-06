@@ -17,6 +17,7 @@ test:
   in_context_prompt: False
   finetuned_model: False
   enable_thinking: False
+  sample_dataset: None
 
 finetune:
   task: stance-classification
