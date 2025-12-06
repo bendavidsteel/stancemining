@@ -67,6 +67,10 @@ def main(config):
             prompt = stancemining.prompting.NOUN_PHRASE_STANCE_DETECTION
             context_prompt = None
             parent_prompt = None
+        elif args.task == 'claim-entailment-2way':
+            prompt = stancemining.prompting.CLAIM_STANCE_DETECTION_2_LABELS
+            context_prompt = stancemining.prompting.CLAIM_CONTEXT_STANCE_DETECTION_2_LABELS
+            parent_prompt = stancemining.prompting.CLAIM_PARENT_STANCE_DETECTION_2_LABELS
         elif args.task == 'claim-entailment-4way':
             prompt = stancemining.prompting.CLAIM_STANCE_DETECTION_4_LABELS
             context_prompt = stancemining.prompting.CLAIM_CONTEXT_STANCE_DETECTION_4_LABELS
@@ -115,12 +119,19 @@ def main(config):
     # drop long text
     max_model_len = 8192
 
-    test_data = test_data.with_columns([
-            pl.col('Text').str.len_chars().alias('text_len'),
-            pl.col('Target').str.len_chars().alias('target_len'),
-            pl.col('ParentTexts').list.eval(pl.col('').str.len_chars()).list.sum().alias('parent_text_len')
-        ])\
-        .with_columns((pl.col('text_len') + pl.col('target_len') + pl.col('parent_text_len')).alias('total_len'))
+    if 'ParentTexts' in test_data.columns:
+        test_data = test_data.with_columns([
+                pl.col('Text').str.len_chars().alias('text_len'),
+                pl.col('Target').str.len_chars().alias('target_len'),
+                pl.col('ParentTexts').list.eval(pl.col('').str.len_chars()).list.sum().alias('parent_text_len')
+            ])\
+            .with_columns((pl.col('text_len') + pl.col('target_len') + pl.col('parent_text_len')).alias('total_len'))
+    else:
+        test_data = test_data.with_columns([
+                pl.col('Text').str.len_chars().alias('text_len'),
+                pl.col('Target').str.len_chars().alias('target_len'),
+            ])\
+            .with_columns((pl.col('text_len') + pl.col('target_len')).alias('total_len'))
 
     if test_data.filter(pl.col('total_len') >= max_model_len).height > 0:
         print(f"Warning: Dropping {test_data.filter(pl.col('total_len') >= max_model_len).height} test samples exceeding max model length of {max_model_len} tokens.")
@@ -132,7 +143,9 @@ def main(config):
     longest_prompt = model_config.tokenizer.apply_chat_template(longest_dataset['text'][0])
     longest_seq_len = len(longest_prompt)
 
-    test_data = test_data.drop(['text_len', 'target_len', 'parent_text_len', 'total_len'])
+    test_data = test_data.drop([c for c in test_data.columns if c.endswith('_len')])
+
+    test_data = test_data.sample(100)
 
     test_dataset = processor.process_data(test_data, model_config.classification_method, model_config.generation_method, train=False, tokenize=False)
     

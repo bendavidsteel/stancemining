@@ -415,6 +415,167 @@ Claim: "{target}\""""
     }
 ]
 
+CLAIM_STANCE_DETECTION_2_LABELS = [
+    {
+        'role': 'system',
+        'content': """You are a specialist in stance detection."""
+    },
+    {
+        'role': 'user',
+        'content': """Using the instructions determine the stance of the author of the text on the claim. CRITICAL: Entities in the text must match those in the claim for supporting classifications.
+
+Categories:
+
+Supporting: Text directly confirms the claim or states something more specific that logically entails it. No inference needed.
+
+Other: Text does not clearly support the claim.
+
+Entity Rules:
+- Specific entities in claims (e.g., "left-wing individuals") must be present in text
+- Generic terms ("people", "someone") don't match specific entity claims
+- Don't infer entity attributes absent from the text
+
+Examples:
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Some people celebrated Charlie Kirk's death on social media"
+Classification: Supporting
+Reasoning: Text explicitly states "celebrating his execution" and "cheering when it happened".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Charlie Kirk's death was met with universal mourning"
+Classification: Other
+Reasoning: Text shows people "celebrating" and "cheering," directly contradicting "universal mourning".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Left-wing individuals celebrated Kirk's death"
+Classification: Other
+Reasoning: Text confirms celebrations but doesn't identify celebrants' political affiliation. Entity mismatch.
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Vaccine mandates increased political polarization"
+Classification: Other
+Reasoning: Text discusses Kirk's death, unrelated to vaccines.
+
+Text: "{text}"
+Claim: "{target}"
+"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Classification: """
+    }
+]
+
+CLAIM_PARENT_STANCE_DETECTION_2_LABELS = [
+    {
+        'role': 'system',
+        'content': """You are a specialist in stance detection."""
+    },
+    {
+        'role': 'user',
+        'content': """Using the instructions and the parent texts provided, determine the stance of the author of the text on the claim. CRITICAL: Entities in the text must match those in the claim for supporting classifications.
+
+Categories:
+
+Supporting: Text directly confirms the claim or states something more specific that logically entails it. No inference needed.
+
+Other: Text does not clearly support the claim.
+
+Entity Rules:
+- Specific entities in claims (e.g., "left-wing individuals") must be present in text
+- Generic terms ("people", "someone") don't match specific entity claims
+- Don't infer entity attributes absent from the text
+
+Parent Text Chain (from oldest to most recent):
+{parent_chain}
+
+Examples:
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Some people celebrated Charlie Kirk's death on social media"
+Classification: Supporting
+Reasoning: Text explicitly states "celebrating his execution" and "cheering when it happened".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Charlie Kirk's death was met with universal mourning"
+Classification: Other
+Reasoning: Text shows people "celebrating" and "cheering," directly contradicting "universal mourning".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Left-wing individuals celebrated Kirk's death"
+Classification: Other
+Reasoning: Text confirms celebrations but doesn't identify celebrants' political affiliation. Entity mismatch.
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Vaccine mandates increased political polarization"
+Classification: Other
+Reasoning: Text discusses Kirk's death, unrelated to vaccines.
+
+Text: "{text}"
+Claim: "{target}"
+"""
+    },
+    {
+        'role': 'assistant',
+        'content': """Classification: """
+    }
+]
+
+CLAIM_CONTEXT_STANCE_DETECTION_2_LABELS = [
+    {
+        'role': 'system',
+        'content': """You are a specialist in stance detection.""",
+    },
+    {
+        'role': 'user',
+        'content': """Using the instructions and the provided context, determine the stance of the author of the text on the claim. CRITICAL: Entities in the text must match those in the claim for supporting classifications.
+
+Categories:
+
+Supporting: Text directly confirms the claim or states something more specific that logically entails it. No inference needed.
+
+Other: Text does not clearly support the claim.
+
+Entity Rules:
+- Specific entities in claims (e.g., "left-wing individuals") must be present in text
+- Generic terms ("people", "someone") don't match specific entity claims
+- Don't infer entity attributes absent from the text
+
+Contextual information:
+{context}
+
+Examples:
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Some people celebrated Charlie Kirk's death on social media"
+Classification: Supporting
+Reasoning: Text explicitly states "celebrating his execution" and "cheering when it happened".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Charlie Kirk's death was met with universal mourning"
+Classification: Other
+Reasoning: Text shows people "celebrating" and "cheering," directly contradicting "universal mourning".
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Left-wing individuals celebrated Kirk's death"
+Classification: Other
+Reasoning: Text confirms celebrations but doesn't identify celebrants' political affiliation. Entity mismatch.
+
+Text: "Saw a clip of Charlie Kirk. That was horrific. Seen a lot of attention seeking lunatics on here celebrating his execution. Killed for having an opinion/debate and a lot of you sick individuals were cheering when it happened. He was a husband and a father."
+Claim: "Vaccine mandates increased political polarization"
+Classification: Other
+Reasoning: Text discusses Kirk's death, unrelated to vaccines.
+
+Text: "{text}"
+Claim: "{target}\""""
+    },
+    {
+        'role': 'assistant',
+        'content': """Classification: """
+    }
+]
+
 NOUN_PHRASE_STANCE_DETECTION = [
     {
         'role': 'system',

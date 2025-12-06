@@ -10,6 +10,7 @@ import wandb
 
 from stancemining.finetune import (
     ModelConfig, 
+    LoraConfig,
     DataConfig, 
     TrainingConfig, 
     ModelTrainer, 
@@ -56,6 +57,12 @@ def _main(config, args):
         config=wandb_config
     )
 
+    lora_config = LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout
+    )
+
     # Setup configurations
     model_config = ModelConfig(
         model_name=args.model_name,
@@ -68,6 +75,7 @@ def _main(config, args):
         parent_prompt=load_parent_prompt(args.task, args.prompting_method),
         context_prompt=load_context_prompt(args.task, args.prompting_method),
         attn_implementation=args.attn_implementation,
+        lora_config=lora_config
     )
     
     data_config = DataConfig(

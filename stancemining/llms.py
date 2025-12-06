@@ -36,6 +36,9 @@ def parse_category_completions(completions, task):
     elif task == 'claim-entailment':
         valid_categories = ['supporting', 'refuting', 'discussing']
         default = 'discussing'
+    elif task == 'claim-entailment-2way':
+        valid_categories = ['supporting', 'other']
+        default = 'other'
     elif task == 'claim-entailment-4way':
         valid_categories = ['supporting', 'refuting', 'discussing', 'irrelevant']
         default = 'irrelevant'

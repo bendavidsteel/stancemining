@@ -360,7 +360,10 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
         df = df.with_columns(pl.col('thread').list.eval(pl.col('').struct.field('text')).alias('ParentTexts'))\
             .rename({'text': 'Text', 'claim': 'Target', 'stance': 'Stance'})
         
-        if task == 'claim-entailment-3way':
+        if task == 'claim-entailment-2way':
+            df = df.with_columns(pl.when(pl.col('Stance') != 'Supporting').then(pl.lit('Other')).otherwise(pl.col('Stance')).alias('Stance'))
+            mapping = {l: l.lower() for l in df['Stance'].unique()}
+        elif task == 'claim-entailment-3way':
             df = df.with_columns(pl.when(pl.col('Stance').is_in(['Supporting', 'Refuting'])).then(pl.col('Stance')).otherwise(pl.lit('Neutral')).alias('Stance'))
             mapping = {l: l.lower() for l in df['Stance'].unique()}
         elif task == 'claim-entailment-4way':
@@ -397,6 +400,17 @@ def _load_one_dataset(name, split='test', group=True, remove_synthetic_neutral=T
                 'leaning supporting': 'discussing',
                 'neutral': 'discussing',
                 'querying': 'discussing'
+            }
+        elif task == 'claim-entailment-2way':
+            mapping = {
+                'leaning refuting': 'other',
+                'leaning supporting': 'other',
+                'neutral': 'other',
+                'querying': 'other',
+                'discussing': 'other',
+                'irrelevant': 'other',
+                'refuting': 'other',
+                'supporting': 'supporting'
             }
         else:
             raise ValueError(f'Unknown task: {task}')

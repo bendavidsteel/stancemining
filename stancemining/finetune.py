@@ -26,7 +26,7 @@ import wandb
 import stancemining.datasets
 import stancemining.metrics
 
-CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-3way', 'claim-entailment-4way', 'claim-entailment-5way', 'claim-entailment-7way']
+CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-2way', 'claim-entailment-3way', 'claim-entailment-4way', 'claim-entailment-5way', 'claim-entailment-7way']
 GENERATION_TASKS = ['topic-extraction', 'claim-extraction']
 
 def load_split_data(dataset_name: str, split: str, task: str, generation_method: str) -> pl.DataFrame:
@@ -96,6 +96,8 @@ def load_prompt(task: str, prompting_method: str, generation_method: str = None)
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
         file_path = top_dir / 'models/prompts/prompt_claim_extraction.txt'
+    elif task == "claim-entailment-2way":
+        file_path = top_dir / 'models/prompts/prompt_claim_entailment_2_way.txt'
     elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/prompts/prompt_claim_entailment.txt'
     elif task == "claim-entailment-4way":
@@ -128,6 +130,8 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
             raise ValueError("Prompting method not found")
     elif task == "claim-extraction":
         file_path = top_dir / 'models/prompts/prompt_claim_extraction.txt'
+    elif task == "claim-entailment-2way":
+        file_path = top_dir / 'models/prompts/prompt_parent_claim_entailment_2_way.txt'
     elif task == "claim-entailment-3way":
         file_path = top_dir / 'models/prompts/prompt_parent_claim_entailment.txt'
     elif task == "claim-entailment-4way":
@@ -144,7 +148,9 @@ def load_parent_prompt(task: str, prompting_method: str) -> str:
 
 def load_context_prompt(task: str, prompting_method: str) -> str:
     top_dir = pathlib.Path(__file__).parent.parent
-    if task == 'claim-entailment-4way':
+    if task == 'claim-entailment-2way':
+        file_path = top_dir / 'models/prompts/prompt_context_claim_entailment_2_way.txt'
+    elif task == 'claim-entailment-4way':
         file_path = top_dir / 'models/prompts/prompt_context_claim_entailment_4_way.txt'
     elif task == "claim-entailment-5way":
         file_path = top_dir / 'models/prompts/prompt_context_claim_entailment_5_way.txt'
@@ -267,6 +273,9 @@ def get_labels_2_id(task: str):
     elif task == 'argument-classification':
         num_labels = 2
         labels2id = {'Argumentative': 1, 'Non-Argumentative': 0}
+    elif task == 'claim-entailment-2way':
+        num_labels = 2
+        labels2id = CLAIM_ENTAILMENT_2_WAY_LABELS_2_ID
     elif task == 'claim-entailment-3way':
         num_labels = 3
         labels2id = CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID
@@ -284,6 +293,12 @@ def get_labels_2_id(task: str):
         labels2id = None
     return num_labels, labels2id
 
+@dataclass
+class LoraConfig:
+    r: int = 8
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    bias: str = "none"
 
 class ModelConfig:
     model_name: str
@@ -301,6 +316,7 @@ class ModelConfig:
     torch_dtype: Optional[Union[str, torch.dtype]] = torch.bfloat16
     quantization: Optional[str] = None
     labels2id: Dict[str, int] = field(default_factory=lambda: STANCE_LABELS_2_ID)
+    lora_config: Optional[LoraConfig] = None
 
     def __init__(
         self,
@@ -316,7 +332,8 @@ class ModelConfig:
         generation_method: Optional[str] = "beam",
         attn_implementation: Optional[str] = "flash_attention_2",
         torch_dtype: Optional[Union[str, torch.dtype]] = torch.bfloat16,
-        quantization: Optional[str] = None
+        quantization: Optional[str] = None,
+        lora_config: Optional[LoraConfig] = None,
     ):
         self.model_name = model_name
         self.task = task
@@ -332,6 +349,7 @@ class ModelConfig:
         self.torch_dtype = torch_dtype
         self.quantization = quantization
         self.num_labels, self.labels2id = get_labels_2_id(task)
+        self.lora_config = lora_config
         
 class ChatTemplateTokenizer:
     def __init__(self, model_config: ModelConfig):
@@ -348,7 +366,7 @@ class ChatTemplateTokenizer:
 
     def create_input_sequence_for_generation(self, sample):
         if self.tokenizer.chat_template is not None:
-            if set(sample['text'][0][0].keys()) == {'role', 'content'}:
+            if isinstance(sample['text'][0], list) and isinstance(sample['text'][0][0], dict) and set(sample['text'][0][0].keys()) == {'role', 'content'}:
                 messages = sample['text']
             else:
                 if isinstance(sample['text'], str):
@@ -435,6 +453,11 @@ STANCE_LABELS_2_ID = {
     "neutral": 0,
     "favor": 1,
     "against": 2
+}
+
+CLAIM_ENTAILMENT_2_WAY_LABELS_2_ID = {
+    'supporting': 1,
+    'other': 0
 }
 
 CLAIM_ENTAILMENT_3_WAY_LABELS_2_ID = {
@@ -769,19 +792,19 @@ class ModelTrainer:
 
         if self.model_config.quantization is None:
             lora_config = peft.LoraConfig(
-                r=8,
-                lora_alpha=32,
+                r=self.model_config.lora_config.r,
+                lora_alpha=self.model_config.lora_config.lora_alpha,
                 target_modules=modules,
-                lora_dropout=0.05,
+                lora_dropout=self.model_config.lora_config.lora_dropout,
                 bias="none",
                 **lora_kwargs
             )
         elif self.model_config.quantization is not None:
             lora_config = peft.LoraConfig(
-                r=16,
-                lora_alpha=8,
+                r=self.model_config.lora_config.r,
+                lora_alpha=self.model_config.lora_config.lora_alpha,
                 target_modules=modules,
-                lora_dropout=0.05,
+                lora_dropout=self.model_config.lora_config.lora_dropout,
                 bias="none",
                 **lora_kwargs
             )

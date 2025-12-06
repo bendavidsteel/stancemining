@@ -13,6 +13,11 @@ model:
   llm_method: finetuned
   target_type: noun_phrase
 
+test:
+  in_context_prompt: False
+  finetuned_model: False
+  enable_thinking: False
+
 finetune:
   task: stance-classification
   model_name: meta-llama/Llama-3.2-1B-Instruct
@@ -31,6 +36,9 @@ finetune:
   batch_size: 1
   attn_implementation: flash_attention_2
   continue_training: False
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.1
 
 wiba:
   task: stance-classification
