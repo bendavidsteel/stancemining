@@ -180,7 +180,7 @@ def stance_example_to_prompt(examples, i, prompt_template: str, parent_prompt_te
     if context:
         kwargs['context'] = context
         prompt_template = context_prompt_template
-    elif len(parenttexts) > 0:
+    elif parenttexts and len(parenttexts) > 0:
         parent_chain = []
         for i, p_text in enumerate(parenttexts):
             if i == 0:

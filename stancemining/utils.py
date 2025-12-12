@@ -541,7 +541,7 @@ class Transcription:
 
             # For now, create a minimal result dict for compatibility
             # Full parsing of segments/language will be implemented later
-            result = {'text': all_text, 'language': 'en', 'segments': []}
+            result = {'text': all_text, 'segments': []}
 
         # delete model if low on GPU resources
         # import gc; gc.collect(); torch.cuda.empty_cache(); del model
