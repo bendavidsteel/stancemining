@@ -29,11 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gps = [
+gp = [
     "pyro-ppl>=1.9.1",
     "gpytorch>=1.14",
 ]
-training = [
+train = [
     "evaluate>=0.4.3",
     "peft>=0.15.2",
     "sacrebleu>=2.5.1",

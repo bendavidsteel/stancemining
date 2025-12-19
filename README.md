@@ -8,6 +8,11 @@ A tool for mining stance targets from a corpus of documents.
 pip install stancemining
 ```
 
+There are some optional additional dependencies for extra functionality.
+If you want to use the implemented Gaussian process for time series modelling, use `stancemining[gp]`.
+If you want to train new task-specific models, use `stancemining[train]`.
+If you want to use the plotting functions, use `stancemining[plot]`.
+
 ## Documentation
 Documentation is available at [stancemining.readthedocs.io](https://stancemining.readthedocs.io)
 
