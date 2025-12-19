@@ -1,7 +1,7 @@
 import gc
 import logging
-import math
 import os
+import string
 import subprocess
 from typing import List, Union
 
@@ -281,7 +281,10 @@ def _propagate_clusters_np(cluster_labels, verbose=True):
 
 def _minhash_clustering(target_df: pl.DataFrame, threshold=0.7):
     """GPU-accelerated deduplication using cuVS (RAPIDS)"""
-    import datasketch
+    try:
+        import datasketch
+    except ImportError:
+        raise ImportError("datasketch is not installed. Please install it with `pip install datasketch`.")
 
     # Create LSH index
     lsh = datasketch.MinHashLSH(threshold=threshold, num_perm=128)
@@ -324,7 +327,40 @@ def _minhash_clustering(target_df: pl.DataFrame, threshold=0.7):
 
     return final_labels
 
-def _get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model: Union[str, Embedder], minhash_threshold=0.7, max_embedding_distance=0.2, batch_size=1000):
+def _get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model: Union[str, Embedder], stance_target_type: str, minhash_threshold=0.7, max_embedding_distance=0.2, batch_size=1000):
+    if stance_target_type == 'claims':
+        return _get_similar_claims_mapper_batch(target_df, embedding_model, minhash_threshold=minhash_threshold, max_embedding_distance=max_embedding_distance, batch_size=batch_size)
+    elif stance_target_type == 'noun-phrases':
+        return _get_similar_noun_phrases_mapper_batch(target_df, embedding_model, max_distance=max_embedding_distance, batch_size=batch_size)
+    else:
+        raise ValueError(f"Unknown stance_target_type: {stance_target_type}")
+    
+def _get_similar_noun_phrases_mapper_batch(target_df: pl.DataFrame, embedding_model: Union[str, Embedder], max_distance=0.2, batch_size: int = 2000000):
+    if isinstance(embedding_model, str):
+        embedding_model = VLLMEmbedder(model=embedding_model)
+
+    next_cluster_idx = 0
+    embed_clusters = np.full(target_df.shape[0], -1)
+    for batch_idx in range(0, target_df.shape[0], batch_size):
+        logger.info(f"Finding embedding clusters in minhash clusters batch {batch_idx + 1}/{target_df.shape[0] // batch_size + 1}")
+        batch_targets = target_df['Target'][batch_idx:batch_idx + batch_size].to_list()
+        batch_embeddings = embedding_model.encode(batch_targets, show_progress_bar=True)
+        sub_clusters = _cuvl_clustering(batch_embeddings, max_distance=max_distance, verbose=True)
+        del batch_embeddings
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # ensure sub clusters have distinct ids between macro clusters
+        if len(sub_clusters[sub_clusters != -1]) > 0:
+            sub_clusters[sub_clusters != -1] += next_cluster_idx
+            next_cluster_idx = sub_clusters.max() + 1
+
+        batch_idx = np.arange(batch_idx, min(batch_idx + batch_size, target_df.shape[0]))
+        embed_clusters[batch_idx] = sub_clusters
+
+    return _clusters_to_mapper(embed_clusters, target_df)
+
+def _get_similar_claims_mapper_batch(target_df: pl.DataFrame, embedding_model: Union[str, Embedder], minhash_threshold=0.7, max_embedding_distance: float = 0.1, batch_size: int = 2000000):
     hash_clusters = _minhash_clustering(target_df, threshold=minhash_threshold)
     target_cluster_df = target_df.with_columns(pl.Series(name='cluster', values=hash_clusters))
 
@@ -362,7 +398,20 @@ def _get_similar_target_mapper_batch(target_df: pl.DataFrame, embedding_model: U
 
     return _clusters_to_mapper(embed_clusters, target_df)
 
-def deduplicate_all_similar_targets(document_df: pl.DataFrame, embedding_model_name: str, batch_size: int = 1000, minhash_threshold=0.7, max_embedding_distance: float = 0.1) -> pl.DataFrame:
+def deduplicate_all_similar_targets(document_df: pl.DataFrame, embedding_model_name: str, stance_target_type: str, batch_size: int = 1000, minhash_threshold=0.7, max_embedding_distance: float = 0.1) -> pl.DataFrame:
+    
+    if 'ID' not in document_df.columns:
+        document_df = document_df.with_row_index('ID')
+    target_df = document_df.explode('Targets').rename({'Targets': 'Target'})
+    target_df = target_df.with_columns(pl.col('Target').str.strip_chars().str.strip_chars(string.punctuation))
+    document_df = document_df.drop('Targets')\
+        .join(
+            target_df.select(['ID', 'Target']).group_by('ID').agg(pl.col('Target')).rename({'Target': 'Targets'}),
+            on='ID',
+            how='left'
+        )\
+        .drop('ID')
+    
     target_df = document_df.select('Targets')\
         .explode('Targets')\
         .drop_nulls()\
@@ -370,14 +419,65 @@ def deduplicate_all_similar_targets(document_df: pl.DataFrame, embedding_model_n
         .group_by('Target')\
         .agg(pl.len().alias('count'))
     
-    target_mapper = _get_similar_target_mapper_batch(target_df, embedding_model_name, minhash_threshold=minhash_threshold, max_embedding_distance=max_embedding_distance, batch_size=batch_size)
+    target_mapper = _get_similar_target_mapper_batch(target_df, embedding_model_name, stance_target_type, minhash_threshold=minhash_threshold, max_embedding_distance=max_embedding_distance, batch_size=batch_size)
     document_df = document_df.with_columns(
         pl.col('Targets').list.eval(pl.element().replace(target_mapper)).list.unique()
     )
     return document_df
 
 
-def remove_bad_targets(target_df: pl.DataFrame):
+def remove_bad_claims(target_df):
+    target_df = target_df.filter(~pl.col('Target').str.contains_any(['the user', 'url', 'the text', 'the speaker']))
+    target_df = target_df.filter(~pl.col("Target").str.contains("^the assistant"))
+    target_df = target_df.filter(pl.col('Target').str.len_chars() < 70)
+    target_df = target_df.filter(pl.col('Target').str.len_chars() > 20)
+    target_df = target_df.filter(~pl.col("Target").str.contains("^\w+ was mentioned.$"))
+    nouns = ['place', 'person', 'link', 'claim', 'city', 'region', 'nation', 'user', 'holiday', 'greeting', 'holiday greeting']
+    for noun in nouns:
+        target_df = target_df.filter(~pl.col("Target").str.contains(f"^\w+ is a {noun}.$"))
+        target_df = target_df.filter(~pl.col("Target").str.contains(f"^\w+ \w+ is a {noun}.$"))
+
+    if 'index' not in target_df.columns:
+        target_df = target_df.with_row_index()
+
+    superset_target_df = target_df.join(
+            target_df.select([
+                'index',
+                pl.col('Target').str.strip_chars('.').alias('shorter_target')
+            ]),
+            on='index',
+            how='left'
+        )\
+        .filter(pl.col('Target').str.len_chars() > pl.col('shorter_target').str.len_chars() + 1)\
+        .filter(pl.col('Target').str.contains(pl.col('shorter_target'), literal=True))\
+        .select(['index', 'Target'])\
+        .unique()
+    target_df = target_df.join(superset_target_df, on=['index', 'Target'], how='anti').drop('index')
+    return target_df
+
+def remove_doc_bad_targets(documents_df: pl.DataFrame, stance_target_type: str) -> pl.DataFrame:
+    if 'ID' not in documents_df.columns:
+        documents_df = documents_df.with_row_index('ID')
+    target_df = documents_df.explode('Targets').rename({'Targets': 'Target'})
+    target_df = remove_bad_targets(target_df, stance_target_type)
+    documents_df = documents_df.drop('Targets')\
+        .join(
+            target_df.select(['ID', 'Target']).group_by('ID').agg(pl.col('Target')).rename({'Target': 'Targets'}),
+            on='ID',
+            how='left'
+        )\
+        .with_columns(pl.col('Targets').fill_null([]))  # fill nulls with empty list
+    return documents_df
+
+def remove_bad_targets(target_df: pl.DataFrame, stance_target_type):
+    if stance_target_type == 'claims':
+        return remove_bad_claims(target_df)
+    elif stance_target_type == 'noun-phrases':
+        return remove_bad_noun_phrases(target_df)
+    else:
+        raise ValueError(f"Unknown stance_target_type: {stance_target_type}")
+
+def remove_bad_noun_phrases(target_df: pl.DataFrame):
     phrases = [
         'the primary stance target of the piece of text is',
         'the primary stance target of this text is',
@@ -394,12 +494,15 @@ def remove_bad_targets(target_df: pl.DataFrame):
     ]
     for phrase in phrases:
         target_df = target_df.with_columns(pl.col('Target').str.replace(phrase, ''))
-    exclude_phrases = ['', 'url', 'rt', 'rt @', '@rt']
+    exclude_phrases = ['', 'url', 'rt', 'rt @', '@rt', '@']
     target_df = target_df.with_columns(pl.col('Target').str.strip_chars('"').str.strip_chars(':').str.strip_chars())
+    all_stopwords = stopwords.words('english') + stopwords.words('french') + ['yes', 'no', 'oui', 'non']
     target_df = target_df.filter(~(pl.col('Target').str.contains('rt @\w+'))\
                               .or_(pl.col('Target').str.contains('rt \w+'))\
+                              .or_(pl.col('Target').str.contains(r'\burl\b'))\
+                              .or_(pl.col('Target').str.contains(r'^[^\w\s]+$'))\
                               .or_(pl.col('Target').str.contains(r'^[\U0001F000-\U0001FFFF\u2600-\u26FF\u2700-\u27BF]+$'))\
-                              .or_(pl.col('Target').is_in(stopwords.words('english') + stopwords.words('french')))\
+                              .or_(pl.col('Target').str.to_lowercase().is_in(all_stopwords))\
                               .or_(pl.col('Target').str.to_lowercase().is_in(exclude_phrases)))
     return target_df
 

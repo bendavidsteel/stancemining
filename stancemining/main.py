@@ -539,7 +539,7 @@ class StanceMining:
         if 'hdbscan_model' not in kwargs:
             if torch.cuda.is_available():
                 from cuml.cluster import HDBSCAN
-                kwargs['hdbscan_model'] = HDBSCAN(min_samples=10, gen_min_span_tree=True, prediction_data=True, verbose=self.verbose, random_state=42)
+                kwargs['hdbscan_model'] = HDBSCAN(min_samples=10, verbose=self.verbose)
         topic_model = BERTopic(**kwargs)
         doc_ids = range(len(targets))
 
@@ -782,15 +782,7 @@ class StanceMining:
         documents_df = documents_df.with_columns(pl.Series(name='Targets', values=stance_targets, dtype=pl.List(pl.String)))
 
         # remove bad targets
-        target_df = documents_df.explode('Targets').rename({'Targets': 'Target'})
-        target_df = utils.remove_bad_targets(target_df)
-        documents_df = documents_df.drop('Targets')\
-            .join(
-                target_df.select(['ID', 'Target']).group_by('ID').agg(pl.col('Target')).rename({'Target': 'Targets'}),
-                on='ID',
-                how='left'
-            )\
-            .with_columns(pl.col('Targets').fill_null([]))  # fill nulls with empty list
+        documents_df = utils.remove_doc_bad_targets(documents_df, self.stance_target_type)
 
         documents_df = documents_df.with_columns(self._filter_document_similar_targets(documents_df['Targets'], embedding_model=embedding_model))
         

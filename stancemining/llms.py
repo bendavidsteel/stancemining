@@ -338,7 +338,7 @@ def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, gener
 
     model_kwargs['enable_prefix_caching'] = True
 
-    
+    max_new_tokens = get_max_new_tokens(model_config.task, model_config)
 
     # greedy decoding
     sampling_param_kwargs = {
