@@ -59,7 +59,18 @@ Run:
 python ./experiments/scripts/train_models.py
 ```
 
-## To reproduce experimental results
+## If you use this library, please cite:
+```
+@inproceedings{steel2025corpus,
+  title={Corpus-Oriented Stance Target Extraction},
+  author={Steel, Benjamin and Ruths, Derek},
+  booktitle={Proceedings of the 6th Workshop on Computational Approaches to Discourse, Context and Document-Level Inferences (CODI 2025)},
+  pages={209--227},
+  year={2025}
+}
+```
+
+## To reproduce experimental results from Corpus-Oriented Stance Target Extraction paper
 Rename `./config/config_default.yaml` to `./config/config.yaml` and set the parameters in the file.
 Run:
 ```
