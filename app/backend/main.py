@@ -18,11 +18,8 @@ import pynndescent
 import requests
 import sklearn.metrics.pairwise
 import sklearn.decomposition
-import sklearn.impute
-from sklearn.experimental import enable_iterative_imputer
-from scipy.stats import gaussian_kde
-from scipy.spatial.distance import cdist
-from umap import UMAP
+from tqdm import tqdm
+from pacmap import PaCMAP
 
 from fastapi import FastAPI, Query, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -264,11 +261,8 @@ def compute_umap_embeddings(target_df: pl.DataFrame, target_embeddings_df: pl.Da
     
     # Set up UMAP with parameters suitable for visualization
     
-    reducer = UMAP(
+    reducer = PaCMAP(
         n_components=2,
-        n_neighbors=15,
-        min_dist=0.1,
-        metric='cosine',
         random_state=42,
         verbose=True
     )
@@ -426,13 +420,11 @@ async def startup_event():
         stance_file_paths = glob.glob(os.path.join(stance_dir_path, '*.parquet.zstd'))
         if len(stance_file_paths) == 0:
             raise FileNotFoundError(f"No stance files found in {stance_dir_path}, some must be present.")
-        stance_df = pl.DataFrame({'Targets': [], 'Stances': []}, schema={'Targets': pl.List(pl.String), 'Stances': pl.List(pl.Int64)})
-        for stance_file_path in stance_file_paths:
-            try:
-                file_stance_df = pl.read_parquet(stance_file_path, columns=['Targets', 'Stances'])
-                stance_df = pl.concat([stance_df, file_stance_df])  
-            except Exception as ex:
-                logger.error(f"Error loading stance file {stance_file_path}: {ex}")
+        try:
+            stance_df = pl.read_parquet(stance_file_paths, columns=['Targets', 'Stances'])
+        except Exception as ex:
+            stance_df = pl.concat([pl.read_parquet(fp, columns=['Targets', 'Stances']) for fp in stance_file_paths], how='diagonal_relaxed')
+        stance_df = stance_df.with_columns([pl.col('Targets').cast(pl.List(pl.String)), pl.col('Stances').cast(pl.List(pl.Int64))])
         if len(stance_df) == 0:
             raise ValueError("No stance data found in the provided directory")
         # Compute target counts
@@ -463,20 +455,17 @@ async def startup_event():
         trend_file_paths = glob.glob(os.path.join(target_trends_dir_path, '*.parquet.zstd'))
         if len(trend_file_paths) == 0:
             raise FileNotFoundError(f"No trend files found in {target_trends_dir_path}, some must be present for the app to work")
-        all_trends_df = None
-        for trend_file_path in trend_file_paths:
+        file_dfs = []
+        for trend_file_path in tqdm(trend_file_paths, desc='Loading trend files'):
             try:
                 file_df = pl.read_parquet(trend_file_path)
                 if 'trend_mean' not in file_df.columns:
                     # dataframe is interpolator output, skip
                     continue
-
-                if all_trends_df is None:
-                    all_trends_df = file_df
-                else:
-                    all_trends_df = pl.concat([all_trends_df, file_df])
+                file_dfs.append(file_df)
             except Exception as e:
                 logger.error(f"Error loading trend file {trend_file_path}: {e}")
+        all_trends_df = pl.concat(file_dfs)
 
         # only keep targets we have trends for
         target_df = target_df.join(all_trends_df.select('target').unique('target'), left_on='Target', right_on='target', how='right', maintain_order='left').rename({'target': 'Target'})
@@ -632,8 +621,14 @@ async def get_target_trends(
             (pl.col('filter_type') == filter_type) & (pl.col('filter_value') == filter_value)
         )
 
-    filtered_trends = filtered_trends.drop_nans()
+    filtered_trends = filtered_trends.drop_nans('trend_mean')
     
+    if np.all(np.isnan(filtered_trends['trend_lower'].to_numpy())):
+        filtered_trends = filtered_trends.with_columns(
+            pl.col('trend_lower').fill_nan(pl.col('trend_mean')),
+            pl.col('trend_upper').fill_nan(pl.col('trend_mean'))
+        )
+
     # Convert to list of dicts for JSON response
     return {"data": filtered_trends.to_dicts()}
 
