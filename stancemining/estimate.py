@@ -4,8 +4,6 @@ import re
 from typing import Optional, Any, Dict, List, Tuple, Iterable, Union, Callable
 
 import huggingface_hub
-from linear_operator.utils.errors import NotPSDError
-import numba
 import numpy as np
 import polars as pl
 
@@ -13,6 +11,12 @@ from tqdm import tqdm
 
 from stancemining.finetune import STANCE_LABELS_2_ID
 from stancemining.main import logger
+
+try:
+    import torch
+    GPU_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    GPU_AVAILABLE = False
 
 try:
     import gpytorch
@@ -25,6 +29,7 @@ try:
     import pyro.distributions
     import pyro.infer
     import pyro.poutine
+    from linear_operator.utils.errors import NotPSDError
     import torch
     from torch.utils.data import TensorDataset, DataLoader
 
@@ -938,15 +943,6 @@ if GP_AVAILABLE:
         
         return lengthscale, likelihood_sigma, losses, pred, lower, upper
 
-
-@numba.njit
-def _adjust_shape(dat, k_vars):
-    """ Returns an array of shape (nobs, k_vars) for use with `gpke`."""
-    dat = np.asarray(dat)
-    nobs = len(dat)
-    dat = np.reshape(dat, (nobs, k_vars))
-    return dat
-
 def gaussian(h, Xi, x):
     """
     Vectorized gaussian kernel.
@@ -1003,14 +999,85 @@ def _est_loc_linear(bw, endog, exog, data_predict):
 
     return means, mfx_all
 
+
+def gaussian_gpu(h, Xi, x):
+    """
+    Vectorized gaussian kernel.
+    Xi: shape (n_bootstrap, nobs, k_vars)
+    x: shape (N_predict, k_vars)
+    Returns: shape (n_bootstrap, N_predict, nobs)
+    """
+    # Reshape for broadcasting: (N_predict, 1, k_vars) - (1, nobs, k_vars)
+    diff = x[torch.newaxis, :, torch.newaxis, :] - Xi[:, torch.newaxis, ...]
+    return (1. / np.sqrt(2 * torch.pi)) * torch.exp(-torch.sum(diff**2, axis=3) / (h**2 * 2.))
+
+def _est_loc_linear_gpu(bw, endog, exog, data_predict):
+    """
+    Fully vectorized local linear estimation for multiple prediction points.
+    data_predict: shape (N_predict, k_vars)
+    Returns: mean (n_bootstrap, N_predict,), mfx (n_bootstrap, N_predict, k_vars)
+    """
+    n_bootstrap, nobs, k_vars = exog.shape
+    N_predict = data_predict.shape[0]
+    
+    # Compute kernels for all prediction points at once
+    # ker shape: (N_predict, nobs)
+    ker = gaussian_gpu(bw[0], exog, data_predict) / (bw[0] * float(nobs))
+    
+    M12 = exog[:, torch.newaxis, :, :] - data_predict[torch.newaxis, :, torch.newaxis, :] # shape (n_bootstrap, N_predict, nobs, k_vars)
+    ker_weighted = ker[..., torch.newaxis] # shape (n_bootstrap, N_predict, nobs, 1)
+    
+    # M22: (N_predict, k_vars, k_vars)
+    # For each i: M12[i].T @ (M12[i] * ker[i])
+    M22 = torch.einsum('bpnk,bpnj->bpkj', M12 * ker_weighted, M12) # shape (n_bootstrap, N_predict, k_vars, k_vars)
+    M12_sum = (M12 * ker_weighted).sum(axis=-2) # shape (n_bootstrap, N_predict, k_vars)
+    
+    # Build M matrix: (N_predict, k_vars+1, k_vars+1)
+    M = torch.zeros((n_bootstrap, N_predict, k_vars + 1, k_vars + 1), device=exog.device)
+    M[..., 0, 0] = ker.sum(axis=-1)
+    M[..., 0, 1:] = M12_sum
+    M[..., 1:, 0] = M12_sum
+    M[..., 1:, 1:] = M22
+
+    # ker_endog: (N_predict, nobs, 1)
+    ker_endog = ker_weighted * endog[:, np.newaxis, :, :] # shape (n_bootstrap, N_predict, nobs, 1)
+    
+    # Build V vector: (n_bootstrap, N_predict, k_vars+1, 1)
+    V = torch.zeros((n_bootstrap, N_predict, k_vars + 1, 1), device=exog.device)
+    V[..., 0, 0] = ker_endog.sum(axis=(-2, -1))
+    V[..., 1:, 0] = (M12 * ker_endog).sum(axis=-2)
+
+    # Solve all linear systems at once
+    # (N_predict, k_vars+1, k_vars+1) @ (N_predict, k_vars+1, 1)
+    mean_mfx = torch.linalg.pinv(M) @ V
+
+    means = mean_mfx[..., 0, 0]
+    mfx_all = mean_mfx[..., 1:, 0]
+
+    return means, mfx_all
+
 def kernel_reg_fit(endog, exog, data_predict, bw):
-    k_vars = 1
     endog = endog[..., np.newaxis]  # shape (n_bootstrap, nobs, 1)
     exog = exog[..., np.newaxis]  # shape (n_bootstrap, nobs, 1)
     data_predict = data_predict[:, np.newaxis]  # shape (N_predict, 1)
     bw = np.asarray(bw)
 
     mean, _ = _est_loc_linear(
+        bw, 
+        endog, 
+        exog,
+        data_predict
+    )
+
+    return mean
+
+def kernel_reg_fit_gpu(endog, exog, data_predict, bw):
+    endog = endog[..., torch.newaxis]  # shape (n_bootstrap, nobs, 1)
+    exog = exog[..., torch.newaxis]  # shape (n_bootstrap, nobs, 1)
+    data_predict = data_predict[:, torch.newaxis]  # shape (N_predict, 1)
+    bw = torch.as_tensor(bw, device=endog.device)
+
+    mean, _ = _est_loc_linear_gpu(
         bw, 
         endog, 
         exog,
@@ -1032,6 +1099,24 @@ def bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_bootstrap=100):
     all_preds = kernel_reg_fit(boot_endog, boot_exog, test_x, [bandwidth])
 
     all_preds = np.clip(all_preds, -1, 1)
+    return all_preds
+
+def bootstrap_kernelreg_gpu(stance, timestamps, test_x, bandwidth, n_bootstrap=100):
+    n_samples = len(stance)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    indices = torch.randint(0, n_samples, (n_bootstrap, n_samples), device=device)
+    stance = torch.as_tensor(stance, device=device)
+    timestamps = torch.as_tensor(timestamps, device=device)
+    test_x = torch.as_tensor(test_x, device=device)
+
+    # Resample with replacement
+    boot_endog = stance[indices]
+    boot_exog = timestamps[indices]
+
+    # Fit kernel regression on bootstrap sample
+    all_preds = kernel_reg_fit_gpu(boot_endog, boot_exog, test_x, [bandwidth])
+
+    all_preds = torch.clip(all_preds, -1, 1)
     return all_preds
 
 def _get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column, time_scale):
@@ -1357,21 +1442,34 @@ def _calculate_trends_for_filtered_df(
         if n_train_samples * n_test_samples >= max_array_size // n_bootstrap:
             # batch out bootstrapping to avoid memory issues
             batch_size = int(max(n_bootstrap // (n_train_samples * n_test_samples // (max_array_size // n_bootstrap)), 1))
-            all_preds = None
+            all_preds = []
             for i in range(0, n_bootstrap, batch_size):
                 current_batch_size = min(batch_size, n_bootstrap - i)
-                batch_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, current_batch_size)
-                if all_preds is None:
-                    all_preds = batch_preds
+                if GPU_AVAILABLE:
+                    batch_preds = bootstrap_kernelreg_gpu(stance, timestamps, test_x, bandwidth, current_batch_size)
                 else:
-                    all_preds = np.vstack([all_preds, batch_preds])
+                    batch_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, current_batch_size)
+                all_preds.append(batch_preds)
+
+            if GPU_AVAILABLE:
+                all_preds = torch.cat(all_preds, dim=0)
+            else:
+                all_preds = np.vstack(all_preds)
         else:
-            all_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_bootstrap)
+            if GPU_AVAILABLE:
+                all_preds = bootstrap_kernelreg_gpu(stance, timestamps, test_x, bandwidth, n_bootstrap)
+            else:
+                all_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_bootstrap)
 
         # Compute statistics
-        pred_mean = np.mean(all_preds, axis=0)
-        pred_lower = np.percentile(all_preds, 5, axis=0)
-        pred_upper = np.percentile(all_preds, 95, axis=0)
+        if GPU_AVAILABLE:
+            pred_mean = torch.mean(all_preds, dim=0).cpu().numpy()
+            pred_lower = torch.quantile(all_preds, 0.05, dim=0).cpu().numpy()
+            pred_upper = torch.quantile(all_preds, 0.95, dim=0).cpu().numpy()
+        else:
+            pred_mean = np.mean(all_preds, axis=0)
+            pred_lower = np.percentile(all_preds, 5, axis=0)
+            pred_upper = np.percentile(all_preds, 95, axis=0)
 
         trend_df = _combine_trend_df(trend_df, pred_mean, pred_lower, pred_upper, target_name, filter_type, filter_value)
         interpolation_outputs = {}
