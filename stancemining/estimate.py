@@ -943,6 +943,71 @@ if GP_AVAILABLE:
         
         return lengthscale, likelihood_sigma, losses, pred, lower, upper
 
+try:
+    from numba import njit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+
+if NUMBA_AVAILABLE:
+    @njit(parallel=True, fastmath=True)
+    def _est_loc_linear_numba(bw, endog, exog, data_predict):
+        """
+        Numba-optimized local linear estimation for k_vars=1.
+        Uses analytical 2x2 pseudo-inverse instead of np.linalg.pinv.
+        """
+        n_bootstrap = endog.shape[0]
+        nobs = endog.shape[1]
+        N_predict = data_predict.shape[0]
+        h = bw[0]
+        h2 = h * h * 2.0
+        norm_factor = 1.0 / (np.sqrt(2 * np.pi) * h * nobs)
+
+        means = np.zeros((n_bootstrap, N_predict))
+
+        for b in prange(n_bootstrap):
+            for p in range(N_predict):
+                x_p = data_predict[p, 0]
+
+                # Compute kernel weights and build M matrix and V vector
+                M00 = 0.0
+                M01 = 0.0
+                M11 = 0.0
+                V0 = 0.0
+                V1 = 0.0
+
+                for i in range(nobs):
+                    xi = exog[b, i, 0]
+                    diff = x_p - xi
+                    ker = np.exp(-diff * diff / h2) * norm_factor
+
+                    y_i = endog[b, i, 0]
+                    ker_y = ker * y_i
+
+                    M00 += ker
+                    M01 += ker * (-diff)
+                    M11 += ker * diff * diff
+                    V0 += ker_y
+                    V1 += ker_y * (-diff)
+
+                # Solve 2x2 system using pseudo-inverse formula
+                # M = [[M00, M01], [M01, M11]]
+                # For symmetric 2x2: pinv = adj(M) / det(M) when det != 0
+                det = M00 * M11 - M01 * M01
+
+                if abs(det) > 1e-10:
+                    # mean = (M11 * V0 - M01 * V1) / det
+                    means[b, p] = (M11 * V0 - M01 * V1) / det
+                else:
+                    # Fallback for singular matrix
+                    if abs(M00) > 1e-10:
+                        means[b, p] = V0 / M00
+                    else:
+                        means[b, p] = 0.0
+
+        return means
+
+
 def gaussian(h, Xi, x):
     """
     Vectorized gaussian kernel.
@@ -1062,15 +1127,14 @@ def kernel_reg_fit(endog, exog, data_predict, bw):
     data_predict = data_predict[:, np.newaxis]  # shape (N_predict, 1)
     bw = np.asarray(bw)
 
-    mean, _ = _est_loc_linear(
-        bw, 
-        endog, 
-        exog,
-        data_predict
-    )
+    if NUMBA_AVAILABLE:
+        mean = _est_loc_linear_numba(bw, endog, exog, data_predict)
+    else:
+        mean, _ = _est_loc_linear(bw, endog, exog, data_predict)
 
     return mean
 
+@torch.compile(mode='default')
 def kernel_reg_fit_gpu(endog, exog, data_predict, bw):
     endog = endog[..., torch.newaxis]  # shape (n_bootstrap, nobs, 1)
     exog = exog[..., torch.newaxis]  # shape (n_bootstrap, nobs, 1)
@@ -1078,8 +1142,8 @@ def kernel_reg_fit_gpu(endog, exog, data_predict, bw):
     bw = torch.as_tensor(bw, device=endog.device)
 
     mean, _ = _est_loc_linear_gpu(
-        bw, 
-        endog, 
+        bw,
+        endog,
         exog,
         data_predict
     )
@@ -1438,7 +1502,7 @@ def _calculate_trends_for_filtered_df(
         n_train_samples = len(stance)
         n_test_samples = len(test_x)
 
-        max_array_size = 10**9
+        max_array_size = 10**8 if GPU_AVAILABLE else 10**9
         if n_train_samples * n_test_samples >= max_array_size // n_bootstrap:
             # batch out bootstrapping to avoid memory issues
             batch_size = int(max(n_bootstrap // (n_train_samples * n_test_samples // (max_array_size // n_bootstrap)), 1))
