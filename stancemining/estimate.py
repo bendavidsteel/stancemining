@@ -980,7 +980,8 @@ def kernel_reg_fit(endog, exog, data_predict, bw):
     return mean
 
 
-def bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_samples, n_bootstrap=100):
+def bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_bootstrap=100):
+    n_samples = len(stance)
     indices = np.random.choice(n_samples, size=(n_bootstrap, n_samples), replace=True)
 
     # Resample with replacement
@@ -1339,21 +1340,23 @@ def _calculate_trends_for_filtered_df(
     elif interpolation_method == 'kernelreg':
         n_bootstrap = 100
         bandwidth = 10.0
-        n_samples = len(stance)
+        n_train_samples = len(stance)
+        n_test_samples = len(test_x)
 
-        if n_samples >= 10**3:
+        max_array_size = 10**9
+        if n_train_samples * n_test_samples >= max_array_size // n_bootstrap:
             # batch out bootstrapping to avoid memory issues
-            batch_size = int(max(n_bootstrap // np.log10(n_samples), 1))
+            batch_size = int(max(n_bootstrap // (n_train_samples * n_test_samples // (max_array_size // n_bootstrap)), 1))
             all_preds = None
             for i in range(0, n_bootstrap, batch_size):
                 current_batch_size = min(batch_size, n_bootstrap - i)
-                batch_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_samples, current_batch_size)
+                batch_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, current_batch_size)
                 if all_preds is None:
                     all_preds = batch_preds
                 else:
                     all_preds = np.vstack([all_preds, batch_preds])
         else:
-            all_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_samples, n_bootstrap)
+            all_preds = bootstrap_kernelreg(stance, timestamps, test_x, bandwidth, n_bootstrap)
 
         # Compute statistics
         pred_mean = np.mean(all_preds, axis=0)
