@@ -24,7 +24,6 @@ import transformers
 import wandb
 
 import stancemining.datasets
-import stancemining.metrics
 
 CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-2way', 'claim-entailment-3way', 'claim-entailment-4way', 'claim-entailment-5way', 'claim-entailment-7way']
 GENERATION_TASKS = ['topic-extraction', 'claim-extraction']
@@ -617,6 +616,7 @@ class DataProcessor:
         return dataset
 
 def _evaluate_generation_set(predictions, references):
+    import stancemining.metrics
     bertscore_f1, bertscore_p, bertscore_r = stancemining.metrics.bertscore_f1_targets(predictions, references)
     bleu_f1, bleu_p, bleu_r = stancemining.metrics.bleu_targets(predictions, references)
     max_claim_length = max(max(len(claim) for claim in preds) for preds in predictions)
