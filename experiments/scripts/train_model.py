@@ -1,7 +1,6 @@
 import json
 import os
 
-import dotenv
 import hydra
 import omegaconf
 import transformers
@@ -95,7 +94,6 @@ def _main(config, args):
     evaluator = ModelEvaluator(model_config.task)
     
     # Load HF token
-    # dotenv.load_dotenv()
     hf_token = config.hf_token
     
     # Setup model path
