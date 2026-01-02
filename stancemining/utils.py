@@ -11,7 +11,6 @@ import polars as pl
 import sklearn.preprocessing
 from tqdm import tqdm
 import torch
-import vllm
 
 logger = logging.getLogger('StanceMining.utils')
 
@@ -31,6 +30,7 @@ class SentenceTransformerEmbedder(Embedder):
 
 class VLLMEmbedder(Embedder):
     def __init__(self, model: str = "all-MiniLM-L6-v2", kwargs: dict = {}):
+        import vllm
         self.llm = vllm.LLM(model=model, task='embed', **kwargs)
 
     def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
