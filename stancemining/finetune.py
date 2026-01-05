@@ -708,11 +708,12 @@ class ModelEvaluator:
                 'recall': self.metrics['recall'].compute(predictions=d_predictions, references=d_references, average=None)['recall']
             }
             for label, label_id in labels2id.items():
-                pred_metrics[dataset][label] = {
-                    'f1': float(label_metrics['f1'][label_id]),
-                    'precision': float(label_metrics['precision'][label_id]),
-                    'recall': float(label_metrics['recall'][label_id])
-                }
+                if label_id in label_metrics['f1']:
+                    pred_metrics[dataset][label] = {
+                        'f1': float(label_metrics['f1'][label_id]),
+                        'precision': float(label_metrics['precision'][label_id]),
+                        'recall': float(label_metrics['recall'][label_id])
+                    }
 
         return pred_metrics
 
