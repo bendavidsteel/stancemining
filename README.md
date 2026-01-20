@@ -66,6 +66,26 @@ python ./experiments/scripts/train_models.py
 
 ## If you use this library, please cite:
 ```
+@inproceedings{steel-ruths-2025-stancemining,
+    title = "{S}tance{M}ining: An open-source stance detection library supporting time-series and visualization",
+    author = "Steel, Benjamin  and
+      Ruths, Derek",
+    editor = "Liu, Xuebo  and
+      Purwarianti, Ayu",
+    booktitle = "Proceedings of The 14th International Joint Conference on Natural Language Processing and The 4th Conference of the Asia-Pacific Chapter of the Association for Computational Linguistics: System Demonstrations",
+    month = dec,
+    year = "2025",
+    address = "Mumbai, India",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2025.ijcnlp-demo.8/",
+    pages = "67--76",
+    ISBN = "979-8-89176-301-2",
+    abstract = "Despite the size of the field, stance detection has remained inaccessible to most researchers due to implementation barriers. Here we present a library that allows easy access to an end-to-end stance modelling solution. This library comes complete with everything needed to go from a corpus of documents, to exploring stance trends in a corpus through an interactive dashboard. To support this, we provide stance target extraction, stance detection, stance time-series trend inference, and an exploratory dashboard, all available in an easy-to-use library. We hope that this library can increase the accessibility of stance detection for the wider community of those who could benefit from this method."
+}
+```
+
+If you specifically use the generate higher level targets method, please cite:
+```
 @inproceedings{steel2025corpus,
   title={Corpus-Oriented Stance Target Extraction},
   author={Steel, Benjamin and Ruths, Derek},
