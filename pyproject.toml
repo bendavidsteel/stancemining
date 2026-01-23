@@ -1,11 +1,48 @@
 [project]
 name = "stancemining"
 version = "0.2.0"
-description = "A library for stance detection and target extraction in text data."
+description = "A library for stance detection and target extraction in text data using LLMs, with time series trend inference via Gaussian processes."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [
+    { name = "Benjamin Steel", email = "benjamin.steel@mail.mcgill.ca" },
+]
+keywords = [
+    "stance-detection",
+    "target-extraction",
+    "nlp",
+    "natural-language-processing",
+    "text-mining",
+    "machine-learning",
+    "llm",
+    "computational-social-science",
+    "opinion-mining",
+    "sentiment-analysis",
+    "gaussian-process",
+    "time-series",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+[project.urls]
+Homepage = "https://github.com/bendavidsteel/stancemining"
+Documentation = "https://stancemining.readthedocs.io"
+Repository = "https://github.com/bendavidsteel/stancemining"
+Issues = "https://github.com/bendavidsteel/stancemining/issues"
+Changelog = "https://github.com/bendavidsteel/stancemining/releases"
 dependencies = [
     "accelerate>=1.7.0",
     "cuml-cu12",
