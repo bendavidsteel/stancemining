@@ -1183,6 +1183,486 @@ def bootstrap_kernelreg_gpu(stance, timestamps, test_x, bandwidth, n_bootstrap=1
     all_preds = torch.clip(all_preds, -1, 1)
     return all_preds
 
+
+# =============================================================================
+# Bayesian Kernel Regression Methods
+# =============================================================================
+
+if GP_AVAILABLE:
+    class ExactGPModel(gpytorch.models.ExactGP):
+        """
+        Exact GP with ZeroMean prior - predictions revert to 0 in sparse data regions.
+
+        This provides proper Bayesian inference with a prior centered at 0, meaning:
+        - One data point of 1 won't push prediction all the way to 1
+        - Many data points of 1 will push prediction closer to 1
+        - In regions with no data, predictions revert to 0 (the prior mean)
+
+        The lengthscale parameter controls how correlated values at distance X are.
+        """
+        def __init__(self, train_x, train_y, likelihood, lengthscale_prior=None):
+            super().__init__(train_x, train_y, likelihood)
+            self.mean_module = gpytorch.means.ZeroMean()
+            if lengthscale_prior is not None:
+                self.covar_module = gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.RBFKernel(lengthscale_prior=lengthscale_prior)
+                )
+            else:
+                self.covar_module = gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.RBFKernel()
+                )
+
+        def forward(self, x):
+            mean_x = self.mean_module(x)
+            covar_x = self.covar_module(x)
+            return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+    def exact_gp_fit(
+            train_x: np.ndarray,
+            train_y: np.ndarray,
+            test_x: np.ndarray,
+            lengthscale_loc: float = 2.0,
+            lengthscale_scale: float = 0.1,
+            noise: float = 0.5,
+            learn_hyperparams: bool = True,
+            n_iter: int = 100,
+            verbose: bool = False
+        ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+        """
+        Fit an exact GP with zero-mean prior and predict at test points.
+
+        Args:
+            train_x: Training inputs, shape (n_train,)
+            train_y: Training targets (stance values in [-1, 1]), shape (n_train,)
+            test_x: Test inputs, shape (n_test,)
+            lengthscale_loc: Location parameter for log-normal lengthscale prior
+            lengthscale_scale: Scale parameter for log-normal lengthscale prior
+            noise: Initial/fixed noise variance
+            learn_hyperparams: If True, optimize hyperparameters; if False, use fixed values
+            n_iter: Number of optimization iterations (if learning hyperparams)
+            verbose: Print training progress
+
+        Returns:
+            mean: Posterior mean at test points, shape (n_test,)
+            lower: Lower 95% confidence bound, shape (n_test,)
+            upper: Upper 95% confidence bound, shape (n_test,)
+            hyperparams: Dict with learned/used hyperparameters
+        """
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        train_x = torch.as_tensor(train_x, dtype=torch.float32, device=device)
+        train_y = torch.as_tensor(train_y, dtype=torch.float32, device=device)
+        test_x = torch.as_tensor(test_x, dtype=torch.float32, device=device)
+
+        # Create log-normal prior for lengthscale (same as ordinal GP)
+        lengthscale_prior = gpytorch.priors.LogNormalPrior(
+            loc=torch.log(torch.tensor(lengthscale_loc)),
+            scale=lengthscale_scale
+        )
+
+        likelihood = gpytorch.likelihoods.GaussianLikelihood()
+        likelihood.noise = noise
+
+        model = ExactGPModel(train_x, train_y, likelihood, lengthscale_prior=lengthscale_prior)
+
+        model = model.to(device)
+        likelihood = likelihood.to(device)
+
+        if learn_hyperparams:
+            model.train()
+            likelihood.train()
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+            mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+
+            for i in range(n_iter):
+                optimizer.zero_grad()
+                output = model(train_x)
+                loss = -mll(output, train_y)
+                loss.backward()
+                optimizer.step()
+
+                if verbose and (i + 1) % 20 == 0:
+                    logger.info(f"Iter {i+1}/{n_iter} - Loss: {loss.item():.3f}")
+
+        model.eval()
+        likelihood.eval()
+
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            pred = likelihood(model(test_x))
+            mean = pred.mean
+            lower, upper = pred.confidence_region()
+
+        hyperparams = {
+            'lengthscale': model.covar_module.base_kernel.lengthscale.item(),
+            'outputscale': model.covar_module.outputscale.item(),
+            'noise': likelihood.noise.item()
+        }
+
+        mean = torch.clamp(mean, -1, 1).cpu().numpy()
+        lower = torch.clamp(lower, -1, 1).cpu().numpy()
+        upper = torch.clamp(upper, -1, 1).cpu().numpy()
+
+        return mean, lower, upper, hyperparams
+
+
+def bayesian_kernel_ridge_fit(
+        train_x: np.ndarray,
+        train_y: np.ndarray,
+        test_x: np.ndarray,
+        lengthscale: float = 1.0,
+        alpha: float = 1.0,
+        use_gpu: bool = True
+    ) -> np.ndarray:
+    """
+    Bayesian Kernel Ridge Regression with implicit zero-mean prior.
+
+    This is mathematically equivalent to the posterior mean of a GP with:
+    - Zero mean prior
+    - RBF kernel with given lengthscale
+    - Noise variance = alpha * outputscale
+
+    The alpha parameter controls the prior strength:
+    - Higher alpha = stronger regularization = predictions closer to 0
+    - Lower alpha = weaker regularization = predictions closer to data
+
+    Args:
+        train_x: Training inputs, shape (n_train,)
+        train_y: Training targets, shape (n_train,)
+        test_x: Test inputs, shape (n_test,)
+        lengthscale: RBF kernel lengthscale (controls correlation distance)
+        alpha: Regularization parameter (prior strength toward 0)
+        use_gpu: Use GPU if available
+
+    Returns:
+        Predictions at test points, shape (n_test,)
+    """
+    if use_gpu and GPU_AVAILABLE:
+        return _bayesian_kernel_ridge_fit_gpu(train_x, train_y, test_x, lengthscale, alpha)
+    else:
+        return _bayesian_kernel_ridge_fit_cpu(train_x, train_y, test_x, lengthscale, alpha)
+
+
+def _bayesian_kernel_ridge_fit_cpu(train_x, train_y, test_x, lengthscale, alpha):
+    """CPU implementation of Bayesian Kernel Ridge Regression."""
+    train_x = np.asarray(train_x).reshape(-1, 1)
+    train_y = np.asarray(train_y)
+    test_x = np.asarray(test_x).reshape(-1, 1)
+
+    gamma = 1.0 / (2 * lengthscale ** 2)
+
+    # Compute kernel matrices
+    # K_train: (n_train, n_train)
+    diff_train = train_x - train_x.T
+    K_train = np.exp(-gamma * diff_train ** 2)
+
+    # K_test: (n_test, n_train)
+    diff_test = test_x - train_x.T
+    K_test = np.exp(-gamma * diff_test ** 2)
+
+    # Solve (K + alpha*I) @ w = y for w, then predict K_test @ w
+    n = len(train_y)
+    K_reg = K_train + alpha * np.eye(n)
+
+    # Use solve instead of inverse for numerical stability
+    weights = np.linalg.solve(K_reg, train_y)
+    pred = K_test @ weights
+
+    return np.clip(pred, -1, 1)
+
+
+def _bayesian_kernel_ridge_fit_gpu(train_x, train_y, test_x, lengthscale, alpha):
+    """GPU implementation of Bayesian Kernel Ridge Regression."""
+    device = torch.device('cuda')
+
+    train_x = torch.as_tensor(train_x, dtype=torch.float32, device=device).reshape(-1, 1)
+    train_y = torch.as_tensor(train_y, dtype=torch.float32, device=device)
+    test_x = torch.as_tensor(test_x, dtype=torch.float32, device=device).reshape(-1, 1)
+
+    gamma = 1.0 / (2 * lengthscale ** 2)
+
+    # Compute kernel matrices using broadcasting
+    diff_train = train_x - train_x.T
+    K_train = torch.exp(-gamma * diff_train ** 2)
+
+    diff_test = test_x - train_x.T
+    K_test = torch.exp(-gamma * diff_test ** 2)
+
+    n = len(train_y)
+    K_reg = K_train + alpha * torch.eye(n, device=device)
+
+    weights = torch.linalg.solve(K_reg, train_y)
+    pred = K_test @ weights
+
+    return torch.clamp(pred, -1, 1).cpu().numpy()
+
+
+def _bootstrap_bayesian_krr_gpu_single_batch(
+        stance: torch.Tensor,
+        timestamps: torch.Tensor,
+        test_x: torch.Tensor,
+        indices: torch.Tensor,
+        lengthscale: float,
+        alpha: float
+    ) -> torch.Tensor:
+    """Process a single batch of bootstraps on GPU."""
+    n_samples = stance.shape[0]
+    gamma = 1.0 / (2 * lengthscale ** 2)
+
+    # Resample
+    boot_stance = stance[indices]  # (batch_size, n_samples)
+    boot_timestamps = timestamps[indices]  # (batch_size, n_samples)
+
+    # K_train: (batch_size, n_samples, n_samples)
+    boot_x = boot_timestamps.unsqueeze(-1)
+    diff_train = boot_x - boot_x.transpose(-1, -2)
+    K_train = torch.exp(-gamma * diff_train ** 2)
+
+    # K_test: (batch_size, n_test, n_samples)
+    test_x_expanded = test_x.unsqueeze(0).unsqueeze(-1)
+    boot_x_for_test = boot_timestamps.unsqueeze(1)
+    diff_test = test_x_expanded - boot_x_for_test
+    K_test = torch.exp(-gamma * diff_test ** 2)
+
+    # Regularize and solve
+    eye = torch.eye(n_samples, device=stance.device).unsqueeze(0)
+    K_reg = K_train + alpha * eye
+
+    weights = torch.linalg.solve(K_reg, boot_stance)
+
+    # Predict
+    pred = torch.bmm(K_test, weights.unsqueeze(-1)).squeeze(-1)
+    return torch.clamp(pred, -1, 1)
+
+
+def bootstrap_bayesian_krr_gpu_batched(
+        stance: np.ndarray,
+        timestamps: np.ndarray,
+        test_x: np.ndarray,
+        lengthscale: float = 1.0,
+        alpha: float = 1.0,
+        n_bootstrap: int = 100,
+        max_gpu_mem_gb: float = 8.0
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Batched GPU implementation of bootstrap Bayesian KRR.
+
+    Automatically batches bootstraps to fit in GPU memory.
+    Falls back to CPU for very large sample sizes.
+    """
+    if not GPU_AVAILABLE:
+        return bootstrap_bayesian_krr_numba(stance, timestamps, test_x, lengthscale, alpha, n_bootstrap)
+
+    n_samples = len(stance)
+    n_test = len(test_x)
+
+    # Estimate memory per bootstrap: K_train + K_test + overhead
+    # K_train: n_samples^2, K_test: n_test * n_samples, plus ~2x for solve workspace
+    bytes_per_bootstrap = (n_samples * n_samples + n_test * n_samples) * 4 * 3  # float32, 3x overhead
+    max_bytes = max_gpu_mem_gb * 1e9
+
+    # Fall back to CPU if single bootstrap doesn't fit
+    if bytes_per_bootstrap > max_bytes:
+        return bootstrap_bayesian_krr_numba(stance, timestamps, test_x, lengthscale, alpha, n_bootstrap)
+
+    # Calculate batch size that fits in memory
+    batch_size = max(1, int(max_bytes // bytes_per_bootstrap))
+    batch_size = min(batch_size, n_bootstrap)
+
+    device = torch.device('cuda')
+    stance_t = torch.as_tensor(stance, dtype=torch.float32, device=device)
+    timestamps_t = torch.as_tensor(timestamps, dtype=torch.float32, device=device)
+    test_x_t = torch.as_tensor(test_x, dtype=torch.float32, device=device)
+
+    all_preds = []
+
+    for i in range(0, n_bootstrap, batch_size):
+        current_batch_size = min(batch_size, n_bootstrap - i)
+        indices = torch.randint(0, n_samples, (current_batch_size, n_samples), device=device)
+
+        pred = _bootstrap_bayesian_krr_gpu_single_batch(
+            stance_t, timestamps_t, test_x_t, indices, lengthscale, alpha
+        )
+        all_preds.append(pred.cpu())
+
+        # Clear GPU cache between batches
+        if i + batch_size < n_bootstrap:
+            torch.cuda.empty_cache()
+
+    pred = torch.cat(all_preds, dim=0)
+
+    mean = torch.mean(pred, dim=0).cpu().numpy()
+    lower = torch.quantile(pred, 0.05, dim=0).cpu().numpy()
+    upper = torch.quantile(pred, 0.95, dim=0).cpu().numpy()
+
+    return mean, lower, upper
+
+
+def bootstrap_bayesian_krr_cpu_batched(
+        stance: np.ndarray,
+        timestamps: np.ndarray,
+        test_x: np.ndarray,
+        lengthscale: float = 1.0,
+        alpha: float = 1.0,
+        n_bootstrap: int = 100
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Batched CPU implementation of bootstrap Bayesian KRR using numpy.
+
+    Vectorizes across all bootstrap samples for better performance than looping.
+    """
+    n_samples = len(stance)
+
+    # Generate all bootstrap indices at once
+    indices = np.random.randint(0, n_samples, size=(n_bootstrap, n_samples))
+
+    # Resample
+    boot_stance = stance[indices]  # (n_bootstrap, n_samples)
+    boot_timestamps = timestamps[indices]  # (n_bootstrap, n_samples)
+
+    gamma = 1.0 / (2 * lengthscale ** 2)
+
+    # Compute kernel matrices for all bootstraps
+    # boot_timestamps: (n_bootstrap, n_samples) -> (n_bootstrap, n_samples, 1)
+    boot_x = boot_timestamps[:, :, np.newaxis]
+
+    # K_train: (n_bootstrap, n_samples, n_samples)
+    diff_train = boot_x - boot_x.transpose(0, 2, 1)
+    K_train = np.exp(-gamma * diff_train ** 2)
+
+    # K_test: (n_bootstrap, n_test, n_samples)
+    # test_x: (n_test,) -> (1, n_test, 1) for broadcasting
+    # boot_timestamps: (n_bootstrap, n_samples) -> (n_bootstrap, 1, n_samples)
+    test_x_expanded = test_x[np.newaxis, :, np.newaxis]  # (1, n_test, 1)
+    boot_x_for_test = boot_timestamps[:, np.newaxis, :]  # (n_bootstrap, 1, n_samples)
+    diff_test = test_x_expanded - boot_x_for_test  # (n_bootstrap, n_test, n_samples)
+    K_test = np.exp(-gamma * diff_test ** 2)
+
+    # Regularize and solve
+    eye = np.eye(n_samples)[np.newaxis, :, :]  # (1, n_samples, n_samples)
+    K_reg = K_train + alpha * eye
+
+    # Solve (K_reg @ weights = boot_stance) for each bootstrap
+    # np.linalg.solve broadcasts over leading dimensions
+    weights = np.linalg.solve(K_reg, boot_stance)  # (n_bootstrap, n_samples)
+
+    # Predict: (n_bootstrap, n_test, n_samples) @ (n_bootstrap, n_samples, 1)
+    pred = np.einsum('btn,bn->bt', K_test, weights)  # (n_bootstrap, n_test)
+    pred = np.clip(pred, -1, 1)
+
+    mean = np.mean(pred, axis=0)
+    lower = np.percentile(pred, 5, axis=0)
+    upper = np.percentile(pred, 95, axis=0)
+
+    return mean, lower, upper
+
+
+if NUMBA_AVAILABLE:
+    @njit(fastmath=True)
+    def _bayesian_krr_bootstrap_numba(
+            stance: np.ndarray,
+            timestamps: np.ndarray,
+            test_x: np.ndarray,
+            indices: np.ndarray,
+            lengthscale: float,
+            alpha: float
+        ) -> np.ndarray:
+        """
+        Numba-optimized bootstrap Bayesian KRR.
+
+        Uses JIT compilation for fast inner loops without OpenMP (avoids OpenBLAS conflict).
+        """
+        n_bootstrap, n_samples = indices.shape
+        n_test = len(test_x)
+        gamma = 1.0 / (2 * lengthscale ** 2)
+
+        all_preds = np.zeros((n_bootstrap, n_test))
+
+        for b in range(n_bootstrap):
+            # Resample for this bootstrap
+            boot_stance = stance[indices[b]]
+            boot_timestamps = timestamps[indices[b]]
+
+            # Compute K_train: (n_samples, n_samples)
+            K_train = np.zeros((n_samples, n_samples))
+            for i in range(n_samples):
+                for j in range(n_samples):
+                    diff = boot_timestamps[i] - boot_timestamps[j]
+                    K_train[i, j] = np.exp(-gamma * diff * diff)
+
+            # Add regularization
+            for i in range(n_samples):
+                K_train[i, i] += alpha
+
+            # Solve K_train @ weights = boot_stance using Cholesky
+            # Since K_train + alpha*I is positive definite, use Cholesky
+            # Manual Cholesky solve for numba compatibility
+            L = np.linalg.cholesky(K_train)
+            # Solve L @ y = boot_stance
+            y = np.zeros(n_samples)
+            for i in range(n_samples):
+                s = boot_stance[i]
+                for j in range(i):
+                    s -= L[i, j] * y[j]
+                y[i] = s / L[i, i]
+            # Solve L.T @ weights = y
+            weights = np.zeros(n_samples)
+            for i in range(n_samples - 1, -1, -1):
+                s = y[i]
+                for j in range(i + 1, n_samples):
+                    s -= L[j, i] * weights[j]
+                weights[i] = s / L[i, i]
+
+            # Compute predictions at test points
+            for t in range(n_test):
+                pred = 0.0
+                for i in range(n_samples):
+                    diff = test_x[t] - boot_timestamps[i]
+                    k = np.exp(-gamma * diff * diff)
+                    pred += k * weights[i]
+                # Clip to [-1, 1]
+                all_preds[b, t] = max(-1.0, min(1.0, pred))
+
+        return all_preds
+
+
+def bootstrap_bayesian_krr_numba(
+        stance: np.ndarray,
+        timestamps: np.ndarray,
+        test_x: np.ndarray,
+        lengthscale: float = 1.0,
+        alpha: float = 1.0,
+        n_bootstrap: int = 100
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Numba-accelerated bootstrap Bayesian KRR.
+
+    Falls back to batched numpy if numba not available.
+    """
+    if not NUMBA_AVAILABLE:
+        return bootstrap_bayesian_krr_cpu_batched(
+            stance, timestamps, test_x, lengthscale, alpha, n_bootstrap
+        )
+
+    n_samples = len(stance)
+    indices = np.random.randint(0, n_samples, size=(n_bootstrap, n_samples))
+
+    all_preds = _bayesian_krr_bootstrap_numba(
+        stance.astype(np.float64),
+        timestamps.astype(np.float64),
+        test_x.astype(np.float64),
+        indices,
+        float(lengthscale),
+        float(alpha)
+    )
+
+    mean = np.mean(all_preds, axis=0)
+    lower = np.percentile(all_preds, 5, axis=0)
+    upper = np.percentile(all_preds, 95, axis=0)
+
+    return mean, lower, upper
+
+
 def _get_timestamps(df: pl.DataFrame, start_date: datetime.datetime, time_column, time_scale):
     
     numerator_match = re.search('^\d', time_scale)
@@ -1273,9 +1753,9 @@ def _get_time_series_data(filtered_df: pl.DataFrame, stance_target_type: str, ti
 
 def _combine_trend_df(trend_df: pl.DataFrame, pred, lower, upper, target_name, filter_type, filter_value):
     trend_df = trend_df.with_columns([
-        pl.Series(name='trend_mean', values=pred),
-        pl.Series(name='trend_lower', values=lower),
-        pl.Series(name='trend_upper', values=upper)
+        pl.Series(name='trend_mean', values=pred, dtype=pl.Float32),
+        pl.Series(name='trend_lower', values=lower, dtype=pl.Float32),
+        pl.Series(name='trend_upper', values=upper, dtype=pl.Float32)
     ])
     
     # Join trend and volume data in a single operation
@@ -1498,7 +1978,8 @@ def _calculate_trends_for_filtered_df(
 
     elif interpolation_method == 'kernelreg':
         n_bootstrap = 100
-        bandwidth = 10.0
+        # Use same lengthscale as GP: mode of log-normal = exp(loc - scale²)
+        bandwidth = np.exp(lengthscale_loc - lengthscale_scale**2)
         n_train_samples = len(stance)
         n_test_samples = len(test_x)
 
@@ -1537,6 +2018,38 @@ def _calculate_trends_for_filtered_df(
 
         trend_df = _combine_trend_df(trend_df, pred_mean, pred_lower, pred_upper, target_name, filter_type, filter_value)
         interpolation_outputs = {}
+
+    elif interpolation_method == 'bayesian_krr':
+        n_bootstrap = 100
+        # Use mode of log-normal prior: exp(loc - scale²)
+        lengthscale = np.exp(lengthscale_loc - lengthscale_scale**2)
+        alpha = 1.0  # Prior strength toward 0
+
+        if GPU_AVAILABLE:
+            pred_mean, pred_lower, pred_upper = bootstrap_bayesian_krr_gpu_batched(
+                stance, timestamps, test_x,
+                lengthscale=lengthscale, alpha=alpha, n_bootstrap=n_bootstrap
+            )
+        else:
+            # Use numba-optimized version for CPU (falls back to batched numpy if numba unavailable)
+            pred_mean, pred_lower, pred_upper = bootstrap_bayesian_krr_numba(
+                stance, timestamps, test_x,
+                lengthscale=lengthscale, alpha=alpha, n_bootstrap=n_bootstrap
+            )
+
+        trend_df = _combine_trend_df(trend_df, pred_mean, pred_lower, pred_upper, target_name, filter_type, filter_value)
+        interpolation_outputs = {'lengthscale': lengthscale, 'alpha': alpha}
+
+    elif interpolation_method == 'exact_gp':
+        mean, lower, upper, hyperparams = exact_gp_fit(
+            timestamps, stance, test_x,
+            lengthscale_loc=lengthscale_loc, lengthscale_scale=lengthscale_scale,
+            noise=0.5, learn_hyperparams=True, n_iter=50, verbose=verbose
+        )
+
+        trend_df = _combine_trend_df(trend_df, mean, lower, upper, target_name, filter_type, filter_value)
+        interpolation_outputs = hyperparams
+
     else:
         raise ValueError(f"Unknown interpolation method: {interpolation_method}")
 
@@ -1556,7 +2069,8 @@ def infer_stance_trends_for_target(
         lengthscale_loc = 2.0, # mode at ~7.5 months
         lengthscale_scale = 0.1,
         sigma_loc = 1.0,
-        sigma_scale = 0.2
+        sigma_scale = 0.2,
+        get_overall_trend=True
     ) -> Tuple[pl.DataFrame, List[Dict[str, Any]]]:
     """Compute trend data for a specific target.
     
@@ -1671,30 +2185,31 @@ def infer_stance_trends_for_target(
                 logger.info(f"Processed {filter_column} {filter_value}: {len(filtered_df)} points")
         
 
-    # First, the overall trend
-    trend_df, interpolation_outputs = _calculate_trends_for_filtered_df(
-        target_df, 
-        target_name, 
-        stance_target_type,
-        'all', 
-        'all', 
-        classifier_profiles,
-        time_column,
-        time_scale,
-        interpolation_method=interpolation_method,
-        lengthscale_loc=lengthscale_loc,
-        lengthscale_scale=lengthscale_scale,
-        sigma_loc=sigma_loc,
-        sigma_scale=sigma_scale,
-        verbose=verbose
-    )
-    if interpolation_outputs is not None:
-        all_interpolation_outputs.append(interpolation_outputs)
-    if trend_df is not None:
-        if all_trend_df is None:
-            all_trend_df = trend_df
-        else:
-            all_trend_df = pl.concat([all_trend_df, trend_df])
+    if get_overall_trend:
+        # First, the overall trend
+        trend_df, interpolation_outputs = _calculate_trends_for_filtered_df(
+            target_df, 
+            target_name, 
+            stance_target_type,
+            'all', 
+            'all', 
+            classifier_profiles,
+            time_column,
+            time_scale,
+            interpolation_method=interpolation_method,
+            lengthscale_loc=lengthscale_loc,
+            lengthscale_scale=lengthscale_scale,
+            sigma_loc=sigma_loc,
+            sigma_scale=sigma_scale,
+            verbose=verbose
+        )
+        if interpolation_outputs is not None:
+            all_interpolation_outputs.append(interpolation_outputs)
+        if trend_df is not None:
+            if all_trend_df is None:
+                all_trend_df = trend_df
+            else:
+                all_trend_df = pl.concat([all_trend_df, trend_df])
 
     return all_trend_df, all_interpolation_outputs
 
