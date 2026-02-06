@@ -483,7 +483,7 @@ class StanceMining:
         if len(target_df) <= batch_size:
             target_mapper = utils._get_similar_target_mapper(target_df, embedding_model=embedding_model, max_distance=max_distance)
         else:
-            target_mapper = utils._get_similar_target_mapper_batch(target_df, embedding_model=embedding_model, max_embedding_distance=max_distance, batch_size=batch_size)
+            target_mapper = utils._get_similar_target_mapper_batch(target_df, embedding_model, self.stance_target_type, max_embedding_distance=max_distance, batch_size=batch_size)
         logger.debug("Replacing small count targets with larger count similar targets")
         documents_df = documents_df.with_columns(
             pl.col('Targets').list.eval(pl.element().replace(target_mapper)).list.unique()
