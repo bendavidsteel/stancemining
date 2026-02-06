@@ -31,7 +31,7 @@ class SentenceTransformerEmbedder(Embedder):
 class VLLMEmbedder(Embedder):
     def __init__(self, model: str = "all-MiniLM-L6-v2", kwargs: dict = {}):
         import vllm
-        self.llm = vllm.LLM(model=model, task='embed', **kwargs)
+        self.llm = vllm.LLM(model=model, runner='pooling', **kwargs)
 
     def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
         outputs = self.llm.embed(texts, use_tqdm=show_progress_bar)

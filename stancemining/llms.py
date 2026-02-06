@@ -291,7 +291,6 @@ def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, gener
 
     chat_template_kwargs = {}
     if task in GENERATION_TASKS or (task in CLASSIFICATION_TASKS and model_config.classification_method == 'generation'):
-        model_kwargs['task'] = 'generate'
         model_kwargs['generation_config'] = 'auto'
         model_kwargs['enable_lora'] = True
         chat_template_kwargs['enable_thinking'] = False
@@ -307,8 +306,8 @@ def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, gener
             model_name = config['base_model_name']
 
     elif task in CLASSIFICATION_TASKS and model_config.classification_method == 'head':
-        model_kwargs['task'] = 'classify'
-        # model_kwargs['enforce_eager'] = True
+        model_kwargs['runner'] = 'pooling'
+        model_kwargs['convert'] = 'classify'
         model_name = model_save_path
     else:
         raise ValueError()
