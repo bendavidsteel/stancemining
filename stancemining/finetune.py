@@ -512,10 +512,9 @@ class DataProcessor:
         dataset = self._add_prompts(dataset)
         if tokenize:
             dataset = self._tokenize_dataset(dataset, classification_method, train=train)
-            if train:
-                columns = ['input_ids', 'attention_mask', 'labels']
-            else:
-                columns = ['input_ids', 'attention_mask']
+            columns = ['input_ids', 'attention_mask']
+            if 'labels' in dataset.column_names:
+                columns.append('labels')
             dataset.set_format(type='torch', columns=columns)
         if train:
             dataset.shuffle(seed=42)
@@ -596,8 +595,9 @@ class DataProcessor:
         else:
             num_proc = 1
         if self.model_config.task in CLASSIFICATION_TASKS:
-            if train:
+            if 'class' in dataset.column_names:
                 dataset = dataset.rename_column("class", "labels")
+            if train:
                 if classification_method == 'head':
                     dataset = dataset.map(tokenizer.create_input_sequence_for_generation, batched=True, num_proc=num_proc)
                 elif classification_method == 'generation':
@@ -684,11 +684,12 @@ class ModelEvaluator:
             'recall': self.metrics['recall'].compute(predictions=predictions, references=references, average=None)['recall']
         }
         for label, label_id in labels2id.items():
-            pred_metrics[label] = {
-                'f1': float(label_metrics['f1'][label_id]),
-                'precision': float(label_metrics['precision'][label_id]),
-                'recall': float(label_metrics['recall'][label_id])
-            }
+            if label_id in label_metrics['f1']:
+                pred_metrics[label] = {
+                    'f1': float(label_metrics['f1'][label_id]),
+                    'precision': float(label_metrics['precision'][label_id]),
+                    'recall': float(label_metrics['recall'][label_id])
+                }
 
         df = pl.DataFrame({'prediction': predictions, 'reference': references, 'dataset': datasets})
         for key, dataset_df in df.partition_by('dataset', as_dict=True).items():
@@ -850,8 +851,14 @@ class ModelTrainer:
             # pin_memory=True,
             # pin_memory_device=self.model_config.model.device
         )
+        eval_cols = ['input_ids', 'attention_mask']
+        if 'labels' in eval_dataset.column_names:
+            eval_cols.append('labels')
+        elif 'class' in eval_dataset.column_names:
+            eval_cols.append('labels')
+            eval_dataset = eval_dataset.rename_column('class', 'labels')
         eval_loader = torch.utils.data.DataLoader(
-            eval_dataset.select_columns(['input_ids', 'attention_mask']),
+            eval_dataset.select_columns(eval_cols),
             batch_size=self.training_config.batch_size,
             # pin_memory=True,
             # pin_memory_device=self.model_config.model.device
@@ -936,17 +943,18 @@ class ModelTrainer:
                 self.accelerator,
                 neftune_hook
             )
-            metrics = self._validation_step(eval_loader, eval_dataset, evaluator)
+            metrics = self._validation_step(eval_loader, eval_dataset, evaluator, loss_func)
             state_str = ""
             if self.model_config.task in CLASSIFICATION_TASKS:
-                report_keys = ['f1_macro', 'precision', 'recall']
+                report_keys = ['f1_macro', 'precision', 'recall', 'loss']
             elif self.model_config.task in GENERATION_TASKS:
                 report_keys = ['bertscore_f1', 'bleu_f1']
             else:
                 raise ValueError("Task not found")
             for key in report_keys:
-                val = metrics[key]
-                state_str += f" {key.title()}: {val:.4f},"
+                if key in metrics:
+                    val = metrics[key]
+                    state_str += f" {key.title()}: {val:.4f},"
             print(state_str)
             eval_metrics = {f"eval/{key}": val for key, val in metrics.items()}
             wandb.log(eval_metrics)
@@ -986,24 +994,46 @@ class ModelTrainer:
                 optimizer.zero_grad()
                 scheduler.step()
 
-    def _validation_step(self, eval_loader, eval_dataset, evaluator: ModelEvaluator):
+    def _validation_step(self, eval_loader, eval_dataset, evaluator: ModelEvaluator, loss_func=None):
         """Run validation step"""
         self.model_config.model.eval()
         all_preds = []
         all_labels = []
-        
+        total_loss = 0.0
+        num_batches = 0
+
         pbar = tqdm.tqdm(total=len(eval_loader), desc="Validation round")
         with torch.no_grad():
             for batch in eval_loader:
                 pbar.update(1)
-                preds = get_prediction(
-                    batch, 
-                    self.model_config.task, 
-                    self.model_config.model, 
-                    self.model_config.tokenizer, 
-                    self.model_config.classification_method,
-                    self.model_config.generation_method
-                )
+
+                # For head classification, do single forward pass for both loss and predictions
+                if self.model_config.task in CLASSIFICATION_TASKS \
+                        and self.model_config.classification_method == 'head':
+                    inputs = {k: v.to(self.model_config.model.device) for k, v in batch.items()}
+                    outputs = self.model_config.model(**inputs)
+
+                    # Compute loss if loss_func and labels are available
+                    if loss_func is not None and 'labels' in batch:
+                        labels = batch['labels'].to(self.model_config.model.device)
+                        loss = loss_func(outputs.logits, labels)
+                        total_loss += loss.item()
+                        num_batches += 1
+
+                    # Extract predictions from same forward pass
+                    predicted_class = torch.argmax(outputs.logits, dim=1)
+                    preds = predicted_class.cpu().tolist()
+                else:
+                    # For generation methods, use existing get_prediction
+                    preds = get_prediction(
+                        batch,
+                        self.model_config.task,
+                        self.model_config.model,
+                        self.model_config.tokenizer,
+                        self.model_config.classification_method,
+                        self.model_config.generation_method
+                    )
+
                 all_preds.extend(preds)
 
                 # delete batch to reduce memory usage
@@ -1011,14 +1041,20 @@ class ModelTrainer:
         pbar.close()
 
         if self.model_config.task in CLASSIFICATION_TASKS:
-            all_labels = eval_dataset.to_polars()['class'].to_list() # for some insane reason eval_dataset['class'] does not work
+            eval_df = eval_dataset.to_polars()
+            label_col = 'labels' if 'labels' in eval_df.columns else 'class'
+            all_labels = eval_df[label_col].to_list()
         elif self.model_config.task in GENERATION_TASKS:
             all_labels = eval_dataset.to_polars()['topic'].to_list()
         else:
             raise ValueError("Task not found")
         datasets = eval_dataset.to_polars()['dataset'].to_list()
-        
+
         metrics = evaluator.evaluate(all_preds, all_labels, datasets)
+
+        # Add validation loss to metrics if computed
+        if num_batches > 0:
+            metrics['loss'] = total_loss / num_batches
 
         # clear memory
         torch.cuda.empty_cache()

@@ -1,4 +1,8 @@
 CLAUDE.local.md
+DECISIONS.md
+.claude
+embeddings
+figs
 multirun
 outputs
 ckp

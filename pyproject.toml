@@ -37,12 +37,6 @@ classifiers = [
     "Topic :: Text Processing :: Linguistic",
 ]
 
-[project.urls]
-Homepage = "https://github.com/bendavidsteel/stancemining"
-Documentation = "https://stancemining.readthedocs.io"
-Repository = "https://github.com/bendavidsteel/stancemining"
-Issues = "https://github.com/bendavidsteel/stancemining/issues"
-Changelog = "https://github.com/bendavidsteel/stancemining/releases"
 dependencies = [
     "accelerate>=1.7.0",
     "cuml-cu12",
@@ -64,6 +58,13 @@ dependencies = [
     "tqdm>=4.67.1",
     "vllm>=0.7.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/bendavidsteel/stancemining"
+Documentation = "https://stancemining.readthedocs.io"
+Repository = "https://github.com/bendavidsteel/stancemining"
+Issues = "https://github.com/bendavidsteel/stancemining/issues"
+Changelog = "https://github.com/bendavidsteel/stancemining/releases"
 
 [project.optional-dependencies]
 gp = [
