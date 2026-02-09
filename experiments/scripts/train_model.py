@@ -189,7 +189,9 @@ def _main(config, args):
 
         datasets = test_dataset.to_polars()['dataset'].to_list()
         if model_config.task in CLASSIFICATION_TASKS:
-            references = test_dataset.to_polars()['class'].to_list()  # for some insane reason test_dataset['class'] does not work
+            test_df = test_dataset.to_polars()
+            label_col = 'labels' if 'labels' in test_df.columns else 'class'
+            references = test_df[label_col].to_list()
         else:
             references = test_data['Target'].to_list()
 
