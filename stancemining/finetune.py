@@ -245,7 +245,7 @@ def activate_neftune(model, accelerator, neftune_noise_alpha):
     del unwrapped_model
 
     embeddings.neftune_noise_alpha = neftune_noise_alpha
-    hook_handle = embeddings.register_forward_hook(transformers.trainer_utils.neftune_post_forward_hook)
+    hook_handle = embeddings.register_forward_hook(transformers.integrations.neftune.neftune_post_forward_hook)
     return model, hook_handle
 
 def deactivate_neftune(model, accelerator, neftune_hook_handle):
@@ -1079,9 +1079,14 @@ def setup_model_and_tokenizer(model_config: ModelConfig, model_kwargs={}, model_
                 create_fn = peft.AutoPeftModelForSequenceClassification.from_pretrained
             else:
                 create_fn = transformers.AutoModelForSequenceClassification.from_pretrained
+            # For multimodal models with sub_configs, num_labels must be set
+            # on the text sub-config directly, as from_pretrained extracts it
+            config = transformers.AutoConfig.from_pretrained(model_path, num_labels=model_config.num_labels)
+            if hasattr(config, 'sub_configs') and 'text_config' in config.sub_configs:
+                config.get_text_config().num_labels = model_config.num_labels
             model = create_fn(
                 model_path,
-                num_labels=model_config.num_labels,
+                config=config,
                 **model_kwargs
             )
         elif model_config.classification_method == 'generation':
