@@ -1343,6 +1343,36 @@ def bayesian_kernel_ridge_fit(
         return _bayesian_kernel_ridge_fit_cpu(train_x, train_y, test_x, lengthscale, alpha)
 
 
+def _loo_cv_optimal_alpha(train_x, train_y, lengthscale,
+                          alpha_range=np.logspace(-3, 2, 50)):
+    """Select optimal BKRR alpha via analytic leave-one-out cross-validation.
+
+    Uses eigendecomposition of the kernel matrix so that LOO-CV scores
+    for all candidate alphas are computed from a single O(n³) decomposition.
+    """
+    train_x = np.asarray(train_x).reshape(-1, 1)
+    train_y = np.asarray(train_y)
+    alpha_range = np.asarray(alpha_range)
+
+    gamma = 1.0 / (2 * lengthscale ** 2)
+    diff = train_x - train_x.T
+    K_train = np.exp(-gamma * diff ** 2)
+
+    eigenvalues, Q = np.linalg.eigh(K_train)
+    Q_y = Q.T @ train_y
+    Q_sq = Q ** 2
+
+    inv_eig = 1.0 / (eigenvalues[np.newaxis, :] + alpha_range[:, np.newaxis])
+    w = (inv_eig * Q_y[np.newaxis, :]) @ Q.T
+    H_diag = Q_sq @ inv_eig.T
+
+    loo_residuals = w / H_diag.T
+    scores = np.mean(loo_residuals ** 2, axis=1)
+
+    best_idx = np.argmin(scores)
+    return alpha_range[best_idx]
+
+
 def _bayesian_kernel_ridge_fit_cpu(train_x, train_y, test_x, lengthscale, alpha):
     """CPU implementation of Bayesian Kernel Ridge Regression."""
     train_x = np.asarray(train_x).reshape(-1, 1)
@@ -1925,15 +1955,15 @@ def _calculate_trends_for_filtered_df(
     start_date = filtered_df[time_column].min().date()
     end_date = filtered_df[time_column].max().date()
 
-    if end_date - start_date < datetime.timedelta(days=1):
-        # TODO implement static distribution calculation
-        # return calculate_static_dist_for_filtered_df(filtered_df, target_name, filter_type, filter_value, trend_path, classifier_profiles)
-        logger.warning(f"Skipping {target_name} {filter_type} {filter_value} - not enough data")
-        return None, None
-
     timestamps, stance, classifier_ids, test_x, trend_df = _get_time_series_data(filtered_df, stance_target_type, time_column, time_scale)
     
     if interpolation_method == 'gp':
+        if end_date - start_date < datetime.timedelta(days=1):
+            # TODO implement static distribution calculation
+            # return calculate_static_dist_for_filtered_df(filtered_df, target_name, filter_type, filter_value, trend_path, classifier_profiles)
+            logger.warning(f"Skipping {target_name} {filter_type} {filter_value} - not enough data")
+            return None, None
+
         assert stance_target_type == 'noun-phrases', "GP only supports noun-phrase targets"
         try:
             lengthscale, likelihood_sigma, losses, pred, lower, upper = _get_gp_timeseries(timestamps, stance, classifier_ids, classifier_profiles, test_x, lengthscale_loc, lengthscale_scale, sigma_loc, sigma_scale, verbose)
@@ -2019,11 +2049,11 @@ def _calculate_trends_for_filtered_df(
         trend_df = _combine_trend_df(trend_df, pred_mean, pred_lower, pred_upper, target_name, filter_type, filter_value)
         interpolation_outputs = {}
 
-    elif interpolation_method == 'bayesian_krr':
+    elif interpolation_method == 'bkrr':
         n_bootstrap = 100
         # Use mode of log-normal prior: exp(loc - scale²)
         lengthscale = np.exp(lengthscale_loc - lengthscale_scale**2)
-        alpha = 1.0  # Prior strength toward 0
+        alpha = _loo_cv_optimal_alpha(timestamps, stance, lengthscale)
 
         if GPU_AVAILABLE:
             pred_mean, pred_lower, pred_upper = bootstrap_bayesian_krr_gpu_batched(
