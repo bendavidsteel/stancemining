@@ -1043,9 +1043,16 @@ def setup_model_and_tokenizer(model_config: ModelConfig, model_kwargs={}, model_
                 create_fn = peft.AutoPeftModelForSequenceClassification.from_pretrained
             else:
                 create_fn = transformers.AutoModelForSequenceClassification.from_pretrained
+            # Load config from base model (not adapter dir, which lacks config.json)
+            config_path = model_config.model_name if (model_save_path and not full_saved_model) else model_path
+            config = transformers.AutoConfig.from_pretrained(config_path, num_labels=model_config.num_labels)
+            # For multimodal models with sub_configs, num_labels must be set
+            # on the text sub-config directly, as from_pretrained extracts it
+            if hasattr(config, 'sub_configs') and 'text_config' in config.sub_configs:
+                config.get_text_config().num_labels = model_config.num_labels
             model = create_fn(
                 model_path,
-                num_labels=model_config.num_labels,
+                config=config,
                 **model_kwargs
             )
         elif model_config.classification_method == 'generation':
