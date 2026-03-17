@@ -1086,11 +1086,20 @@ def setup_model_and_tokenizer(model_config: ModelConfig, model_kwargs={}, model_
             # on the text sub-config directly, as from_pretrained extracts it
             if hasattr(config, 'sub_configs') and 'text_config' in config.sub_configs:
                 config.get_text_config().num_labels = model_config.num_labels
-            model = create_fn(
-                model_path,
-                config=config,
-                **model_kwargs
-            )
+            # PEFT loaders don't accept a transformers config object;
+            # pass num_labels directly so the base model is created correctly
+            if model_save_path and not full_saved_model:
+                model = create_fn(
+                    model_path,
+                    num_labels=model_config.num_labels,
+                    **model_kwargs
+                )
+            else:
+                model = create_fn(
+                    model_path,
+                    config=config,
+                    **model_kwargs
+                )
         elif model_config.classification_method == 'generation':
             if model_save_path:
                 create_fn = peft.AutoPeftModelForCausalLM.from_pretrained
