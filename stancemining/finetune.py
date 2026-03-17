@@ -1086,14 +1086,14 @@ def setup_model_and_tokenizer(model_config: ModelConfig, model_kwargs={}, model_
             # on the text sub-config directly, as from_pretrained extracts it
             if hasattr(config, 'sub_configs') and 'text_config' in config.sub_configs:
                 config.get_text_config().num_labels = model_config.num_labels
-            # PEFT loaders don't accept a transformers config object;
-            # pass num_labels directly so the base model is created correctly
             if model_save_path and not full_saved_model:
-                model = create_fn(
-                    model_path,
-                    num_labels=model_config.num_labels,
+                # Load base model with correct config first, then apply adapter
+                base_model = transformers.AutoModelForSequenceClassification.from_pretrained(
+                    model_config.model_name,
+                    config=config,
                     **model_kwargs
                 )
+                model = peft.PeftModel.from_pretrained(base_model, model_path)
             else:
                 model = create_fn(
                     model_path,
