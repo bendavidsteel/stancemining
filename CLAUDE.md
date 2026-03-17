@@ -94,3 +94,35 @@ Uses cuml for UMAP/HDBSCAN clustering, gpytorch for Gaussian processes. Falls ba
 - Import blocks: stdlib, then third-party (general imports), then library-specific imports
 - Avoid for loops with numpy/jax - use vectorized operations
 - Avoid global variables
+
+## Performance Expectations
+
+### Trend Inference (`estimate.py`)
+For 1000 training samples, 100 test points, 100 bootstrap samples:
+- Original kernel regression (CPU): ~1.2s
+- Bayesian KRR (GPU batched): ~1.2s
+- Exact GP (GPU, 50 iter): ~1.6s
+- Bayesian KRR (numba CPU): ~2.1s
+- Bayesian KRR (CPU batched numpy): ~3.3s
+
+Ordinal GP with SVI takes minutes - avoid for large-scale inference.
+
+## Gotchas
+
+### Lengthscale Parameterization
+The GP functions use log-normal priors for lengthscale. `lengthscale_loc` is passed to `torch.log()` internally:
+- `lengthscale_loc=2.0, lengthscale_scale=0.1` gives mode ≈ 7.3 months
+- Mode formula: `exp(log(loc) - scale²)` = `exp(ln(2.0) - 0.01)` ≈ 7.3
+- This is designed for monthly time scales (`time_scale='1mo'`)
+
+### GPU Batched Broadcasting
+When implementing batched GPU operations, be careful with tensor shapes:
+- Training kernel: `(n_bootstrap, n_samples, n_samples)`
+- Test kernel: `(n_bootstrap, n_test, n_samples)`
+- Use `timestamps.unsqueeze(1)` not `timestamps.unsqueeze(-1).unsqueeze(1)` for test kernel broadcasting
+
+### Bayesian KRR Alpha Parameter
+The `alpha` parameter in Bayesian KRR controls prior strength toward 0:
+- `alpha=0.01`: Weak prior, predictions close to data (can overfit)
+- `alpha=1.0`: Moderate prior, good default
+- `alpha=5.0`: Strong prior, heavy shrinkage toward 0

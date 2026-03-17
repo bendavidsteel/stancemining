@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "StanceMining: A Library for Stance Detection and Target Extraction"
+type: software
+authors:
+  - family-names: Steel
+    given-names: Benjamin
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+  - family-names: Ruths
+    given-names: Derek
+repository-code: "https://github.com/bendavidsteel/stancemining"
+url: "https://stancemining.readthedocs.io"
+license: MIT
+version: 0.2.0
+date-released: 2025-01-01
+keywords:
+  - stance detection
+  - target extraction
+  - natural language processing
+  - text mining
+  - machine learning
+  - nlp
+  - computational social science
+preferred-citation:
+  type: conference-paper
+  title: "Corpus-Oriented Stance Target Extraction"
+  authors:
+    - family-names: Steel
+      given-names: Benjamin
+    - family-names: Ruths
+      given-names: Derek
+  collection-title: "Proceedings of the 6th Workshop on Computational Approaches to Discourse, Context and Document-Level Inferences (CODI 2025)"
+  start: 209
+  end: 227
+  year: 2025
