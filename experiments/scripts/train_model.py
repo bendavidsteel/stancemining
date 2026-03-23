@@ -139,7 +139,9 @@ def _main(config, args):
         train_dataset = processor.process_data(train_data, model_config.classification_method, model_config.generation_method)
         val_dataset = processor.process_data(val_data, model_config.classification_method, model_config.generation_method, train=False)
 
-        if not args.continue_training:
+        if args.continue_training:
+            trainer.prepare_for_continued_training()
+        else:
             trainer.prepare_for_training()
         
         # Train model

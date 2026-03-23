@@ -767,6 +767,22 @@ class ModelTrainer:
         self.model_config.model = model
         self.model_config.tokenizer = tokenizer
 
+    def prepare_for_continued_training(self) -> None:
+        """Prepare a loaded PEFT model for continued training"""
+        if self.training_config.grad_accum_steps > 1:
+            self.model_config.model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+
+        if (self.model_config.task in CLASSIFICATION_TASKS and self.model_config.classification_method == 'head' and self.training_config.grad_accum_steps > 1) \
+            or (self.model_config.quantization is not None):
+            self.model_config.model = peft.prepare_model_for_kbit_training(self.model_config.model)
+
+        # Ensure adapter params are trainable
+        for name, param in self.model_config.model.named_parameters():
+            if 'lora_' in name or 'modules_to_save' in name:
+                param.requires_grad = True
+
     def prepare_for_training(self) -> None:
         """Prepare model for training with LoRA"""
         if self.training_config.grad_accum_steps > 1:
@@ -777,7 +793,7 @@ class ModelTrainer:
         if (self.model_config.task in CLASSIFICATION_TASKS and self.model_config.classification_method == 'head' and self.training_config.grad_accum_steps > 1) \
             or (self.model_config.quantization is not None):
             self.model_config.model = peft.prepare_model_for_kbit_training(self.model_config.model)
-        
+
         # Setup LoRA
         modules = self._find_all_linear_names()
         lora_kwargs = {}
