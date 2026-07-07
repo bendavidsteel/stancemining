@@ -40,6 +40,38 @@ class VLLMEmbedder(Embedder):
         logger.debug(f"Combined embeddings into array of shape {embeddings.shape}")
         return embeddings
 
+class MatryoshkaEmbedder(Embedder):
+    """Wrap any embedder to apply Matryoshka dimensionality reduction.
+
+    Embeds text at the base model's full dimensionality, then truncates each
+    vector to its first ``truncate_dim`` dimensions and (optionally) re-normalizes
+    to unit length. This is the "encode-then-truncate" approach used with
+    Matryoshka-trained embedding models (e.g. Qwen3-Embedding): it preserves more
+    semantic information than asking the model for a low-dim vector directly, while
+    keeping the downstream clustering/dedup cheap.
+
+    Args:
+        base_embedder: Any object exposing ``encode(texts, show_progress_bar=...)``
+            (e.g. a ``VLLMEmbedder``, ``SentenceTransformerEmbedder`` or a raw
+            ``sentence_transformers.SentenceTransformer``).
+        truncate_dim (int): Number of leading dimensions to keep. If None or larger
+            than the base dimensionality, no truncation is applied.
+        normalize (bool): Whether to L2-renormalize after truncation. Defaults to True.
+    """
+    def __init__(self, base_embedder, truncate_dim: int, normalize: bool = True):
+        self.base_embedder = base_embedder
+        self.truncate_dim = truncate_dim
+        self.normalize = normalize
+
+    def encode(self, texts: List[str], show_progress_bar: bool = None) -> np.ndarray:
+        embeddings = self.base_embedder.encode(texts, show_progress_bar=show_progress_bar)
+        embeddings = np.asarray(embeddings, dtype=np.float32)
+        if self.truncate_dim is not None and self.truncate_dim < embeddings.shape[1]:
+            embeddings = embeddings[:, :self.truncate_dim]
+            if self.normalize:
+                embeddings = sklearn.preprocessing.normalize(embeddings, axis=1, norm='l2').astype(np.float32)
+        return embeddings
+
 def cluster_target_embeddings(embeddings, max_distance = 0.2):
     normalized_embeddings = sklearn.preprocessing.normalize(embeddings, axis=1, norm='l2')
     

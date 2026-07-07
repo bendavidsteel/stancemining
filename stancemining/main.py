@@ -1,9 +1,11 @@
 import functools
 import logging
+from collections import defaultdict
 from typing import List, Union
 
 import numpy as np
 import polars as pl
+import sklearn.preprocessing
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 import torch
@@ -18,6 +20,11 @@ class StanceMining:
     Args:
         stance_target_type (str): Type of stance target to extract, either 'noun-phrases' or 'claims'.
         llm_method (str): Method to use for LLM inference, either 'prompting' or 'finetuned'.
+        stance_detection_llm_method (str): Method to use for stance detection specifically, either
+            'prompting' or 'finetuned'. Defaults to `llm_method`. Set to 'prompting' to classify stance
+            with a large prompted model (using `model_name`) while still extracting targets with a
+            finetuned model -- the prompted claim-stance path uses the 4-way
+            {supporting, refuting, discussing, irrelevant} scheme.
         model_inference (str): Inference method for the LLM, either 'vllm' or 'transformers'.
         model_name (str): Name of the base LLM model, which will be used for target cluster naming, and, if llm_method is 'prompting', for stance target extraction and detection.
         model_kwargs (dict): Additional keyword arguments for the LLM model.
@@ -32,17 +39,31 @@ class StanceMining:
         target_extraction_model_kwargs (dict): Keyword arguments for target extraction model inference.
         embedding_model (str): Name of the embedding model to use for target extraction.
         embedding_model_inference (str): Inference method for the embedding model, either 'vllm' or 'transformers'.
+        embedding_model_kwargs (dict): Additional keyword arguments passed to the embedding model backend
+            (e.g. SentenceTransformer or vLLM). Defaults to {}.
+        embedding_dim (int): If set, apply Matryoshka dimensionality reduction by encoding at the base
+            model's full dimensionality and truncating to the leading `embedding_dim` dimensions (then
+            re-normalizing). None keeps the model's native dimensionality (inferred automatically from the
+            chosen model). Defaults to None.
+        embedding_normalize (bool): Whether to L2-renormalize embeddings after Matryoshka truncation.
+            Only used when `embedding_dim` is set. None (default) infers this from the chosen model:
+            renormalize iff the base model itself produces normalized embeddings.
         topic_model (str): Topic model to use for clustering targets, either 'bertopic' or 'toponymy'.
         cosine_similarity_threshold (float): Cosine similarity threshold for deduplicating targets. Defaults to 0.8.
+        claim_entailment_task (str): Which claim-entailment label scheme to use for stance detection when
+            `stance_target_type='claims'`. One of 'claim-entailment-2way'/'-3way'/'-4way'/'-5way'/'-7way'.
+            Ignored for noun-phrase targets (which always use 3-way 'stance-classification'). Defaults to
+            'claim-entailment-7way'.
         verbose (bool): Whether to enable verbose logging. Defaults to False.
     """
 
     def __init__(
-            self, 
+            self,
             stance_target_type='noun-phrases',
             llm_method='finetuned',
-            model_inference='vllm', 
-            model_name='microsoft/Phi-4-mini-instruct', 
+            stance_detection_llm_method=None,
+            model_inference='vllm',
+            model_name='microsoft/Phi-4-mini-instruct',
             model_kwargs={}, 
             tokenizer_kwargs={},
             stance_detection_model=None,
@@ -55,8 +76,12 @@ class StanceMining:
             target_extraction_generation_kwargs={},
             embedding_model='intfloat/multilingual-e5-small',
             embedding_model_inference='vllm',
+            embedding_model_kwargs={},
+            embedding_dim=None,
+            embedding_normalize=None,
             topic_model='bertopic',
             cosine_similarity_threshold=0.8,
+            claim_entailment_task='claim-entailment-7way',
             verbose=False,
             use_embedding_cache=True,
         ):
@@ -66,6 +91,12 @@ class StanceMining:
         assert llm_method in ['prompting', 'finetuned'], f"LLM method must be either 'prompting' or 'finetuned', not '{llm_method}'"
         self.stance_target_type = stance_target_type
         self.llm_method = llm_method
+        # Stance detection can use a different method than target extraction, e.g.
+        # finetuned claim extraction + a large prompted model for stance. Defaults to llm_method.
+        if stance_detection_llm_method is None:
+            stance_detection_llm_method = llm_method
+        assert stance_detection_llm_method in ['prompting', 'finetuned'], f"Stance detection LLM method must be either 'prompting' or 'finetuned', not '{stance_detection_llm_method}'"
+        self.stance_detection_llm_method = stance_detection_llm_method
         assert model_inference in ['vllm', 'transformers', 'anthropic'], f"Model inference method must be either 'vllm', 'transformers' or 'anthropic', not '{model_inference}'"
         self.model_inference = model_inference
         self.model_name = model_name
@@ -123,9 +154,25 @@ class StanceMining:
         self.embedding_model = embedding_model
         assert embedding_model_inference in ['vllm', 'sentence-transformers'], f"Embedding model inference method must be either 'vllm' or 'sentence-transformers', not '{embedding_model_inference}'"
         self.embedding_model_inference = embedding_model_inference
-        self.embedding_cache_df = pl.DataFrame({'text': [], 'embedding': []}, schema={'text': pl.String, 'embedding': pl.Array(pl.Float32, 384)})
+        self.embedding_model_kwargs = embedding_model_kwargs
+        # Matryoshka truncation: encode at the base model's full dim, then keep the
+        # leading `embedding_dim` dims. None keeps the model's native dim (inferred
+        # from the model when it is loaded).
+        self.embedding_dim = embedding_dim
+        # None => infer from the embedding model (re-normalize after truncation iff
+        # the base model produces normalized embeddings). Resolved in _get_embedding_model.
+        self.embedding_normalize = embedding_normalize
+        # The cache stores whatever `_get_embedding_model().encode` returns, so its
+        # array width must match the final (post-truncation) embedding dimension. When
+        # `embedding_dim` is None the native width is unknown until the model loads, so
+        # this starts at a provisional width and is refined (while still empty) on load.
+        cache_dim = embedding_dim if embedding_dim is not None else 384
+        self.embedding_cache_df = pl.DataFrame({'text': [], 'embedding': []}, schema={'text': pl.String, 'embedding': pl.Array(pl.Float32, cache_dim)})
 
         self.cosine_similarity_threshold = cosine_similarity_threshold
+
+        assert claim_entailment_task in finetune.CLASSIFICATION_TASKS, f"claim_entailment_task must be one of {finetune.CLASSIFICATION_TASKS}, not '{claim_entailment_task}'"
+        self.claim_entailment_task = claim_entailment_task
 
         assert topic_model in ['bertopic', 'toponymy'], f"Topic model must be either 'bertopic' or 'toponymy', not '{topic_model}'"
         self.topic_model = topic_model
@@ -309,15 +356,49 @@ class StanceMining:
     def _get_embedding_model(self):
         if self.embedding_model_inference == 'vllm':
             try:
-                model = utils.VLLMEmbedder(model=self.embedding_model, kwargs={'gpu_memory_utilization': 0.1})
+                model = utils.VLLMEmbedder(model=self.embedding_model, kwargs={'gpu_memory_utilization': 0.1, **self.embedding_model_kwargs})
             except ImportError:
                 logger.warning("VLLM is not installed, using SentenceTransformer for embeddings.")
-                model = SentenceTransformer(self.embedding_model)
+                model = SentenceTransformer(self.embedding_model, **self.embedding_model_kwargs)
         elif self.embedding_model_inference == 'sentence-transformers':
-            model = SentenceTransformer(self.embedding_model)
+            model = SentenceTransformer(self.embedding_model, **self.embedding_model_kwargs)
         else:
             raise ValueError(f"Embedding model inference method '{self.embedding_model_inference}' not implemented")
+
+        # Infer the base model's native dimensionality and whether it normalizes, so
+        # that `embedding_dim`/`embedding_normalize` need not be set by hand.
+        native_dim, native_normalizes = self._infer_embedding_properties(model)
+        if self.embedding_normalize is None:
+            self.embedding_normalize = native_normalizes
+        final_dim = self.embedding_dim if self.embedding_dim is not None else native_dim
+
+        if self.embedding_dim is not None:
+            # Matryoshka encode-then-truncate wrapper around the base embedder.
+            model = utils.MatryoshkaEmbedder(model, truncate_dim=self.embedding_dim, normalize=self.embedding_normalize)
+
+        # Refine the (still empty) embedding cache to the final embedding width.
+        if len(self.embedding_cache_df) == 0 and self.embedding_cache_df.schema['embedding'].size != final_dim:
+            self.embedding_cache_df = pl.DataFrame({'text': [], 'embedding': []}, schema={'text': pl.String, 'embedding': pl.Array(pl.Float32, final_dim)})
         return model
+
+    def _infer_embedding_properties(self, base_model):
+        """Infer (native_dim, normalizes) from a loaded embedding model.
+
+        Uses the SentenceTransformer API when available (no extra forward pass);
+        otherwise probes the model with a single dummy string.
+        """
+        try:
+            from sentence_transformers.models import Normalize
+            if isinstance(base_model, SentenceTransformer):
+                dim = base_model.get_sentence_embedding_dimension()
+                normalizes = any(isinstance(module, Normalize) for module in base_model)
+                return dim, normalizes
+        except ImportError:
+            pass
+        vec = np.asarray(base_model.encode(['test'], show_progress_bar=False), dtype=np.float32)
+        dim = int(vec.shape[1])
+        normalizes = bool(np.allclose(np.linalg.norm(vec, axis=1), 1.0, atol=1e-2))
+        return dim, normalizes
 
     def _get_embeddings(self, docs: Union[List[str], pl.Series], model=None) -> np.ndarray:
         if model is None:
@@ -389,12 +470,12 @@ class StanceMining:
         return target_df['Targets'].to_list()
 
     def _ask_llm_stance(self, docs, stance_targets, parent_docs=None):
-        task = 'stance-classification' if self.stance_target_type == 'noun-phrases' else 'claim-entailment-7way'
-        if self.llm_method == 'prompting':
+        task = 'stance-classification' if self.stance_target_type == 'noun-phrases' else self.claim_entailment_task
+        if self.stance_detection_llm_method == 'prompting':
             llm = self._get_llm()
             assert parent_docs is None, "Parent documents not supported for prompting stance detection"
             return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets, stance_target_type=self.stance_target_type, verbose=self.verbose)
-        elif self.llm_method == 'finetuned':
+        elif self.stance_detection_llm_method == 'finetuned':
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentTexts': parent_docs})
             if isinstance(data.schema['ParentTexts'], pl.String):
                 # convert to list
@@ -789,10 +870,104 @@ class StanceMining:
         return documents_df
 
 
+    def retrieve_documents_for_targets(
+            self,
+            docs: Union[List[str], pl.DataFrame],
+            targets: List[str],
+            text_column: str = 'text',
+            similarity_threshold: float = 0.5,
+            match: str = 'claims',
+            embedding_model=None,
+            keep_unmatched: bool = False,
+            batch_size: int = 100000,
+        ) -> pl.DataFrame:
+        """Retrieve documents whose content is semantically similar to supplied targets.
+
+        Supports the "select claims, then find who discusses them" workflow: extract
+        targets with `get_base_targets` (or `fit_transform`), pick the targets of
+        interest (e.g. top claims), retrieve the documents that match them here, then
+        pass the result straight to `get_stance` for stance/entailment classification.
+
+        Matching is by cosine similarity in the configured embedding space (so
+        Matryoshka truncation, if enabled, applies to both queries and pool).
+
+        Args:
+            docs (Union[List[str], pl.DataFrame]): Documents to search. For
+                `match='claims'` this should contain a 'Targets' column of extracted
+                targets (i.e. the output of `get_base_targets`); for `match='text'`
+                any list/DataFrame of documents works.
+            targets (List[str]): Stance targets (e.g. selected canonical/top claims) to
+                retrieve documents for.
+            text_column (str): Text column name if `docs` is a DataFrame. Defaults to 'text'.
+            similarity_threshold (float): Cosine similarity above which a document is
+                considered to match a target. Defaults to 0.5.
+            match (str): 'claims' matches supplied targets against each document's
+                extracted targets; 'text' matches against the raw document text.
+            embedding_model: Embedding model to use. Defaults to the configured one.
+            keep_unmatched (bool): If False (default), return only documents matching at
+                least one target; if True, return all documents (unmatched get an empty
+                'Targets' list).
+            batch_size (int): Number of pool items embedded per batch. Defaults to 100000.
+
+        Returns:
+            pl.DataFrame: The documents with a 'Targets' column listing the matched
+            supplied targets per document, ready to pass to `get_stance`.
+        """
+        assert match in ['claims', 'text'], f"match must be 'claims' or 'text', not '{match}'"
+        assert len(targets) > 0, "targets must be a non-empty list of stance targets"
+
+        if isinstance(docs, list):
+            document_df = pl.DataFrame({text_column: docs})
+        else:
+            document_df = docs
+            assert text_column in document_df.columns, f"docs must have a '{text_column}' column if it is a dataframe"
+        if 'ID' not in document_df.columns:
+            document_df = document_df.with_row_index(name='ID')
+
+        if match == 'claims':
+            assert 'Targets' in document_df.columns, "match='claims' requires an extracted 'Targets' column; run get_base_targets first"
+            pool_df = document_df.select(['ID', 'Targets'])\
+                .explode('Targets')\
+                .drop_nulls('Targets')\
+                .rename({'Targets': 'pool_text'})
+        else:
+            pool_df = document_df.select(['ID', pl.col(text_column).alias('pool_text')])
+
+        if embedding_model is None:
+            embedding_model = self._get_embedding_model()
+
+        # Query embeddings for the supplied targets, normalized for cosine similarity.
+        query_embeddings = np.asarray(self._get_embeddings(targets, model=embedding_model), dtype=np.float32)
+        query_embeddings = sklearn.preprocessing.normalize(query_embeddings, axis=1)
+
+        pool_texts = pool_df['pool_text'].to_list()
+        pool_ids = pool_df['ID'].to_list()
+
+        matches = defaultdict(set)  # document ID -> set of matched target indices
+        for start in tqdm(range(0, len(pool_texts), batch_size), desc="Retrieving documents", disable=not self.verbose):
+            batch_texts = pool_texts[start:start + batch_size]
+            batch_embeddings = np.asarray(self._get_embeddings(batch_texts, model=embedding_model), dtype=np.float32)
+            batch_embeddings = sklearn.preprocessing.normalize(batch_embeddings, axis=1)
+            similarities = batch_embeddings @ query_embeddings.T
+            rows, cols = np.where(similarities >= similarity_threshold)
+            for r, c in zip(rows.tolist(), cols.tolist()):
+                matches[pool_ids[start + r]].add(c)
+
+        matched_records = [
+            {'ID': doc_id, 'Targets': sorted({targets[c] for c in target_idxs})}
+            for doc_id, target_idxs in matches.items()
+        ]
+        matched_df = pl.DataFrame(matched_records, schema={'ID': document_df.schema['ID'], 'Targets': pl.List(pl.String)})
+
+        result = document_df.drop('Targets') if 'Targets' in document_df.columns else document_df
+        result = result.join(matched_df, on='ID', how='left' if keep_unmatched else 'inner', maintain_order='left')
+        result = result.with_columns(pl.col('Targets').fill_null([]))
+        return result
+
     def get_stance(
-            self, 
-            document_df: pl.DataFrame, 
-            text_column='text', 
+            self,
+            document_df: pl.DataFrame,
+            text_column='text',
             parent_text_column='parent_text'
         ) -> pl.DataFrame:
         """Get stance classifications for the targets in the documents.
