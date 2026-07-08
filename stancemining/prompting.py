@@ -1,6 +1,8 @@
+import re
+
 import tqdm
 
-from .llms import BaseLLM, get_max_new_tokens, parse_category_completions
+from .llms import BaseLLM, get_max_new_tokens, parse_category_completions, parse_answer_from_thinking
 
 NOUN_PHRASE_AGGREGATE_PROMPT = [
     "You are an expert at analyzing and categorizing topics.",
@@ -728,6 +730,61 @@ def ask_llm_zero_shot_stance_target(generator: BaseLLM, docs, generate_kwargs):
         all_outputs.append(outputs)
     return all_outputs
 
+CLAIM_EXTRACTION = [
+    {
+        'role': 'system',
+        'content': "You are an expert at analyzing text and extracting the atomic factual claims it makes."
+    },
+    {
+        'role': 'user',
+        'content': """Given a piece of text, identify the atomic claims that it makes. An atomic claim is a single, self-contained, declarative assertion that can be judged true or false on its own. Break compound statements into separate claims, and where possible resolve pronouns to the entities they refer to. Ignore questions, greetings, and pure expressions of feeling with no factual content.
+
+Return ONLY a quoted, comma-separated list of claims, like so: "claim1", "claim2". If the text makes no factual claims, return an empty list: [].
+
+Text: 'We must act now to reduce carbon emissions. The planet is warming faster than scientists predicted, and Alberta will lose federal transfer payments if it separates.'"""
+    },
+    {
+        'role': 'assistant',
+        'content': '"Carbon emissions should be reduced immediately", "The planet is warming faster than scientists predicted", "Alberta will lose federal transfer payments if it separates"'
+    },
+    {
+        'role': 'user',
+        'content': "Text: '{text}'"
+    }
+]
+
+def ask_llm_zero_shot_claims(generator: BaseLLM, docs, generate_kwargs=None):
+    """Extract a list of atomic claims from each document via prompting.
+
+    Returns a list (one entry per doc) of lists of claim strings. Robust to
+    thinking models: any ``<think>...</think>`` prefix is stripped before the
+    quoted-list is parsed out.
+    """
+    generate_kwargs = dict(generate_kwargs or {})
+    max_new_tokens = generate_kwargs.pop('max_new_tokens', 256)
+
+    prompts = []
+    for doc in docs:
+        prompt = [{'role': m['role'], 'content': m['content'].format(text=doc)} for m in CLAIM_EXTRACTION]
+        prompts.append(prompt)
+
+    outputs = generator.generate(
+        prompts,
+        max_new_tokens=max_new_tokens,
+        num_samples=1,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        chat_template_kwargs={'enable_thinking': False},
+        stop=[],  # a claim list can be long; don't stop at the first newline
+    )
+
+    all_outputs = []
+    for o in outputs:
+        answer = parse_answer_from_thinking(o)
+        claims = [c.strip() for c in re.findall(r'"(.*?)"', answer) if c.strip()]
+        all_outputs.append(claims)
+    return all_outputs
+
 def ask_llm_multi_doc_targets(generator, docs):
     # Multi-Document Stance Target Extraction Prompt
     formatted_docs = '\n'.join(docs)
@@ -800,17 +857,23 @@ def ask_llm_multi_doc_targets(generator, docs):
     return outputs
 
 def ask_llm_zero_shot_stance(generator: BaseLLM, docs, stance_targets, stance_target_type='noun-phrases', verbose=False):
-    prompts = []
     if stance_target_type == 'noun-phrases':
         prompt_template = NOUN_PHRASE_STANCE_DETECTION
+        task = 'stance-detection'
     else:
+        # 4-way claim entailment: supporting / refuting / discussing / irrelevant
         prompt_template = CLAIM_STANCE_DETECTION_4_LABELS
+        task = 'claim-entailment-4way'
+
+    prompts = []
     for doc, stance_target in zip(docs, stance_targets):
-        # Stance Classification Prompt
-        prompt = [p.format(doc=doc, stance_target=stance_target) for p in prompt_template]
+        # Templates are chat-message dicts with {text}/{target} slots.
+        prompt = [{'role': m['role'], 'content': m['content'].format(text=doc, target=stance_target)}
+                  for m in prompt_template]
         prompts.append(prompt)
 
-    max_new_tokens = get_max_new_tokens()
+    # Short generation: we only need the single category word.
+    max_new_tokens = 16
 
     if prompts[0][-1]['role'] == 'assistant':
         add_generation_prompt = False
@@ -820,13 +883,15 @@ def ask_llm_zero_shot_stance(generator: BaseLLM, docs, stance_targets, stance_ta
         continue_final_message = False
 
     outputs = generator.generate(
-        prompts, 
-        max_new_tokens=max_new_tokens, 
-        num_samples=1, 
-        add_generation_prompt=add_generation_prompt, 
-        continue_final_message=continue_final_message
+        prompts,
+        max_new_tokens=max_new_tokens,
+        num_samples=1,
+        add_generation_prompt=add_generation_prompt,
+        continue_final_message=continue_final_message,
+        chat_template_kwargs={'enable_thinking': False},
     )
-    all_outputs = parse_category_completions(outputs)
+    outputs = [parse_answer_from_thinking(o) for o in outputs]
+    all_outputs = parse_category_completions(outputs, task)
     return all_outputs
 
 

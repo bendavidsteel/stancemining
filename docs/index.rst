@@ -14,5 +14,6 @@ Welcome to the StanceMining documentation! This project provides tools for stanc
 
    install
    getting_started
+   models
    api
 

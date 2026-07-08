@@ -56,6 +56,23 @@ def prompts_to_conversations(prompts, system_prompt_allowed=True):
             conversation = [
                 {'role': 'user', 'content': prompt}
             ]
+        elif isinstance(prompt, list) and prompt and isinstance(prompt[0], dict):
+            # Prompt is already a list of chat-message dicts ({'role', 'content'}).
+            if system_prompt_allowed:
+                conversation = [dict(m) for m in prompt]
+            else:
+                # Fold a leading system message into the first user turn.
+                conversation = []
+                system_text = None
+                for m in prompt:
+                    if m['role'] == 'system' and system_text is None and not conversation:
+                        system_text = m['content']
+                        continue
+                    msg = dict(m)
+                    if system_text is not None and msg['role'] == 'user':
+                        msg = {'role': 'user', 'content': f"{system_text}\n\n{msg['content']}"}
+                        system_text = None
+                    conversation.append(msg)
         elif isinstance(prompt, list):
             conversation = []
             if system_prompt_allowed:
@@ -73,7 +90,7 @@ class BaseLLM:
     def __init__(self, model_name):
         self.model_name = model_name
 
-    def generate(self, prompt, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
+    def generate(self, prompt, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False, chat_template_kwargs=None, stop=None):
         raise NotImplementedError
     
     
@@ -98,16 +115,16 @@ class Transformers(BaseLLM):
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
     
-    def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
+    def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False, chat_template_kwargs=None, stop=None):
         conversations = prompts_to_conversations(prompts)
         all_outputs = []
         if self.verbose:
             iterator = tqdm.tqdm(conversations)
         else:
             iterator = conversations
-            
+
         for conversation in iterator:
-            inputs = self.tokenizer.apply_chat_template(conversation, return_dict=True, return_tensors='pt', add_generation_prompt=add_generation_prompt, continue_final_message=continue_final_message)
+            inputs = self.tokenizer.apply_chat_template(conversation, return_dict=True, return_tensors='pt', add_generation_prompt=add_generation_prompt, continue_final_message=continue_final_message, **(chat_template_kwargs or {}))
             inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
             generate_kwargs = {}
             if num_samples > 1:
@@ -177,21 +194,30 @@ class VLLM(BaseLLM):
 
         self.model, self.sampling_params = load_vllm_model(model_name, model_kwargs, sampling_param_kwargs)
 
-    def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
+    def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False, chat_template_kwargs=None, stop=None):
         conversations = prompts_to_conversations(prompts)
-        
+
         self.sampling_params.max_tokens = max_new_tokens
         self.sampling_params.n = num_samples
+        if stop is not None:
+            # Per-call override of the stop strings (e.g. drop the '\n' stop so a
+            # multi-item list generation isn't truncated at the first newline).
+            self.sampling_params.stop = stop
+
+        chat_kwargs = {}
+        if chat_template_kwargs:
+            chat_kwargs['chat_template_kwargs'] = chat_template_kwargs
 
         outputs = self.model.chat(
-            messages=conversations, 
-            sampling_params=self.sampling_params, 
-            use_tqdm=self.verbose, 
+            messages=conversations,
+            sampling_params=self.sampling_params,
+            use_tqdm=self.verbose,
             add_generation_prompt=add_generation_prompt,
-            continue_final_message=continue_final_message
+            continue_final_message=continue_final_message,
+            **chat_kwargs
         )
         all_outputs = [o.outputs[0].text for o in outputs]
-        
+
         return all_outputs
 
     def unload_model(self):
@@ -205,7 +231,7 @@ class Anthropic(BaseLLM):
         assert 'api_key' in model_kwargs, "Anthropic API key must be provided in model_kwargs"
         self.client = anthropic.Anthropic(api_key=model_kwargs['api_key'])
 
-    def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False):
+    def generate(self, prompts, max_new_tokens=100, num_samples=3, add_generation_prompt=True, continue_final_message=False, chat_template_kwargs=None, stop=None):
         conversations = prompts_to_conversations(prompts, system_prompt_allowed=False)
 
         system_prompts = [p[0] for p in prompts]

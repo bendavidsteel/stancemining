@@ -444,7 +444,11 @@ class StanceMining:
         num_samples = 3
         if self.llm_method == 'prompting':
             llm = self._get_llm()
-            targets = prompting.ask_llm_zero_shot_stance_target(llm, docs, {'num_samples': num_samples})
+            if self.stance_target_type == 'claims':
+                targets = prompting.ask_llm_zero_shot_claims(llm, docs)
+            else:
+                targets = prompting.ask_llm_zero_shot_stance_target(llm, docs, {'num_samples': num_samples})
+            llm.unload_model()
         elif self.llm_method == 'finetuned':
             df = pl.DataFrame({'Text': docs})
 
