@@ -767,7 +767,7 @@ def ask_llm_zero_shot_claims(generator: BaseLLM, docs, generate_kwargs=None, ena
     for faster/cheaper extraction on simpler text.
     """
     generate_kwargs = dict(generate_kwargs or {})
-    default_max_new_tokens = 1536 if enable_thinking else 256
+    default_max_new_tokens = 3072 if enable_thinking else 256
     max_new_tokens = generate_kwargs.pop('max_new_tokens', default_max_new_tokens)
 
     prompts = []

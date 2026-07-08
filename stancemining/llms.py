@@ -39,10 +39,23 @@ def parse_answer_from_thinking(completion):
     Handles two conventions: literal '<think>...</think>' tags, and
     "harmony"-style channel tags ('<|channel>thought ... <channel|>...'). If
     neither is present, the completion is returned unchanged.
+
+    Generation can run out of its token budget while still inside the
+    "thought" channel, before ever reaching a closing transition -- in that
+    case there is only ONE channel-tag match (the opening one), and the
+    "answer" would otherwise be the entire, unfinished reasoning trace. That
+    text routinely echoes/restates the prompt's own instructions and few-shot
+    examples verbatim while "thinking out loud", which is disastrous for any
+    downstream parser (e.g. a quoted-list regex) that can't tell reasoning
+    apart from a real answer -- so we return "" rather than risk it. A caller
+    that wants those tokens back should raise max_new_tokens instead.
     """
     if '</think>' in completion:
         return completion.split('</think>')[-1].strip()
-    return _CHANNEL_TAG.split(completion)[-1].strip()
+    parts = _CHANNEL_TAG.split(completion)
+    if len(parts) < 3:
+        return ""
+    return parts[-1].strip()
 
 def parse_category_completions(completions, task):
     if task == 'stance-detection':
