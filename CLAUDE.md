@@ -33,7 +33,7 @@ cd docs && sphinx-build -b html . _build/html
 ### Training Models
 ```bash
 # Copy and configure config file first
-cp ./config/config_default.yaml ./config/config.yaml
+cp ./experiments/config/config_default.yaml ./experiments/config/config.yaml
 python ./experiments/scripts/train_model.py
 ```
 

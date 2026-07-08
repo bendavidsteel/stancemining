@@ -44,7 +44,7 @@ def print_results(task, method, results, references, datasets):
     elif task in CLASSIFICATION_TASKS:
         print(f"Metrics: F1: {metrics['f1_macro']}")
 
-@hydra.main(version_base=None, config_path="../../config", config_name="config")
+@hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(config):
     args = config.finetune
 

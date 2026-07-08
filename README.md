@@ -58,7 +58,7 @@ docker compose -f ./app/compose.yaml up
 
 ## To train new finetuned LLM models
 
-Rename `./config/config_default.yaml` to `./config/config.yaml` and set the parameters in the file.
+Rename `./experiments/config/config_default.yaml` to `./experiments/config/config.yaml` and set the parameters in the file.
 Run:
 ```
 python ./experiments/scripts/train_models.py
@@ -96,7 +96,7 @@ If you specifically use the generate higher level targets method, please cite:
 ```
 
 ## To reproduce experimental results from Corpus-Oriented Stance Target Extraction paper
-Rename `./config/config_default.yaml` to `./config/config.yaml` and set the parameters in the file.
+Rename `./experiments/config/config_default.yaml` to `./experiments/config/config.yaml` and set the parameters in the file.
 Run:
 ```
 python ./experiments/scripts/main.py
