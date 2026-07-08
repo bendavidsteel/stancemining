@@ -753,15 +753,22 @@ Text: 'We must act now to reduce carbon emissions. The planet is warming faster 
     }
 ]
 
-def ask_llm_zero_shot_claims(generator: BaseLLM, docs, generate_kwargs=None):
+def ask_llm_zero_shot_claims(generator: BaseLLM, docs, generate_kwargs=None, enable_thinking=True):
     """Extract a list of atomic claims from each document via prompting.
 
     Returns a list (one entry per doc) of lists of claim strings. Robust to
     thinking models: any ``<think>...</think>`` prefix is stripped before the
     quoted-list is parsed out.
+
+    `enable_thinking` defaults to True: letting the model reason before
+    answering meaningfully helps on texts with multiple entities and pronouns
+    referring across them (e.g. tracking who "us"/"they" refers to), which a
+    fixed-length claim list can't recover from if extracted wrong. Set to False
+    for faster/cheaper extraction on simpler text.
     """
     generate_kwargs = dict(generate_kwargs or {})
-    max_new_tokens = generate_kwargs.pop('max_new_tokens', 256)
+    default_max_new_tokens = 1536 if enable_thinking else 256
+    max_new_tokens = generate_kwargs.pop('max_new_tokens', default_max_new_tokens)
 
     prompts = []
     for doc in docs:
@@ -774,7 +781,7 @@ def ask_llm_zero_shot_claims(generator: BaseLLM, docs, generate_kwargs=None):
         num_samples=1,
         add_generation_prompt=True,
         continue_final_message=False,
-        chat_template_kwargs={'enable_thinking': False},
+        chat_template_kwargs={'enable_thinking': enable_thinking},
         stop=[],  # a claim list can be long; don't stop at the first newline
     )
 
