@@ -26,8 +26,23 @@ logger = logging.getLogger(__name__)
 def parse_list_completions(completions):
     return [re.findall('"(.*?)"', c) for c in completions] 
 
+# Matches a channel-transition marker in "harmony"-style thinking output
+# (e.g. gemma-4 emits '<|channel>thought ... <channel|>final answer', with the
+# exact pipe placement varying around plain-text channel names like
+# 'thought'/'final' depending on tokenizer/detokenizer boundary effects).
+_CHANNEL_TAG = re.compile(r'<\|?channel\|?>\s*\w*')
+
+
 def parse_answer_from_thinking(completion):
-    return completion.split('</think>')[-1].strip()
+    """Strip a leading reasoning/thinking block, returning only the final answer.
+
+    Handles two conventions: literal '<think>...</think>' tags, and
+    "harmony"-style channel tags ('<|channel>thought ... <channel|>...'). If
+    neither is present, the completion is returned unchanged.
+    """
+    if '</think>' in completion:
+        return completion.split('</think>')[-1].strip()
+    return _CHANNEL_TAG.split(completion)[-1].strip()
 
 def parse_category_completions(completions, task):
     if task == 'stance-detection':
