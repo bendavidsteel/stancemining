@@ -8,7 +8,7 @@ import tqdm
 
 from experiments.scripts.train_model import _main
 
-@hydra.main(version_base=None, config_path="../../config", config_name="config")
+@hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(config):
     _main(config, config.wiba)
 

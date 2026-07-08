@@ -6,7 +6,7 @@ import polars as pl
 from experiments import datasets
 from experiments.methods import pacte
 
-@hydra.main(version_base=None, config_path="../../config", config_name="config")
+@hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(config):
     dataset_name = config['data']['dataset']
     docs_df = datasets.load_dataset(dataset_name, split='train', group=False)

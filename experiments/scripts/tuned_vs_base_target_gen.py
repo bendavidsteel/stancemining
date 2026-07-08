@@ -12,7 +12,7 @@ import wandb
 from experiments import datasets
 from stancemining import metrics, prompting, finetune
 
-@hydra.main(version_base=None, config_path="../../config", config_name="config")
+@hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(config):
     dataset_name = 'vast'
     model_name = config['model']['llmmodelname']

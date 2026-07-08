@@ -9,7 +9,7 @@ import torch
 
 from stancemining import metrics, datasets, StanceMining
 
-@hydra.main(version_base=None, config_path="../../config", config_name="config")
+@hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(config):
     dataset_names = ['vast', 'ezstance']
     model_name = config['model']['llmmodelname']
