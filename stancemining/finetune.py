@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 import gc
+import importlib
 import json
 import multiprocessing
 import os
@@ -8,22 +11,52 @@ import pathlib
 import re
 from typing import Optional, Dict, List, Any, Union
 
-import accelerate
-import datasets
-import evaluate
 import huggingface_hub
 import numpy as np
 import pandas as pd
-import peft
 import polars as pl
 from sklearn.metrics import confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 import torch
 import tqdm
 import transformers
-import wandb
 
 import stancemining.datasets
+
+
+class _MissingModule:
+    """Placeholder for a training/eval-only dependency that isn't installed.
+
+    stancemining's inference paths (prompting / vLLM prediction) don't need the
+    training stack (accelerate, datasets, evaluate, peft, wandb), so those are
+    imported lazily and stay optional. Any actual *use* raises a clear ImportError
+    rather than the whole package failing to import.
+    """
+    def __init__(self, name: str):
+        self._name = name
+
+    def __getattr__(self, attr):
+        raise ImportError(
+            f"'{self._name}' is required for stancemining training/evaluation but "
+            f"is not installed. Install the training dependencies to use this feature."
+        )
+
+
+def _optional_import(name: str):
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return _MissingModule(name)
+
+
+# Training/eval-only; kept optional so inference-only installs stay lightweight.
+# `from __future__ import annotations` above makes the `datasets.Dataset` type
+# hints in method signatures lazy strings, so these needn't resolve at import.
+accelerate = _optional_import('accelerate')
+datasets = _optional_import('datasets')
+evaluate = _optional_import('evaluate')
+peft = _optional_import('peft')
+wandb = _optional_import('wandb')
 
 CLASSIFICATION_TASKS = ['stance-classification', 'argument-classification', 'claim-entailment-2way', 'claim-entailment-3way', 'claim-entailment-4way', 'claim-entailment-5way', 'claim-entailment-7way']
 GENERATION_TASKS = ['topic-extraction', 'claim-extraction']
