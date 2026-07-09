@@ -26,8 +26,42 @@ logger = logging.getLogger(__name__)
 def parse_list_completions(completions):
     return [re.findall('"(.*?)"', c) for c in completions] 
 
+# Matches a channel-transition marker in "harmony"-style thinking output
+# (e.g. gemma-4 emits '<|channel>thought ... <channel|>final answer', with the
+# exact pipe placement varying around plain-text channel names like
+# 'thought'/'final' depending on tokenizer/detokenizer boundary effects).
+_CHANNEL_TAG = re.compile(r'<\|?channel\|?>\s*\w*')
+
+
 def parse_answer_from_thinking(completion):
-    return completion.split('</think>')[-1].strip()
+    """Strip a leading reasoning/thinking block, returning only the final answer.
+
+    Handles two conventions: literal '<think>...</think>' tags, and
+    "harmony"-style channel tags ('<|channel>thought ... <channel|>...').
+
+    Cases (both conventions):
+      * no thinking markers at all -> the completion IS the answer (e.g.
+        stance detection runs with enable_thinking=False and gets a bare
+        'supporting'); return it unchanged.
+      * a complete thinking block (opening + closing marker) -> return only
+        the text after the closing marker.
+      * an OPENING marker with no close -> generation ran out of its token
+        budget mid-thought. The unfinished trace routinely echoes the prompt's
+        own instructions / few-shot examples verbatim while "thinking out
+        loud", which a downstream parser (e.g. a quoted-list regex) can't tell
+        from a real answer -- so return "" rather than leak it. A caller that
+        wants those tokens should raise max_new_tokens instead.
+    """
+    if '</think>' in completion:
+        return completion.split('</think>')[-1].strip()
+    if '<think>' in completion:
+        return ""  # opening <think> but no close: truncated mid-thought
+    parts = _CHANNEL_TAG.split(completion)
+    if len(parts) == 1:
+        return completion.strip()  # no channel tags: no thinking block emitted
+    if len(parts) == 2:
+        return ""  # opening channel tag, no closing transition: truncated
+    return parts[-1].strip()
 
 def parse_category_completions(completions, task):
     if task == 'stance-detection':
