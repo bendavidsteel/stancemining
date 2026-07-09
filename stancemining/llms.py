@@ -37,24 +37,30 @@ def parse_answer_from_thinking(completion):
     """Strip a leading reasoning/thinking block, returning only the final answer.
 
     Handles two conventions: literal '<think>...</think>' tags, and
-    "harmony"-style channel tags ('<|channel>thought ... <channel|>...'). If
-    neither is present, the completion is returned unchanged.
+    "harmony"-style channel tags ('<|channel>thought ... <channel|>...').
 
-    Generation can run out of its token budget while still inside the
-    "thought" channel, before ever reaching a closing transition -- in that
-    case there is only ONE channel-tag match (the opening one), and the
-    "answer" would otherwise be the entire, unfinished reasoning trace. That
-    text routinely echoes/restates the prompt's own instructions and few-shot
-    examples verbatim while "thinking out loud", which is disastrous for any
-    downstream parser (e.g. a quoted-list regex) that can't tell reasoning
-    apart from a real answer -- so we return "" rather than risk it. A caller
-    that wants those tokens back should raise max_new_tokens instead.
+    Cases (both conventions):
+      * no thinking markers at all -> the completion IS the answer (e.g.
+        stance detection runs with enable_thinking=False and gets a bare
+        'supporting'); return it unchanged.
+      * a complete thinking block (opening + closing marker) -> return only
+        the text after the closing marker.
+      * an OPENING marker with no close -> generation ran out of its token
+        budget mid-thought. The unfinished trace routinely echoes the prompt's
+        own instructions / few-shot examples verbatim while "thinking out
+        loud", which a downstream parser (e.g. a quoted-list regex) can't tell
+        from a real answer -- so return "" rather than leak it. A caller that
+        wants those tokens should raise max_new_tokens instead.
     """
     if '</think>' in completion:
         return completion.split('</think>')[-1].strip()
+    if '<think>' in completion:
+        return ""  # opening <think> but no close: truncated mid-thought
     parts = _CHANNEL_TAG.split(completion)
-    if len(parts) < 3:
-        return ""
+    if len(parts) == 1:
+        return completion.strip()  # no channel tags: no thinking block emitted
+    if len(parts) == 2:
+        return ""  # opening channel tag, no closing transition: truncated
     return parts[-1].strip()
 
 def parse_category_completions(completions, task):
