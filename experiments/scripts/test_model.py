@@ -140,7 +140,10 @@ def main(config):
     longest_item = test_data.sort('total_len', descending=True)\
         .slice(0, 1)
     longest_dataset = processor.process_data(longest_item, model_config.classification_method, model_config.generation_method, train=False, tokenize=False)
-    longest_prompt = model_config.tokenizer.apply_chat_template(longest_dataset['text'][0])
+    longest_text = longest_dataset['text'][0]
+    if isinstance(longest_text, str):
+        longest_text = to_message_format(longest_text)
+    longest_prompt = model_config.tokenizer.apply_chat_template(longest_text)
     longest_seq_len = len(longest_prompt)
 
     test_data = test_data.drop([c for c in test_data.columns if c.endswith('_len')])
@@ -160,10 +163,12 @@ def main(config):
         'max_model_len': max_model_len,
         'enable_prefix_caching': True,
     }
+    if 'gemma-4' in args.model_name.lower() or 'gemma-3n' in args.model_name.lower():
+        llm_kwargs['limit_mm_per_prompt'] = {'image': 0, 'audio': 0}
     assert longest_seq_len < llm_kwargs['max_model_len'], f"Longest sequence length {longest_seq_len} exceeds model max length {llm_kwargs['max_model_len']}"
     generate_kwargs = {}
     if model_config.task in GENERATION_TASKS or (model_config.task in CLASSIFICATION_TASKS and model_config.classification_method == 'generation'):
-        llm_kwargs['task'] = 'generate'
+        llm_kwargs['runner'] = 'generate'
         llm_kwargs['generation_config'] = 'auto'
 
         if config.test.finetuned_model:
@@ -180,7 +185,7 @@ def main(config):
             )
 
     elif model_config.task in CLASSIFICATION_TASKS and model_config.classification_method == 'head':
-        llm_kwargs['task'] = 'classify'
+        llm_kwargs['runner'] = 'pooling'
         llm_kwargs['enforce_eager'] = True
         model_name = config['hf_model']
         # os.environ['VLLM_USE_V1'] = '0' # https://github.com/vllm-project/vllm/pull/16188 remove when this is merged
@@ -257,6 +262,17 @@ def main(config):
     )
     
     print_metrics(metrics)
+
+    if 'Text' in test_data.columns and 'Target' in test_data.columns:
+        result_df = test_data.with_columns([
+            pl.Series('prediction', predictions),
+            pl.Series('reference', references),
+        ])
+        wrong = result_df.filter(pl.col('prediction') != pl.col('reference'))
+        print(f"\n=== {wrong.height} wrong / {result_df.height} total ===")
+        with pl.Config(fmt_str_lengths=200, tbl_width_chars=240, tbl_rows=20):
+            print(wrong.select(['Target', 'reference', 'prediction', 'Text']).head(20))
+
     test_metrics = {f"test/{k}": v for k, v in metrics.items()}
     wandb.run.summary.update(test_metrics)
     wandb.finish()
