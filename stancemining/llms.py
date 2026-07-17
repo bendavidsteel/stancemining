@@ -64,10 +64,10 @@ def parse_answer_from_thinking(completion):
     return parts[-1].strip()
 
 def parse_category_completions(completions, task):
-    if task == 'stance-detection':
+    if task == 'stance-classification':
         valid_categories = ['in favor', 'against', 'neutral']
         default = 'neutral'
-    elif task == 'claim-entailment':
+    elif task == 'claim-entailment-3way':
         valid_categories = ['supporting', 'refuting', 'discussing']
         default = 'discussing'
     elif task == 'claim-entailment-2way':
@@ -78,8 +78,17 @@ def parse_category_completions(completions, task):
         default = 'irrelevant'
     else:
         raise ValueError(f"Unknown task for category parsing: {task}")
-    predictions = [re.search('|'.join(valid_categories), c.strip().lower()) for c in completions]
-    predictions = [p.group(0) if p else default for p in predictions]
+    def parse(c):
+        c = c.strip().lower()
+        m = re.search('|'.join(valid_categories), c)
+        if m:
+            return m.group(0)
+        if task == 'stance-classification' and c in ('f', 'in'):
+            return 'in favor'
+        return default
+    predictions = [parse(c) for c in completions]
+    if task == 'stance-classification':
+        predictions = ['favor' if p == 'in favor' else p for p in predictions]
     return predictions
 
 
@@ -292,9 +301,9 @@ class Anthropic(BaseLLM):
 
 def get_max_new_tokens(task, model_config):
     if task in CLASSIFICATION_TASKS and model_config.classification_method == 'generation':
-        if task == 'stance-detection':
+        if task == 'stance-classification':
             max_new_tokens = 1
-        elif task == 'claim-entailment':
+        elif task == 'claim-entailment-3way':
             max_new_tokens = 2
         else:
             max_new_tokens = 3
