@@ -1292,13 +1292,11 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
     model_config = ModelConfig(
         model_name=None,
         task=task,
-        num_labels=num_labels,
         device_map=model_kwargs['device_map'],
         prompt=prompt,
         parent_prompt=parent_prompt,
         classification_method=config['classification_method'] if task in CLASSIFICATION_TASKS else None,
         generation_method=config['generation_method'] if task in GENERATION_TASKS else None,
-        output_type=output_type,
     )
     
     data_config = DataConfig(
@@ -1306,7 +1304,7 @@ def get_predictions(task, df, config, model_kwargs={}, generate_kwargs={}):
     )
     
     # Initialize components
-    model, tokenizer = setup_model_and_tokenizer(model_config.task, model_config.classification_method, model_config.num_labels, model_kwargs=model_kwargs, model_save_path=model_save_path)
+    model, tokenizer = setup_model_and_tokenizer(model_config, model_kwargs=model_kwargs, model_save_path=model_save_path)
     model_config.model, model_config.tokenizer = model, tokenizer
     processor = DataProcessor(model_config, data_config)
     test_dataset = processor.process_data(df, model_config.classification_method, model_config.generation_method, train=False)
