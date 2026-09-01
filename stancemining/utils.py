@@ -526,7 +526,8 @@ def remove_bad_noun_phrases(target_df: pl.DataFrame):
     ]
     for phrase in phrases:
         target_df = target_df.with_columns(pl.col('Target').str.replace(phrase, ''))
-    exclude_phrases = ['', 'url', 'rt', 'rt @', '@rt', '@']
+    # 'text'/'piece of text' echo the prompt's own wording rather than name a target
+    exclude_phrases = ['', 'url', 'rt', 'rt @', '@rt', '@', 'text', 'piece of text']
     target_df = target_df.with_columns(pl.col('Target').str.strip_chars('"').str.strip_chars(':').str.strip_chars())
     all_stopwords = stopwords.words('english') + stopwords.words('french') + ['yes', 'no', 'oui', 'non']
     target_df = target_df.filter(~(pl.col('Target').str.contains('rt @\w+'))\
