@@ -334,8 +334,8 @@ class StanceMining:
             document_df = self.get_stance(document_df, text_column=text_column, parent_text_column=parent_text_column)
 
         logger.info("Getting target info")
-        self.target_info = document_df.explode('Targets')\
-            .select('Targets')\
+        self.target_info = document_df.select('Targets')\
+            .explode('Targets')\
             .drop_nulls()\
             .rename({'Targets': 'Target'})\
             .group_by('Target')\
@@ -569,11 +569,27 @@ class StanceMining:
             target_mapper = utils._get_similar_target_mapper(target_df, embedding_model=embedding_model, max_distance=max_distance)
         else:
             target_mapper = utils._get_similar_target_mapper_batch(target_df, embedding_model, self.stance_target_type, max_embedding_distance=max_distance, batch_size=batch_size)
-        logger.debug("Replacing small count targets with larger count similar targets")
-        documents_df = documents_df.with_columns(
-            pl.col('Targets').list.eval(pl.element().replace(target_mapper)).list.unique()
+        logger.info(f"Replacing {len(target_mapper)} small count targets with larger count similar targets")
+        # an explode and join rather than a per-element replace: evaluating the mapping
+        # inside list.eval retains the frame's string buffer per output chunk, which on
+        # a corpus this size exhausts memory
+        mapper_df = pl.DataFrame(
+            {'Target': list(target_mapper.keys()), 'Mapped': list(target_mapper.values())},
+            schema={'Target': pl.String, 'Mapped': pl.String},
         )
-        return documents_df
+        remapped = documents_df.select('Targets').with_row_index('row_id')\
+            .explode('Targets').rename({'Targets': 'Target'})\
+            .join(mapper_df, on='Target', how='left')\
+            .select(['row_id', pl.coalesce(['Mapped', 'Target']).alias('Target')])\
+            .unique(['row_id', 'Target'])\
+            .group_by('row_id').agg(pl.col('Target').alias('Targets'))
+        # left joined: documents whose targets were all dropped still belong in the frame
+        return documents_df.drop('Targets')\
+            .with_row_index('row_id')\
+            .join(remapped, on='row_id', how='left')\
+            .sort('row_id')\
+            .with_columns(pl.col('Targets').fill_null([]))\
+            .drop('row_id')
 
     def _topic_model(self, targets, embedding_model, kwargs, max_layers):
         if self.topic_model == 'toponymy':
