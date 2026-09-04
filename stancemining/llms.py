@@ -413,7 +413,9 @@ def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, gener
     # turn off verbose logging
     os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
 
-    model_kwargs['enable_prefix_caching'] = True
+    # callers must be able to turn this off: for linear attention models vLLM's
+    # prefix caching is experimental and silently serves another prompt's content
+    model_kwargs.setdefault('enable_prefix_caching', True)
 
     max_new_tokens = get_max_new_tokens(model_config.task, model_config)
 
