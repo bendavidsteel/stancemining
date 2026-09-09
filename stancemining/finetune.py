@@ -199,6 +199,13 @@ def stance_example_to_prompt(examples, i, prompt_template: str, parent_prompt_te
     target = examples['topic'][i]
     if 'parenttexts' in examples:
         parenttexts = examples['parenttexts'][i]
+        # a bare string parent would otherwise be iterated one character per chain entry,
+        # and blank parents would render a chain of empty quotes
+        if parenttexts is None:
+            parenttexts = []
+        elif isinstance(parenttexts, str):
+            parenttexts = [parenttexts]
+        parenttexts = [p for p in parenttexts if p is not None and p.strip()]
     else:
         parenttexts = None
     if 'context' in examples:
@@ -214,11 +221,11 @@ def stance_example_to_prompt(examples, i, prompt_template: str, parent_prompt_te
         prompt_template = context_prompt_template
     elif parenttexts and len(parenttexts) > 0:
         parent_chain = []
-        for i, p_text in enumerate(parenttexts):
-            if i == 0:
+        for depth, p_text in enumerate(parenttexts):
+            if depth == 0:
                 parent_chain.append(f"1. [Original Post]: '{p_text}'")
             else:
-                parent_chain.append(f"{i+1}. [Reply to {i}]: '{p_text}'")
+                parent_chain.append(f"{depth+1}. [Reply to {depth}]: '{p_text}'")
 
         parent_chain = '\n'.join(parent_chain)
         kwargs['parent_chain'] = parent_chain

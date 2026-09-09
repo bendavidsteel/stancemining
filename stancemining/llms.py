@@ -189,10 +189,16 @@ class Transformers(BaseLLM):
         self.tokenizer = None
         torch.cuda.empty_cache()
 
+# Building a vLLM engine costs a model load plus graph capture, so callers that
+# classify in batches would otherwise pay it once per batch.
+_VLLM_ENGINE_CACHE = {}
+
+
 def load_vllm_model(model_name, model_kwargs, sampling_param_kwargs):
     os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
     import vllm
-    model = None
+    cache_key = (model_name, repr(sorted(model_kwargs.items())))
+    model = _VLLM_ENGINE_CACHE.get(cache_key)
     while model is None:
         try:
             model = vllm.LLM(
@@ -221,6 +227,9 @@ def load_vllm_model(model_name, model_kwargs, sampling_param_kwargs):
                     raise
             else:
                 raise
+    # the retry loop rewrites model_kwargs, so key the cache on what actually built
+    _VLLM_ENGINE_CACHE[cache_key] = model
+    _VLLM_ENGINE_CACHE[(model_name, repr(sorted(model_kwargs.items())))] = model
     sampling_params = vllm.SamplingParams(**sampling_param_kwargs)
     return model, sampling_params
 
@@ -315,7 +324,7 @@ def get_max_new_tokens(task, model_config):
         max_new_tokens = None
     return max_new_tokens
 
-def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, generate_kwargs={}):
+def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, generate_kwargs={}, return_probs=False):
     import vllm
     import vllm.lora.request
     
@@ -404,7 +413,9 @@ def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, gener
     # turn off verbose logging
     os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
 
-    model_kwargs['enable_prefix_caching'] = True
+    # callers must be able to turn this off: for linear attention models vLLM's
+    # prefix caching is experimental and silently serves another prompt's content
+    model_kwargs.setdefault('enable_prefix_caching', True)
 
     max_new_tokens = get_max_new_tokens(model_config.task, model_config)
 
@@ -435,7 +446,13 @@ def get_vllm_predictions(task, df, config, verbose=False, model_kwargs={}, gener
         predictions = [np.argmax(p) for p in probs]
         id2labels = {v: k for k, v in model_config.labels2id.items()}
         predictions = [id2labels[p] for p in predictions]
+        if return_probs:
+            # column order follows labels2id, so the caller can name each column
+            probs = [np.asarray(p, dtype=np.float32) for p in probs]
+            return predictions, probs
     else:
         raise ValueError()
 
+    if return_probs:
+        raise ValueError("Probabilities are only available from a classification head")
     return predictions

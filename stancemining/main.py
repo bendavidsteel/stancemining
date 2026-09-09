@@ -473,11 +473,12 @@ class StanceMining:
         target_df = target_df.with_columns(utils._filter_stance_targets(target_df['Targets']))
         return target_df['Targets'].to_list()
 
-    def _ask_llm_stance(self, docs, stance_targets, parent_docs=None):
+    def _ask_llm_stance(self, docs, stance_targets, parent_docs=None, return_probs=False):
         task = 'stance-classification' if self.stance_target_type == 'noun-phrases' else self.claim_entailment_task
         if self.stance_detection_llm_method == 'prompting':
             llm = self._get_llm()
             assert parent_docs is None, "Parent documents not supported for prompting stance detection"
+            assert not return_probs, "Prompted stance detection has no class probabilities"
             return prompting.ask_llm_zero_shot_stance(llm, docs, stance_targets, stance_target_type=self.stance_target_type, verbose=self.verbose)
         elif self.stance_detection_llm_method == 'finetuned':
             data = pl.DataFrame({'Text': docs, 'Target': stance_targets, 'ParentTexts': parent_docs})
@@ -485,11 +486,15 @@ class StanceMining:
                 # convert to list
                 data = data.with_columns(pl.col('ParentTexts').cast(pl.List(pl.String)))
             if self.model_inference == 'transformers':
+                assert not return_probs, "Class probabilities are only plumbed through the vLLM path"
                 results = finetune.get_predictions(task, data, self.stance_detection_finetune_kwargs, model_kwargs=self.stance_detection_model_kwargs)
             elif self.model_inference == 'vllm':
-                results = llms.get_vllm_predictions(task, data, self.stance_detection_finetune_kwargs, verbose=self.verbose, model_kwargs=self.stance_detection_model_kwargs, generate_kwargs=self.stance_detection_generation_kwargs)
+                results = llms.get_vllm_predictions(task, data, self.stance_detection_finetune_kwargs, verbose=self.verbose, model_kwargs=self.stance_detection_model_kwargs, generate_kwargs=self.stance_detection_generation_kwargs, return_probs=return_probs)
             else:
                 raise ValueError(f"Cannot run finetuned LLM with model_inference method: {self.model_inference}")
+            if return_probs:
+                results, probs = results
+                return [r.upper() for r in results], probs
             results = [r.upper() for r in results]
             return results
 
@@ -988,7 +993,8 @@ class StanceMining:
             self,
             document_df: pl.DataFrame,
             text_column='text',
-            parent_text_column='parent_text'
+            parent_text_column='parent_text',
+            return_probs=False
         ) -> pl.DataFrame:
         """Get stance classifications for the targets in the documents.
 
@@ -998,6 +1004,9 @@ class StanceMining:
                 Defaults to 'text'.
             parent_text_column (str): Name of the column containing the parent text in the DataFrame
                 Defaults to 'parent_text'.
+            return_probs (bool): Whether to add a 'Probs' column holding each target's class
+                probabilities, ordered by the task's label ids. Classification head only.
+                Defaults to False.
         
         Returns:
             pl.DataFrame: DataFrame containing the documents with their stance targets and classifications.
@@ -1007,21 +1016,28 @@ class StanceMining:
 
         target_df = document_df.explode('Targets').drop_nulls('Targets').rename({'Targets': 'Target'})
         parent_docs = target_df[parent_text_column] if parent_text_column in target_df.columns else None
-        target_stance = self._ask_llm_stance(target_df[text_column], target_df['Target'], parent_docs=parent_docs)
+        target_stance = self._ask_llm_stance(target_df[text_column], target_df['Target'],
+                                             parent_docs=parent_docs, return_probs=return_probs)
+        stance_columns = [pl.col('Target').alias('Targets'), pl.col('stance').alias('Stances')]
+        fill_columns = [pl.col('Targets').fill_null([]), pl.col('Stances').fill_null([])]
+        if return_probs:
+            target_stance, target_probs = target_stance
+            # cast rather than trust inference, which reads uniform width as a fixed size
+            # Array and would vary the schema with the number of classes
+            target_df = target_df.with_columns(
+                pl.Series(name='probs', values=target_probs).cast(pl.List(pl.Float32)))
+            stance_columns.append(pl.col('probs').alias('Probs'))
+            fill_columns.append(pl.col('Probs').fill_null([]))
         target_df = target_df.with_columns(pl.Series(name='stance', values=target_stance))
         
         document_df = document_df.drop('Targets')\
             .join(
-                target_df.group_by('ID')\
-                    .agg(pl.col('Target').alias('Targets'), pl.col('stance').alias('Stances')),
+                target_df.group_by('ID').agg(stance_columns),
                 on='ID',
                 how='left',
                 maintain_order='left'
             )\
-            .with_columns([
-                pl.col('Targets').fill_null([]),
-                pl.col('Stances').fill_null([])
-            ])
+            .with_columns(fill_columns)
         return document_df
 
     def get_target_info(self):
